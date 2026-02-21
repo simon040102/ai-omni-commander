@@ -1,0 +1,186 @@
+import { useEffect } from 'react';
+import { WsClient } from '../lib/wsClient';
+import { useWsStore } from '../stores/wsStore';
+import { useProjectStore } from '../stores/projectStore';
+import { useAgentStore } from '../stores/agentStore';
+import { useToastStore } from '../stores/toastStore';
+
+/**
+ * Connect to the server WebSocket and dispatch incoming messages to stores.
+ */
+export function useWebSocket() {
+  const setConnected = useWsStore(s => s.setConnected);
+  const setClient = useWsStore(s => s.setClient);
+  const setProjects = useProjectStore(s => s.setProjects);
+  const setProjectState = useProjectStore(s => s.setProjectState);
+  const updateTaskStatus = useProjectStore(s => s.updateTaskStatus);
+  const updateAgentStatus = useProjectStore(s => s.updateAgentStatus);
+  const addOrUpdateAgent = useProjectStore(s => s.addOrUpdateAgent);
+  const addIntervention = useProjectStore(s => s.addIntervention);
+  const appendOutput = useAgentStore(s => s.appendOutput);
+  const setOutputsBulk = useAgentStore(s => s.setOutputsBulk);
+  const addToast = useToastStore(s => s.addToast);
+
+  useEffect(() => {
+    const wsUrl = `ws://${window.location.host}/omni-ws`;
+
+    const client = new WsClient(
+      wsUrl,
+      (msg: Record<string, unknown>) => {
+        const type = msg['type'] as string;
+        const payload = msg['payload'] as Record<string, unknown>;
+
+        switch (type) {
+          case 'projects.list':
+            setProjects(payload['projects'] as Parameters<typeof setProjects>[0]);
+            break;
+
+          case 'project.state':
+            setProjectState(payload as Parameters<typeof setProjectState>[0]);
+            addToast({ type: 'success', title: 'Project loaded', message: `Project state received` });
+            break;
+
+          case 'project.agentOutputs': {
+            // Bulk load historical outputs for an agent (from DB)
+            const bulkAgentId = payload['agentId'] as string;
+            const bulkOutputs = payload['outputs'] as Array<{ streamType: string; content: string; timestamp: string }>;
+            if (bulkAgentId && bulkOutputs) {
+              setOutputsBulk(bulkAgentId, bulkOutputs.map(o => ({
+                streamType: o.streamType as 'text',
+                content: o.content,
+                timestamp: o.timestamp,
+              })));
+            }
+            break;
+          }
+
+          case 'agent.output': {
+            const agentId = payload['agentId'] as string;
+            appendOutput(agentId, {
+              streamType: payload['streamType'] as 'text',
+              content: payload['content'] as string,
+              toolName: payload['toolName'] as string | undefined,
+              timestamp: payload['timestamp'] as string,
+            });
+            break;
+          }
+
+          case 'agent.started': {
+            // A new agent was spawned — add it to the store
+            addOrUpdateAgent({
+              id: payload['agentId'] as string,
+              projectId: payload['projectId'] as string,
+              role: payload['role'] as string,
+              status: 'running',
+              currentTaskId: null,
+              model: '',
+              totalCostUsd: 0,
+              totalTurns: 0,
+            });
+            addToast({ type: 'info', title: 'Agent started', message: `${payload['role']} agent is now running` });
+            break;
+          }
+
+          case 'agent.statusChange': {
+            const newStatus = payload['newStatus'] as string;
+            updateAgentStatus(
+              payload['agentId'] as string,
+              newStatus,
+            );
+            if (newStatus === 'running') {
+              addToast({ type: 'info', title: 'Agent started', message: `Agent is now running` });
+            } else if (newStatus === 'error') {
+              addToast({ type: 'error', title: 'Agent error', message: `Agent encountered an error`, duration: 8000 });
+            } else if (newStatus === 'stopped') {
+              addToast({ type: 'info', title: 'Agent stopped' });
+            }
+            break;
+          }
+
+          case 'agent.completed': {
+            addOrUpdateAgent({
+              id: payload['agentId'] as string,
+              projectId: payload['projectId'] as string,
+              role: '',
+              status: 'stopped',
+              currentTaskId: null,
+              model: '',
+              totalCostUsd: (payload['costUsd'] as number) || 0,
+              totalTurns: (payload['turns'] as number) || 0,
+            });
+            addToast({ type: 'success', title: 'Agent completed', message: `Cost: $${((payload['costUsd'] as number) || 0).toFixed(4)}` });
+            break;
+          }
+
+          case 'task.statusChange': {
+            const taskStatus = payload['newStatus'] as string;
+            updateTaskStatus(
+              payload['taskId'] as string,
+              taskStatus,
+              payload['assignedAgentId'] as string | undefined,
+            );
+            if (taskStatus === 'failed') {
+              addToast({ type: 'error', title: 'Task failed', message: `Task ${payload['taskId']}`, duration: 8000 });
+            } else if (taskStatus === 'completed') {
+              addToast({ type: 'success', title: 'Task completed' });
+            }
+            break;
+          }
+
+          case 'intervention.request':
+            addIntervention({
+              id: payload['interventionId'] as string,
+              agentId: payload['agentId'] as string,
+              agentRole: payload['agentRole'] as string,
+              taskId: (payload['taskId'] as string) || null,
+              reason: payload['reason'] as string,
+              context: payload['context'] as string,
+              status: 'pending',
+            });
+            addToast({
+              type: 'warning',
+              title: 'Intervention needed',
+              message: payload['reason'] as string,
+              duration: 0, // persistent
+            });
+            break;
+
+          case 'interview.question':
+          case 'interview.specDraft':
+            // Handled by specific components
+            window.dispatchEvent(new CustomEvent('omni:interview', { detail: msg }));
+            break;
+
+          case 'error':
+            addToast({
+              type: 'error',
+              title: `Error: ${payload['code'] || 'unknown'}`,
+              message: payload['message'] as string,
+              duration: 10000,
+            });
+            break;
+
+          default:
+            // Log unhandled message types for debugging
+            console.log('[WS] unhandled message type:', type, payload);
+            break;
+        }
+      },
+      (connected) => {
+        setConnected(connected);
+        if (connected) {
+          addToast({ type: 'success', title: 'Connected to server', duration: 2000 });
+        } else {
+          addToast({ type: 'warning', title: 'Disconnected', message: 'Reconnecting...', duration: 3000 });
+        }
+      },
+    );
+
+    client.connect();
+    setClient(client);
+
+    return () => {
+      client.disconnect();
+    };
+  }, []);
+}

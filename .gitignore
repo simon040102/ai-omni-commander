@@ -1,0 +1,32 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.claude/
+
+# Database & uploads
+data/
+
+# Environment
+.env
+.env.local
+
+# AI Context runtime events (contracts are kept)
+.ai_context/events/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+web/dist/
+server/dist/
+shared/dist/
+
+# Logs
+*.log
