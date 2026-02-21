@@ -1,0 +1,26 @@
+{
+  "name": "ai-omni-commander",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AI-OmniCommander: Dual-mode collaborative development system orchestrating multiple Claude Code instances",
+  "workspaces": [
+    "shared",
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "dev": "concurrently -n server,web -c blue,green \"npm run dev -w server\" \"npm run dev -w web\"",
+    "dev:server": "npm run dev -w server",
+    "dev:web": "npm run dev -w web",
+    "typecheck": "tsc --build",
+    "clean": "rm -rf shared/dist server/dist web/dist node_modules/.cache"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
