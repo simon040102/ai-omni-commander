@@ -23,7 +23,7 @@ import { EventTypes } from '@omni/shared';
 
 async function main() {
   const config = getConfig();
-  logger.info({ claudePath: config.claudePath, port: config.port }, 'Starting AI-OmniCommander');
+  logger.info({ port: config.port }, 'Starting AI-OmniCommander (SDK mode)');
 
   // 1. Initialize database
   const db = getDb();
@@ -61,7 +61,7 @@ async function main() {
   app.get('/api/health', (_req, res) => {
     res.json({
       status: 'ok',
-      claudePath: config.claudePath,
+      mode: 'sdk',
       activeAgents: agentManager.getActiveAgents().length,
     });
   });

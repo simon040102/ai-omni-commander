@@ -52,12 +52,11 @@ export class CreativeModeHandler {
       `architect-${projectId}`,
       'architect',
       {
-        claudePath: config.claudePath,
         workingDir: project.workingDir || config.projectRoot,
         systemPrompt: roleConfig.systemPrompt,
         model: roleConfig.model,
         allowedTools: roleConfig.allowedTools,
-        // Note: sendInput() for follow-up requires session resume since stdin is closed after initial prompt
+        maxBudgetUsd: config.maxAgentBudgetUsd || undefined,
       },
     );
 
