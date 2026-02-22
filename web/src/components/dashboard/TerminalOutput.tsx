@@ -208,30 +208,37 @@ export function TerminalOutput({ outputs, title, role, status, agentId, onSendCo
 
       {/* Command input */}
       {agentId && onSendCommand && (() => {
-        const isActive = status === 'running' || status === 'starting';
+        // Allow sending to running, starting, or stopped agents (stopped agents can be resumed)
+        const canSend = status === 'running' || status === 'starting' || status === 'stopped';
+        const isRunning = status === 'running' || status === 'starting';
+        const placeholder = isRunning
+          ? 'Send instruction to agent...'
+          : status === 'stopped'
+            ? 'Send to resume agent session...'
+            : 'Agent is not available';
         return (
           <form
             className="flex items-center gap-2 px-3 py-2 bg-zinc-900 border-t border-border"
             onSubmit={(e) => {
               e.preventDefault();
-              if (isActive && commandInput.trim()) {
+              if (canSend && commandInput.trim()) {
                 onSendCommand(agentId, commandInput.trim());
                 setCommandInput('');
               }
             }}
           >
-            <span className={`text-xs select-none ${isActive ? 'text-primary' : 'text-muted-foreground/30'}`}>&gt;</span>
+            <span className={`text-xs select-none ${canSend ? 'text-primary' : 'text-muted-foreground/30'}`}>&gt;</span>
             <input
               type="text"
               value={commandInput}
               onChange={(e) => setCommandInput(e.target.value)}
-              placeholder={isActive ? 'Send instruction to agent...' : 'Agent is not running'}
-              disabled={!isActive}
+              placeholder={placeholder}
+              disabled={!canSend}
               className="flex-1 bg-transparent text-xs text-gray-200 font-mono outline-none placeholder:text-gray-600 disabled:opacity-40 disabled:cursor-not-allowed"
             />
             <button
               type="submit"
-              disabled={!isActive || !commandInput.trim()}
+              disabled={!canSend || !commandInput.trim()}
               className="inline-flex items-center gap-1 px-3 py-1 text-xs font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
             >
               <IconSend className="w-3 h-3" />
