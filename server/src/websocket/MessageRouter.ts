@@ -64,6 +64,21 @@ export function registerHandlers(
     sendProjectState(wsServer, ws, project.id);
   });
 
+  // PROJECT.CLEAR_DOCUMENTS — remove all old documents before a new execution round
+  wsServer.registerHandler('project.clearDocuments', async (msg: WsMessage, ws: WebSocket) => {
+    const { payload } = msg as unknown as { payload: { projectId: string } };
+    const specHandler = orchestrator.getSpecHandler();
+    const count = await specHandler.clearDocuments(payload.projectId);
+    logger.info({ projectId: payload.projectId, deletedCount: count }, 'Documents cleared for new execution');
+    // Send acknowledgment so frontend knows it's safe to upload new files
+    wsServer.send(ws, {
+      type: 'project.documentsCleared',
+      id: genId(),
+      timestamp: new Date().toISOString(),
+      payload: { projectId: payload.projectId, deletedCount: count },
+    } as WsMessage);
+  });
+
   // PROJECT.UPLOAD_DOCUMENT
   wsServer.registerHandler('project.uploadDocument', async (msg: WsMessage) => {
     const { payload } = msg as WsUploadDocument;

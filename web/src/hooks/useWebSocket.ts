@@ -19,6 +19,8 @@ export function useWebSocket() {
   const addIntervention = useProjectStore(s => s.addIntervention);
   const appendOutput = useAgentStore(s => s.appendOutput);
   const setOutputsBulk = useAgentStore(s => s.setOutputsBulk);
+  const clearOutputs = useAgentStore(s => s.clearOutputs);
+  const clearAllOutputs = useAgentStore(s => s.clearAll);
   const addToast = useToastStore(s => s.addToast);
 
   useEffect(() => {
@@ -36,6 +38,8 @@ export function useWebSocket() {
             break;
 
           case 'project.state':
+            // Clear all cached outputs on reconnect — fresh outputs will be loaded via project.agentOutputs
+            clearAllOutputs();
             setProjectState(payload as Parameters<typeof setProjectState>[0]);
             addToast({ type: 'success', title: 'Project loaded', message: `Project state received` });
             break;
@@ -62,6 +66,15 @@ export function useWebSocket() {
               toolName: payload['toolName'] as string | undefined,
               timestamp: payload['timestamp'] as string,
             });
+            break;
+          }
+
+          case 'agent.outputsCleared': {
+            // Server cleared outputs for an agent (rerun) — clear frontend terminal too
+            const clearedAgentId = payload['agentId'] as string;
+            if (clearedAgentId) {
+              clearOutputs(clearedAgentId);
+            }
             break;
           }
 

@@ -5,6 +5,7 @@ import type { ContextSync } from '../eventbus/ContextSync.js';
 import type { EventBus } from '../eventbus/EventBus.js';
 import { DocumentParser, type ParsedDocument } from '../documents/DocumentParser.js';
 import { updateProject, getProject } from '../db/queries/projects.js';
+import { getAgentsByRole } from '../db/queries/agents.js';
 import { getConfig } from '../config.js';
 import { createChildLogger } from '../utils/logger.js';
 import path from 'node:path';
@@ -79,9 +80,10 @@ export class SpecModeHandler {
     // Initialize .ai_context directory
     await this.contextSync.init();
 
-    // Spawn one agent per workspace
+    // Spawn or reuse one agent per workspace
     for (const ws of workspaces) {
       const role = ws.label.toLowerCase() as AgentRole;
+      const resolvedRole = this.resolveRole(role);
       const allowedDocTypes = DOC_ROUTING[role] || ['SA', 'SD', 'other'];
 
       // Filter documents for this workspace
@@ -97,17 +99,27 @@ export class SpecModeHandler {
 
       const prompt = this.buildWorkspacePrompt(ws, finalDocs, role, requirement);
 
-      logger.info(
-        { projectId, workspace: ws.label, role, docCount: finalDocs.length },
-        'Starting workspace agent',
-      );
-
-      await this.agentManager.startAgent({
-        projectId,
-        role: this.resolveRole(role),
-        prompt,
-        model: 'sonnet',
-      });
+      // Reuse existing agent for this role if available, otherwise create new
+      const existingAgents = getAgentsByRole(projectId, resolvedRole);
+      if (existingAgents.length > 0) {
+        const agent = existingAgents[0];
+        logger.info(
+          { projectId, workspace: ws.label, role: resolvedRole, agentId: agent.id, docCount: finalDocs.length },
+          'Rerunning existing agent with new prompt',
+        );
+        await this.agentManager.rerunAgent(agent.id, prompt);
+      } else {
+        logger.info(
+          { projectId, workspace: ws.label, role: resolvedRole, docCount: finalDocs.length },
+          'Starting new workspace agent',
+        );
+        await this.agentManager.startAgent({
+          projectId,
+          role: resolvedRole,
+          prompt,
+          model: 'sonnet',
+        });
+      }
     }
 
     logger.info({ projectId, workspaceCount: workspaces.length }, 'All workspace agents started');
@@ -200,6 +212,11 @@ ${this.getCompletionCriteria(role)}
   async processAgentResult(projectId: string, resultText: string): Promise<void> {
     // No longer used in the new direct-workspace flow
     logger.warn({ projectId }, 'processAgentResult called but no longer used in direct-workspace mode');
+  }
+
+  /** Clear all documents for a project */
+  async clearDocuments(projectId: string): Promise<number> {
+    return this.documentParser.deleteByProject(projectId);
   }
 
   getDocumentParser(): DocumentParser {

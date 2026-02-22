@@ -59,7 +59,7 @@ export function getConfig(): Config {
     port: parseInt(process.env['PORT'] || '3456', 10),
     dbPath: resolveDbPath(),
     defaultModel: process.env['DEFAULT_MODEL'] || 'sonnet',
-    maxAgentBudgetUsd: parseFloat(process.env['MAX_AGENT_BUDGET_USD'] || '5'),
+    maxAgentBudgetUsd: parseFloat(process.env['MAX_AGENT_BUDGET_USD'] || '20'),
     logLevel: process.env['LOG_LEVEL'] || 'info',
     projectRoot: PROJECT_ROOT,
     aiContextDir: path.join(PROJECT_ROOT, '.ai_context'),

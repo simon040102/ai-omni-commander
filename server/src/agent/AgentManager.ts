@@ -9,7 +9,7 @@ import { getAgentRoleConfig } from './AgentRoles.js';
 import { createAgent, updateAgent, getAgent, getAgentsByRole, getAgentsByProject } from '../db/queries/agents.js';
 import { getProject, updateProject } from '../db/queries/projects.js';
 import { updateTask, getTask } from '../db/queries/tasks.js';
-import { logAgentOutput, createIntervention } from '../db/queries/events.js';
+import { logAgentOutput, createIntervention, clearAgentOutputs } from '../db/queries/events.js';
 import type { EventBus } from '../eventbus/EventBus.js';
 import type { ContextSync } from '../eventbus/ContextSync.js';
 import { getConfig } from '../config.js';
@@ -140,6 +140,61 @@ export class AgentManager {
       prompt,
       model: agent.model,
     });
+  }
+
+  /** Rerun an existing agent with a new prompt (clears old outputs, starts fresh session) */
+  async rerunAgent(agentId: string, prompt: string): Promise<void> {
+    const agent = getAgent(agentId);
+    if (!agent) throw new Error(`Agent ${agentId} not found`);
+
+    // Stop if still running
+    const proc = this.processes.get(agentId);
+    if (proc) {
+      await proc.stop();
+      this.processes.delete(agentId);
+    }
+
+    // Clear old outputs so terminal starts fresh
+    clearAgentOutputs(agentId);
+
+    // Notify frontend to clear terminal for this agent
+    await this.eventBus.emit({
+      type: 'agent.outputsCleared',
+      source: agentId,
+      payload: { agentId, projectId: agent.projectId },
+      timestamp: new Date().toISOString(),
+    });
+
+    // Reset agent state
+    updateAgent(agentId, {
+      status: 'starting',
+      sessionId: null,
+      pid: null,
+      currentTaskId: null,
+    });
+
+    const appConfig = getConfig();
+    const roleConfig = getAgentRoleConfig(agent.role);
+
+    let systemPrompt = roleConfig.systemPrompt;
+    const contracts = await this.contextSync.readAllContracts();
+    if (contracts.length > 0) {
+      systemPrompt += `\n\nCurrent API Contracts:\n${JSON.stringify(contracts, null, 2)}`;
+    }
+
+    const newProc = new AgentProcess(agentId, agent.role, {
+      workingDir: this.getWorkingDir(agent.projectId, agent.role),
+      systemPrompt,
+      model: agent.model,
+      allowedTools: roleConfig.allowedTools,
+      maxBudgetUsd: appConfig.maxAgentBudgetUsd || undefined,
+    });
+
+    this.wireProcessEvents(newProc, agentId, agent.projectId, null);
+    this.processes.set(agentId, newProc);
+
+    await newProc.spawn(prompt);
+    logger.info({ agentId, role: agent.role }, 'Agent rerun with new prompt');
   }
 
   /** Resume an agent using its Claude session ID */
