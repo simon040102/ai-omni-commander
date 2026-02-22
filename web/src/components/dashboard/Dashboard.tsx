@@ -216,7 +216,18 @@ export function Dashboard({ onViewChange }: DashboardProps) {
                 <p className="text-xs text-muted-foreground">Upload new documents and start a new execution round</p>
               </div>
               <button
-                onClick={() => setShowNewExecution(true)}
+                onClick={() => {
+                  // Clear old documents before new execution round
+                  if (currentProjectId) {
+                    client?.send({
+                      type: 'project.clearDocuments',
+                      id: crypto.randomUUID(),
+                      timestamp: new Date().toISOString(),
+                      payload: { projectId: currentProjectId },
+                    });
+                  }
+                  setShowNewExecution(true);
+                }}
                 className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors shadow-sm"
               >
                 <IconPlay className="w-3.5 h-3.5" />
@@ -253,7 +264,7 @@ export function Dashboard({ onViewChange }: DashboardProps) {
                   Start Execution
                 </button>
                 <p className="text-[10px] text-muted-foreground">
-                  Uses all previously uploaded + new documents
+                  Previous documents cleared — only new uploads will be used
                 </p>
               </div>
             </div>

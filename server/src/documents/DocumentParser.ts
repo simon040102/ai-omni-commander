@@ -87,6 +87,30 @@ export class DocumentParser {
     }));
   }
 
+  /** Delete all documents for a project (DB rows + physical files) */
+  async deleteByProject(projectId: string): Promise<number> {
+    const db = getDb();
+    // Get file paths before deleting rows
+    const rows = db.prepare(
+      'SELECT file_path FROM documents WHERE project_id = ?'
+    ).all(projectId) as Array<{ file_path: string }>;
+
+    // Delete DB rows
+    const result = db.prepare('DELETE FROM documents WHERE project_id = ?').run(projectId);
+
+    // Delete physical files (best-effort)
+    for (const row of rows) {
+      try {
+        await fs.unlink(row.file_path);
+      } catch {
+        // File may already be gone — ignore
+      }
+    }
+
+    logger.info({ projectId, count: result.changes }, 'Documents cleared');
+    return result.changes;
+  }
+
   /** Get documents filtered by doc type */
   getDocumentsByType(projectId: string, docTypes: DocType[]): ParsedDocument[] {
     const docs = this.getDocuments(projectId);

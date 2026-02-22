@@ -83,6 +83,11 @@ export function getAgentOutputs(agentId: string, limit = 500): Array<{
   }));
 }
 
+export function clearAgentOutputs(agentId: string): void {
+  const db = getDb();
+  db.prepare('DELETE FROM agent_outputs WHERE agent_id = ?').run(agentId);
+}
+
 export function createIntervention(data: {
   projectId: string;
   agentId: string;
