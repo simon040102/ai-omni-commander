@@ -48,6 +48,7 @@ export function Dashboard({ onViewChange }: DashboardProps) {
   const [showAddAgent, setShowAddAgent] = useState(false);
   const [addAgentRole, setAddAgentRole] = useState('backend');
   const [addAgentPrompt, setAddAgentPrompt] = useState('');
+  const [confirmDeleteAgentId, setConfirmDeleteAgentId] = useState<string | null>(null);
 
   const project = projects.find(p => p.id === currentProjectId);
 
@@ -280,13 +281,30 @@ export function Dashboard({ onViewChange }: DashboardProps) {
             >
               {/* Delete button — always visible for non-running agents */}
               {agent.status !== 'running' && (
-                <button
-                  onClick={(e) => { e.stopPropagation(); handleDeleteAgent(agent.id); }}
-                  className="absolute top-1.5 right-1.5 p-0.5 rounded text-muted-foreground/40 hover:text-red-400 hover:bg-red-500/10 transition-colors"
-                  title="Remove agent"
-                >
-                  <IconX className="w-3 h-3" />
-                </button>
+                confirmDeleteAgentId === agent.id ? (
+                  <div className="absolute top-1 right-1 flex items-center gap-0.5 animate-fade-in" onClick={(e) => e.stopPropagation()}>
+                    <button
+                      onClick={() => { handleDeleteAgent(agent.id); setConfirmDeleteAgentId(null); }}
+                      className="text-[9px] text-red-400 hover:text-red-300 font-semibold px-1.5 py-0.5 bg-red-500/20 rounded"
+                    >
+                      Yes
+                    </button>
+                    <button
+                      onClick={() => setConfirmDeleteAgentId(null)}
+                      className="text-[9px] text-muted-foreground hover:text-foreground px-1 py-0.5"
+                    >
+                      No
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setConfirmDeleteAgentId(agent.id); }}
+                    className="absolute top-1.5 right-1.5 p-0.5 rounded text-muted-foreground/40 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+                    title="Remove agent"
+                  >
+                    <IconX className="w-3 h-3" />
+                  </button>
+                )
               )}
               <div className="flex items-center justify-between mb-1.5">
                 <span className={`text-[10px] font-bold capitalize px-1.5 py-0.5 rounded ${
