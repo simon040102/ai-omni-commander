@@ -92,7 +92,13 @@ export function DualTerminal({ focusAgentId }: DualTerminalProps) {
           ))
         ) : (
           <div className="flex items-center justify-center text-muted-foreground border border-border rounded-lg">
-            No agents running. Start a project to see output here.
+            <div className="text-center py-8">
+              <div className="w-12 h-12 mx-auto mb-3 rounded-xl bg-muted/50 flex items-center justify-center">
+                <span className="text-muted-foreground/30 text-xl font-mono">&gt;_</span>
+              </div>
+              <p className="text-sm">Awaiting Output</p>
+              <p className="text-xs text-muted-foreground/60 mt-1">Start a project to see terminal streams here</p>
+            </div>
           </div>
         )}
       </div>

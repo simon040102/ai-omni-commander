@@ -1,5 +1,7 @@
 import { useProjectStore } from '../../stores/projectStore';
 import { TaskCard } from './TaskCard';
+import { IconChecklist, IconPlus } from '../ui/Icons';
+import type { View } from '../layout/AppShell';
 
 const COLUMNS = [
   { key: 'pending', label: 'Pending', color: 'text-gray-400' },
@@ -10,26 +12,49 @@ const COLUMNS = [
   { key: 'failed', label: 'Failed', color: 'text-red-400' },
 ];
 
-export function TaskBoard() {
+interface TaskBoardProps {
+  onViewChange: (view: View) => void;
+}
+
+export function TaskBoard({ onViewChange }: TaskBoardProps) {
   const tasks = useProjectStore(s => s.tasks);
   const dependencies = useProjectStore(s => s.dependencies);
   const currentProjectId = useProjectStore(s => s.currentProjectId);
 
   if (!currentProjectId) {
     return (
-      <div className="flex items-center justify-center h-full text-muted-foreground">
-        No project selected
+      <div className="flex items-center justify-center h-full">
+        <div className="text-center max-w-sm">
+          <div className="w-16 h-16 mx-auto mb-5 rounded-2xl bg-muted/50 flex items-center justify-center">
+            <IconChecklist className="w-8 h-8 text-muted-foreground/40" />
+          </div>
+          <h3 className="text-lg font-semibold text-foreground mb-2">No Project Selected</h3>
+          <p className="text-sm text-muted-foreground mb-5">
+            Select a project from the sidebar to view its tasks.
+          </p>
+          <button
+            onClick={() => onViewChange('setup')}
+            className="inline-flex items-center gap-2 px-5 py-2.5 bg-primary text-primary-foreground rounded-lg text-sm font-semibold hover:bg-primary/90 transition-colors shadow-sm"
+          >
+            <IconPlus className="w-4 h-4" />
+            Create New Project
+          </button>
+        </div>
       </div>
     );
   }
 
   if (tasks.length === 0) {
     return (
-      <div className="flex items-center justify-center h-full text-muted-foreground">
-        <div className="text-center">
-          <div className="text-4xl mb-4">📋</div>
-          <p>No tasks yet</p>
-          <p className="text-sm mt-1">Tasks will appear after execution starts</p>
+      <div className="flex items-center justify-center h-full">
+        <div className="text-center max-w-sm">
+          <div className="w-16 h-16 mx-auto mb-5 rounded-2xl bg-muted/50 flex items-center justify-center">
+            <IconChecklist className="w-8 h-8 text-muted-foreground/40" />
+          </div>
+          <h3 className="text-lg font-semibold text-foreground mb-2">No Tasks Yet</h3>
+          <p className="text-sm text-muted-foreground">
+            Tasks will appear automatically once execution starts.
+          </p>
         </div>
       </div>
     );

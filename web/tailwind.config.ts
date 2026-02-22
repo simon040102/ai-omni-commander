@@ -44,6 +44,25 @@ export default {
         md: 'calc(var(--radius) - 2px)',
         sm: 'calc(var(--radius) - 4px)',
       },
+      animation: {
+        breathe: 'breathe 3s ease-in-out infinite',
+        'fade-in': 'fadeIn 0.15s ease-out',
+        'slide-in-right': 'slideInRight 0.2s ease-out',
+      },
+      keyframes: {
+        breathe: {
+          '0%, 100%': { opacity: '0.7' },
+          '50%': { opacity: '1' },
+        },
+        fadeIn: {
+          '0%': { opacity: '0' },
+          '100%': { opacity: '1' },
+        },
+        slideInRight: {
+          '0%': { transform: 'translateX(100%)', opacity: '0' },
+          '100%': { transform: 'translateX(0)', opacity: '1' },
+        },
+      },
     },
   },
   plugins: [],

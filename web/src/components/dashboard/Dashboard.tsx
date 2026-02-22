@@ -5,30 +5,36 @@ import { useWsStore } from '../../stores/wsStore';
 import { useToastStore } from '../../stores/toastStore';
 import { DualTerminal } from './DualTerminal';
 import { StepTracker } from './StepTracker';
-import { InterventionBell } from './InterventionBell';
 import { DocumentUpload } from '../project/DocumentUpload';
+import { IconStop, IconPlay, IconPlus, IconX, IconGrid, IconClock } from '../ui/Icons';
+import type { View } from '../layout/AppShell';
 
-const ROLE_COLORS: Record<string, string> = {
-  frontend: 'border-blue-500/40',
-  backend: 'border-purple-500/40',
-  master: 'border-yellow-500/40',
-  architect: 'border-orange-500/40',
-  devops: 'border-green-500/40',
-  testing: 'border-teal-500/40',
-  review: 'border-gray-500/40',
+/* ─── Role accent colors for left bar ─── */
+const ROLE_ACCENT: Record<string, string> = {
+  frontend: 'before:bg-blue-500',
+  backend: 'before:bg-purple-500',
+  master: 'before:bg-yellow-500',
+  architect: 'before:bg-orange-500',
+  devops: 'before:bg-green-500',
+  testing: 'before:bg-teal-500',
+  review: 'before:bg-gray-500',
 };
 
 const ROLE_BG: Record<string, string> = {
-  frontend: 'bg-blue-500/10',
-  backend: 'bg-purple-500/10',
-  master: 'bg-yellow-500/10',
-  architect: 'bg-orange-500/10',
-  devops: 'bg-green-500/10',
-  testing: 'bg-teal-500/10',
-  review: 'bg-gray-500/10',
+  frontend: 'bg-blue-500/10 text-blue-400',
+  backend: 'bg-purple-500/10 text-purple-400',
+  master: 'bg-yellow-500/10 text-yellow-400',
+  architect: 'bg-orange-500/10 text-orange-400',
+  devops: 'bg-green-500/10 text-green-400',
+  testing: 'bg-teal-500/10 text-teal-400',
+  review: 'bg-gray-500/10 text-gray-400',
 };
 
-export function Dashboard() {
+interface DashboardProps {
+  onViewChange: (view: View) => void;
+}
+
+export function Dashboard({ onViewChange }: DashboardProps) {
   const currentProjectId = useProjectStore(s => s.currentProjectId);
   const projects = useProjectStore(s => s.projects);
   const agents = useProjectStore(s => s.agents);
@@ -48,7 +54,6 @@ export function Dashboard() {
   // Elapsed time counter
   useEffect(() => {
     if (!project) return;
-    // SQLite datetime('now') is UTC but missing 'Z' suffix; append it
     const dateStr = project.createdAt.endsWith('Z') ? project.createdAt : project.createdAt + 'Z';
     const start = new Date(dateStr).getTime();
     const interval = setInterval(() => {
@@ -119,13 +124,25 @@ export function Dashboard() {
     setAddAgentPrompt('');
   }, [currentProjectId, client, addToast, addAgentRole, addAgentPrompt]);
 
+  /* ─── Empty state ─── */
   if (!currentProjectId || !project) {
     return (
-      <div className="flex items-center justify-center h-full text-muted-foreground">
-        <div className="text-center">
-          <div className="text-4xl mb-4">🤖</div>
-          <p className="text-lg">No project selected</p>
-          <p className="text-sm mt-2">Create a new project or select one from the sidebar</p>
+      <div className="flex items-center justify-center h-full">
+        <div className="text-center max-w-sm">
+          <div className="w-20 h-20 mx-auto mb-6 rounded-2xl bg-muted/50 flex items-center justify-center">
+            <IconGrid className="w-10 h-10 text-muted-foreground/40" />
+          </div>
+          <h3 className="text-lg font-semibold text-foreground mb-2">No Project Selected</h3>
+          <p className="text-sm text-muted-foreground mb-6">
+            Create a new project to start orchestrating AI agents, or select an existing one from the sidebar.
+          </p>
+          <button
+            onClick={() => onViewChange('setup')}
+            className="inline-flex items-center gap-2 px-5 py-2.5 bg-primary text-primary-foreground rounded-lg text-sm font-semibold hover:bg-primary/90 transition-colors shadow-sm"
+          >
+            <IconPlus className="w-4 h-4" />
+            Create New Project
+          </button>
         </div>
       </div>
     );
@@ -137,65 +154,58 @@ export function Dashboard() {
 
   return (
     <div className="flex flex-col gap-3 h-full">
-      {/* Project overview header */}
+      {/* ─── Project overview header with stats ─── */}
       <div className="bg-card border border-border rounded-lg p-3">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-4">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div className="flex items-center gap-3">
             <div>
               <h2 className="text-sm font-bold">{project.name}</h2>
-              <div className="flex items-center gap-3 mt-0.5">
-                <span className={`text-xs px-1.5 py-0.5 rounded ${
-                  project.status === 'executing' ? 'bg-green-500/20 text-green-400' :
-                  project.status === 'completed' ? 'bg-blue-500/20 text-blue-400' :
-                  project.status === 'failed' ? 'bg-red-500/20 text-red-400' :
+              <div className="flex items-center gap-2 mt-0.5">
+                <span className={`text-[10px] px-1.5 py-0.5 rounded ${
+                  project.status === 'executing' ? 'bg-green-500/15 text-green-400' :
+                  project.status === 'completed' ? 'bg-blue-500/15 text-blue-400' :
+                  project.status === 'failed' ? 'bg-red-500/15 text-red-400' :
                   'bg-muted text-muted-foreground'
                 }`}>
                   {project.status}
                 </span>
-                <span className="text-xs text-muted-foreground">{project.mode} mode</span>
+                <span className="text-[10px] text-muted-foreground">{project.mode} mode</span>
               </div>
             </div>
           </div>
-          <div className="flex items-center gap-6">
-            {/* Stats */}
-            <div className="flex items-center gap-4 text-xs">
-              <div className="text-center">
-                <div className="text-foreground font-mono font-bold">{elapsed}</div>
-                <div className="text-muted-foreground">elapsed</div>
-              </div>
-              <div className="text-center">
-                <div className="text-foreground font-mono font-bold">{runningAgents.length}/{agents.length}</div>
-                <div className="text-muted-foreground">agents</div>
-              </div>
-              <div className="text-center">
-                <div className="text-foreground font-mono font-bold">${totalCost.toFixed(4)}</div>
-                <div className="text-muted-foreground">cost</div>
-              </div>
-              <div className="text-center">
-                <div className="text-foreground font-mono font-bold">{totalTurns}</div>
-                <div className="text-muted-foreground">turns</div>
-              </div>
-            </div>
-            {/* Quick actions */}
+
+          <div className="flex items-center gap-3">
+            {/* Stat cards */}
             <div className="flex items-center gap-2">
-              {runningAgents.length > 0 && (
-                <button
-                  onClick={handleStopAll}
-                  className="px-2.5 py-1 text-xs bg-red-500/20 text-red-400 rounded hover:bg-red-500/30 transition-colors"
-                >
-                  Stop All
-                </button>
-              )}
-              <InterventionBell />
+              <StatCard icon={<IconClock className="w-3.5 h-3.5" />} label="Elapsed" value={elapsed} />
+              <StatCard
+                icon={<span className="text-xs">A</span>}
+                label="Agents"
+                value={`${runningAgents.length}/${agents.length}`}
+                accent={runningAgents.length > 0 ? 'text-green-400' : undefined}
+              />
+              <StatCard icon={<span className="text-xs font-mono">$</span>} label="Cost" value={`$${totalCost.toFixed(4)}`} />
+              <StatCard icon={<span className="text-xs">T</span>} label="Turns" value={String(totalTurns)} />
             </div>
+
+            {/* Actions */}
+            {runningAgents.length > 0 && (
+              <button
+                onClick={handleStopAll}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-red-500/10 text-red-400 border border-red-500/20 rounded-lg hover:bg-red-500/20 transition-colors"
+              >
+                <IconStop className="w-3 h-3" />
+                Stop All
+              </button>
+            )}
           </div>
         </div>
       </div>
 
-      {/* Step tracker */}
+      {/* ─── Step tracker ─── */}
       <StepTracker />
 
-      {/* New Execution panel — visible when no agents are running */}
+      {/* ─── New Execution panel ─── */}
       {runningAgents.length === 0 && agents.length > 0 && (
         <div className="bg-card border border-border rounded-lg p-3">
           {!showNewExecution ? (
@@ -206,8 +216,9 @@ export function Dashboard() {
               </div>
               <button
                 onClick={() => setShowNewExecution(true)}
-                className="px-3 py-1.5 text-xs bg-primary text-primary-foreground rounded hover:bg-primary/90 transition-colors"
+                className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors shadow-sm"
               >
+                <IconPlay className="w-3.5 h-3.5" />
                 New Execution
               </button>
             </div>
@@ -217,31 +228,30 @@ export function Dashboard() {
                 <h3 className="text-sm font-medium">New Execution Round</h3>
                 <button
                   onClick={() => setShowNewExecution(false)}
-                  className="text-xs text-muted-foreground hover:text-foreground"
+                  className="px-2.5 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted rounded-md transition-colors"
                 >
                   Cancel
                 </button>
               </div>
-              {/* Requirement input */}
               <div>
                 <label className="block text-xs font-medium mb-1">Requirement / Instructions</label>
                 <textarea
                   value={newRequirement}
                   onChange={(e) => setNewRequirement(e.target.value)}
                   placeholder="Describe what you want the agents to implement this round..."
-                  className="w-full bg-muted border border-border rounded-md px-3 py-2 text-sm min-h-[80px] resize-y"
+                  className="w-full bg-muted border border-border rounded-md px-3 py-2 text-sm min-h-[80px] resize-y focus:ring-1 focus:ring-primary/50 focus:border-primary outline-none"
                 />
               </div>
-
               <DocumentUpload projectId={currentProjectId} />
-              <div className="flex gap-2 pt-2 border-t border-border">
+              <div className="flex items-center gap-3 pt-2 border-t border-border">
                 <button
                   onClick={handleNewExecution}
-                  className="px-3 py-1.5 text-xs bg-green-600 hover:bg-green-700 text-white rounded transition-colors"
+                  className="inline-flex items-center gap-1.5 px-5 py-2.5 text-sm font-semibold bg-green-600 hover:bg-green-500 text-white rounded-lg shadow-lg shadow-green-600/20 hover:shadow-green-500/30 transition-all"
                 >
-                  Start Execution (with all documents)
+                  <IconPlay className="w-3.5 h-3.5" />
+                  Start Execution
                 </button>
-                <p className="text-[10px] text-muted-foreground self-center">
+                <p className="text-[10px] text-muted-foreground">
                   Uses all previously uploaded + new documents
                 </p>
               </div>
@@ -250,7 +260,7 @@ export function Dashboard() {
         </div>
       )}
 
-      {/* Agent summary cards */}
+      {/* ─── Agent summary cards ─── */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
         {agents.map(agent => {
           const agentOutputs = outputs[agent.id] || [];
@@ -260,29 +270,32 @@ export function Dashboard() {
           return (
             <div
               key={agent.id}
-              className={`group relative text-left bg-card border rounded-lg p-2.5 transition-all hover:bg-muted/50 cursor-pointer ${
-                ROLE_COLORS[agent.role] || 'border-border'
-              } ${isFocused ? 'ring-1 ring-primary' : ''}`}
+              className={`relative text-left bg-card border border-border rounded-lg p-3 pl-4 transition-all hover:bg-muted/50 hover:scale-[1.02] cursor-pointer overflow-hidden
+                before:absolute before:left-0 before:top-0 before:bottom-0 before:w-1 before:rounded-l-lg
+                ${ROLE_ACCENT[agent.role] || 'before:bg-gray-500'}
+                ${agent.status === 'running' ? 'before:shadow-[0_0_8px_rgba(34,197,94,0.3)]' : ''}
+                ${isFocused ? 'ring-1 ring-primary' : ''}
+              `}
               onClick={() => setFocusAgentId(isFocused ? null : agent.id)}
             >
-              {/* Delete button — top right, visible on hover */}
+              {/* Delete button — always visible for non-running agents */}
               {agent.status !== 'running' && (
                 <button
                   onClick={(e) => { e.stopPropagation(); handleDeleteAgent(agent.id); }}
-                  className="absolute top-1 right-1 hidden group-hover:block text-[10px] text-muted-foreground hover:text-red-400 px-1"
+                  className="absolute top-1.5 right-1.5 p-0.5 rounded text-muted-foreground/40 hover:text-red-400 hover:bg-red-500/10 transition-colors"
                   title="Remove agent"
                 >
-                  x
+                  <IconX className="w-3 h-3" />
                 </button>
               )}
-              <div className="flex items-center justify-between mb-1">
-                <span className={`text-xs font-bold capitalize px-1.5 py-0.5 rounded ${
-                  ROLE_BG[agent.role] || 'bg-muted'
+              <div className="flex items-center justify-between mb-1.5">
+                <span className={`text-[10px] font-bold capitalize px-1.5 py-0.5 rounded ${
+                  ROLE_BG[agent.role] || 'bg-muted text-muted-foreground'
                 }`}>
                   {agent.role}
                 </span>
                 <span className={`w-2 h-2 rounded-full flex-shrink-0 ${
-                  agent.status === 'running' ? 'bg-green-500 animate-pulse' :
+                  agent.status === 'running' ? 'bg-green-500 animate-breathe' :
                   agent.status === 'error' ? 'bg-red-500' :
                   agent.status === 'stopped' ? 'bg-gray-500' :
                   'bg-yellow-500'
@@ -290,8 +303,14 @@ export function Dashboard() {
               </div>
               <div className="text-[10px] text-muted-foreground space-y-0.5">
                 <div className="flex justify-between">
-                  <span>{agent.status}</span>
-                  <span>${agent.totalCostUsd.toFixed(4)}</span>
+                  <span className={
+                    agent.status === 'running' ? 'text-green-400' :
+                    agent.status === 'error' ? 'text-red-400' :
+                    ''
+                  }>
+                    {agent.status}
+                  </span>
+                  <span className="font-mono">${agent.totalCostUsd.toFixed(4)}</span>
                 </div>
                 <div className="flex justify-between">
                   <span>{toolCalls} tools</span>
@@ -306,20 +325,26 @@ export function Dashboard() {
         {!showAddAgent ? (
           <button
             onClick={() => setShowAddAgent(true)}
-            className="border border-dashed border-border rounded-lg p-2.5 text-muted-foreground hover:text-foreground hover:border-primary/50 transition-colors flex items-center justify-center text-xs"
+            className="border border-dashed border-border rounded-lg p-3 text-muted-foreground hover:text-foreground hover:border-primary/50 hover:bg-primary/5 transition-all flex items-center justify-center gap-1.5 text-xs"
           >
-            + Add Agent
+            <IconPlus className="w-3.5 h-3.5" />
+            Add Agent
           </button>
         ) : (
-          <div className="border border-border rounded-lg p-2.5 col-span-2 space-y-2">
+          <div className="border border-border rounded-lg p-3 col-span-2 space-y-2 animate-fade-in">
             <div className="flex items-center justify-between">
               <span className="text-xs font-medium">Add Agent</span>
-              <button onClick={() => setShowAddAgent(false)} className="text-[10px] text-muted-foreground hover:text-foreground">x</button>
+              <button
+                onClick={() => setShowAddAgent(false)}
+                className="p-0.5 text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors"
+              >
+                <IconX className="w-3 h-3" />
+              </button>
             </div>
             <select
               value={addAgentRole}
               onChange={(e) => setAddAgentRole(e.target.value)}
-              className="w-full bg-muted border border-border rounded px-2 py-1 text-xs"
+              className="w-full bg-muted border border-border rounded-md px-2 py-1.5 text-xs focus:ring-1 focus:ring-primary/50 focus:border-primary outline-none"
             >
               <option value="frontend">Frontend</option>
               <option value="backend">Backend</option>
@@ -331,22 +356,41 @@ export function Dashboard() {
               value={addAgentPrompt}
               onChange={(e) => setAddAgentPrompt(e.target.value)}
               placeholder="Prompt / instructions for this agent..."
-              className="w-full bg-muted border border-border rounded px-2 py-1 text-xs min-h-[60px] resize-y"
+              className="w-full bg-muted border border-border rounded-md px-2 py-1.5 text-xs min-h-[60px] resize-y focus:ring-1 focus:ring-primary/50 focus:border-primary outline-none"
             />
             <button
               onClick={handleAddAgent}
               disabled={!addAgentPrompt.trim()}
-              className="w-full px-2 py-1 text-xs bg-primary text-primary-foreground rounded disabled:opacity-50"
+              className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-primary text-primary-foreground rounded-lg disabled:opacity-40 disabled:cursor-not-allowed hover:bg-primary/90 transition-colors"
             >
+              <IconPlay className="w-3 h-3" />
               Start Agent
             </button>
           </div>
         )}
       </div>
 
-      {/* Dual terminal */}
+      {/* ─── Terminal area ─── */}
       <div className="flex-1 min-h-0">
         <DualTerminal focusAgentId={focusAgentId} />
+      </div>
+    </div>
+  );
+}
+
+/* ─── Stat card helper ─── */
+function StatCard({ icon, label, value, accent }: {
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+  accent?: string;
+}) {
+  return (
+    <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-md bg-muted/50">
+      <span className={`${accent || 'text-muted-foreground'}`}>{icon}</span>
+      <div>
+        <div className={`text-xs font-mono font-bold leading-tight ${accent || 'text-foreground'}`}>{value}</div>
+        <div className="text-[10px] text-muted-foreground leading-tight">{label}</div>
       </div>
     </div>
   );

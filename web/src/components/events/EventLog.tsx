@@ -1,5 +1,6 @@
 import { useAgentStore, type AgentOutput } from '../../stores/agentStore';
 import { useProjectStore } from '../../stores/projectStore';
+import { IconClock } from '../ui/Icons';
 
 export function EventLog() {
   const outputs = useAgentStore(s => s.outputs);
@@ -34,8 +35,16 @@ export function EventLog() {
 
       <div className="flex-1 overflow-auto">
         {recent.length === 0 ? (
-          <div className="text-center text-muted-foreground py-12">
-            No events yet. Start a project to see activity.
+          <div className="flex items-center justify-center h-full">
+            <div className="text-center max-w-sm">
+              <div className="w-16 h-16 mx-auto mb-5 rounded-2xl bg-muted/50 flex items-center justify-center">
+                <IconClock className="w-8 h-8 text-muted-foreground/40" />
+              </div>
+              <h3 className="text-lg font-semibold text-foreground mb-2">No Activity Yet</h3>
+              <p className="text-sm text-muted-foreground">
+                Events stream in real time once agents start working.
+              </p>
+            </div>
           </div>
         ) : (
           <div className="space-y-1">
@@ -45,12 +54,13 @@ export function EventLog() {
                   {new Date(event.timestamp).toLocaleTimeString()}
                 </span>
                 <span className={`px-1.5 py-0.5 rounded whitespace-nowrap ${
-                  event.agentRole === 'backend' ? 'bg-orange-500/20 text-orange-400' :
-                  event.agentRole === 'frontend' ? 'bg-blue-500/20 text-blue-400' :
-                  event.agentRole === 'master' ? 'bg-purple-500/20 text-purple-400' :
-                  event.agentRole === 'review' ? 'bg-emerald-500/20 text-emerald-400' :
-                  event.agentRole === 'testing' ? 'bg-yellow-500/20 text-yellow-400' :
-                  'bg-gray-500/20 text-gray-400'
+                  event.agentRole === 'backend' ? 'bg-purple-500/15 text-purple-400' :
+                  event.agentRole === 'frontend' ? 'bg-blue-500/15 text-blue-400' :
+                  event.agentRole === 'master' ? 'bg-yellow-500/15 text-yellow-400' :
+                  event.agentRole === 'review' ? 'bg-gray-500/15 text-gray-400' :
+                  event.agentRole === 'testing' ? 'bg-teal-500/15 text-teal-400' :
+                  event.agentRole === 'architect' ? 'bg-orange-500/15 text-orange-400' :
+                  'bg-gray-500/15 text-gray-400'
                 }`}>
                   {event.agentRole}
                 </span>

@@ -5,14 +5,15 @@ import { ToastContainer } from '../ui/ToastContainer';
 import { useWebSocket } from '../../hooks/useWebSocket';
 import { useProjectStore } from '../../stores/projectStore';
 
-type View = 'dashboard' | 'tasks' | 'setup' | 'events';
+export type View = 'dashboard' | 'tasks' | 'setup' | 'events';
 
 interface AppShellProps {
-  children: (view: View) => React.ReactNode;
+  children: (view: View, onViewChange: (v: View) => void) => React.ReactNode;
 }
 
 export function AppShell({ children }: AppShellProps) {
   const [currentView, setCurrentView] = useState<View>('setup');
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const agents = useProjectStore(s => s.agents);
   const hasAutoSwitched = useRef(false);
 
@@ -29,11 +30,19 @@ export function AppShell({ children }: AppShellProps) {
 
   return (
     <div className="h-screen flex flex-col bg-background">
-      <Header />
+      <Header
+        currentView={currentView}
+        onViewChange={setCurrentView}
+      />
       <div className="flex-1 flex overflow-hidden">
-        <Sidebar currentView={currentView} onViewChange={setCurrentView} />
+        <Sidebar
+          currentView={currentView}
+          onViewChange={setCurrentView}
+          collapsed={sidebarCollapsed}
+          onToggleCollapse={() => setSidebarCollapsed(c => !c)}
+        />
         <main className="flex-1 overflow-auto p-4">
-          {children(currentView)}
+          {children(currentView, setCurrentView)}
         </main>
       </div>
       <ToastContainer />
