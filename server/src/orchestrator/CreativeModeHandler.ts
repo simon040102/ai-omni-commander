@@ -56,7 +56,6 @@ export class CreativeModeHandler {
         systemPrompt: roleConfig.systemPrompt,
         model: roleConfig.model,
         allowedTools: roleConfig.allowedTools,
-        maxBudgetUsd: config.maxAgentBudgetUsd || undefined,
       },
     );
 

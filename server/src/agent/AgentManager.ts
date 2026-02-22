@@ -33,7 +33,6 @@ export class AgentManager {
 
   /** Start an agent for a specific task */
   async startAgent(config: AgentStartConfig): Promise<string> {
-    const appConfig = getConfig();
     const roleConfig = getAgentRoleConfig(config.role);
 
     // Build enhanced system prompt with context
@@ -64,7 +63,6 @@ export class AgentManager {
       systemPrompt,
       model: config.model || roleConfig.model,
       allowedTools: roleConfig.allowedTools,
-      maxBudgetUsd: appConfig.maxAgentBudgetUsd || undefined,
     });
 
     // Wire up event handlers
@@ -173,7 +171,6 @@ export class AgentManager {
       currentTaskId: null,
     });
 
-    const appConfig = getConfig();
     const roleConfig = getAgentRoleConfig(agent.role);
 
     let systemPrompt = roleConfig.systemPrompt;
@@ -187,7 +184,6 @@ export class AgentManager {
       systemPrompt,
       model: agent.model,
       allowedTools: roleConfig.allowedTools,
-      maxBudgetUsd: appConfig.maxAgentBudgetUsd || undefined,
     });
 
     this.wireProcessEvents(newProc, agentId, agent.projectId, null);
@@ -205,13 +201,11 @@ export class AgentManager {
     } else {
       const agent = getAgent(agentId);
       if (!agent || !agent.sessionId) throw new Error('No session to resume');
-      const cfg = getConfig();
       // Create new process with session resume
       const newProc = new AgentProcess(agentId, agent.role, {
         workingDir: this.getWorkingDir(agent.projectId, agent.role),
         sessionId: agent.sessionId,
         model: agent.model,
-        maxBudgetUsd: cfg.maxAgentBudgetUsd || undefined,
       });
 
       // Wire up event handlers (same as startAgent)

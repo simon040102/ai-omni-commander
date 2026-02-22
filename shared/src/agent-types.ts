@@ -40,7 +40,6 @@ export interface AgentSpawnConfig {
   model?: string;
   allowedTools?: string[];
   sessionId?: string;
-  maxBudgetUsd?: number;
 }
 
 export interface AgentStartConfig {

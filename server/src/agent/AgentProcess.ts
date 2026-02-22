@@ -52,7 +52,6 @@ export class AgentProcess extends EventEmitter {
         allowedTools: this.config.allowedTools,
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
-        maxBudgetUsd: this.config.maxBudgetUsd,
         resume: this.config.sessionId || undefined,
         sessionId: (!this.config.sessionId && this._sessionId) ? this._sessionId : undefined,
         // Load project-level CLAUDE.md and .claude/settings.json
