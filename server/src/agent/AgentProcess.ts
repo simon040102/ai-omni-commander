@@ -43,6 +43,20 @@ export class AgentProcess extends EventEmitter {
 
     logger.info({ agentId: this.agentId, role: this.role, promptLen: safePrompt.length }, 'Spawning agent via SDK');
 
+    // Create env without CLAUDECODE to avoid nested session detection (needed for all platforms)
+    const cleanEnv = { ...process.env };
+    delete cleanEnv['CLAUDECODE'];
+
+    // Platform-specific permission settings
+    const isMac = process.platform === 'darwin';
+
+    // Mac: Use bypassPermissions (requires prior `claude --dangerously-skip-permissions` acceptance)
+    // Windows/Linux: Use acceptEdits (auto-accepts file edits, no prior setup needed)
+    const permissionMode = isMac ? 'bypassPermissions' : 'acceptEdits';
+    const allowDangerouslySkipPermissions = isMac ? true : undefined;
+
+    logger.info({ platform: process.platform, permissionMode }, 'Using platform-specific permission mode');
+
     this._query = query({
       prompt: safePrompt,
       options: {
@@ -50,12 +64,14 @@ export class AgentProcess extends EventEmitter {
         model: this.config.model,
         systemPrompt: this.config.systemPrompt,
         allowedTools: this.config.allowedTools,
-        permissionMode: 'bypassPermissions',
-        allowDangerouslySkipPermissions: true,
+        permissionMode,
+        ...(allowDangerouslySkipPermissions && { allowDangerouslySkipPermissions }),
         resume: this.config.sessionId || undefined,
         sessionId: (!this.config.sessionId && this._sessionId) ? this._sessionId : undefined,
         // Load project-level CLAUDE.md and .claude/settings.json
         settingSources: ['project'],
+        // Avoid nested session detection
+        env: cleanEnv,
       },
     });
 
