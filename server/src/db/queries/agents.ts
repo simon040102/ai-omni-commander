@@ -76,7 +76,14 @@ export function updateAgent(id: string, data: Partial<{
 
 export function deleteAgent(id: string): void {
   const db = getDb();
-  db.prepare('DELETE FROM agents WHERE id = ?').run(id);
+  const del = db.transaction(() => {
+    // Clear FK references that lack ON DELETE CASCADE
+    db.prepare('UPDATE tasks SET assigned_agent_id = NULL WHERE assigned_agent_id = ?').run(id);
+    db.prepare('DELETE FROM interventions WHERE agent_id = ?').run(id);
+    // agent_outputs has ON DELETE CASCADE, so it's handled automatically
+    db.prepare('DELETE FROM agents WHERE id = ?').run(id);
+  });
+  del();
 }
 
 function mapAgent(row: Record<string, unknown>): Agent {

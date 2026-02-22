@@ -35,7 +35,6 @@ export interface Agent {
 }
 
 export interface AgentSpawnConfig {
-  claudePath: string;
   workingDir: string;
   systemPrompt?: string;
   model?: string;

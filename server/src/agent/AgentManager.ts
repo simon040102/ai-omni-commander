@@ -60,7 +60,6 @@ export class AgentManager {
 
     // Create AgentProcess
     const proc = new AgentProcess(agent.id, config.role, {
-      claudePath: appConfig.claudePath,
       workingDir: this.getWorkingDir(config.projectId, config.role),
       systemPrompt,
       model: config.model || roleConfig.model,
@@ -151,13 +150,13 @@ export class AgentManager {
     } else {
       const agent = getAgent(agentId);
       if (!agent || !agent.sessionId) throw new Error('No session to resume');
+      const cfg = getConfig();
       // Create new process with session resume
-      const appConfig = getConfig();
       const newProc = new AgentProcess(agentId, agent.role, {
-        claudePath: appConfig.claudePath,
         workingDir: this.getWorkingDir(agent.projectId, agent.role),
         sessionId: agent.sessionId,
         model: agent.model,
+        maxBudgetUsd: cfg.maxAgentBudgetUsd || undefined,
       });
 
       // Wire up event handlers (same as startAgent)
