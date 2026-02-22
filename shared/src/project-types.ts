@@ -29,7 +29,6 @@ export interface ProjectConfig {
   workspaces?: Workspace[];
   maxConcurrentAgents?: number;
   defaultModel?: string;
-  maxBudgetUsd?: number;
   autoReview?: boolean;
   autoTest?: boolean;
 }
