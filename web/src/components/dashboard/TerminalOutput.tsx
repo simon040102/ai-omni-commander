@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useMemo } from 'react';
 import type { AgentOutput } from '../../stores/agentStore';
+import { IconSearch, IconStop, IconRefresh, IconSend, IconChevronDown } from '../ui/Icons';
 
 const STREAM_COLORS: Record<string, string> = {
   text: 'text-gray-200',
@@ -7,14 +8,6 @@ const STREAM_COLORS: Record<string, string> = {
   tool_result: 'text-gray-500',
   error: 'text-red-400',
   system: 'text-yellow-400',
-};
-
-const STREAM_LABELS: Record<string, string> = {
-  text: '',
-  tool_use: '',
-  tool_result: '',
-  error: 'ERR ',
-  system: 'SYS ',
 };
 
 interface TerminalOutputProps {
@@ -30,6 +23,7 @@ interface TerminalOutputProps {
 export function TerminalOutput({ outputs, title, role, status, agentId, onSendCommand, onAction }: TerminalOutputProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const autoScrollRef = useRef(true);
+  const [isAutoScroll, setIsAutoScroll] = useState(true);
   const [commandInput, setCommandInput] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [showSearch, setShowSearch] = useState(false);
@@ -44,7 +38,17 @@ export function TerminalOutput({ outputs, title, role, status, agentId, onSendCo
   const handleScroll = () => {
     if (!scrollRef.current) return;
     const { scrollTop, scrollHeight, clientHeight } = scrollRef.current;
-    autoScrollRef.current = scrollHeight - scrollTop - clientHeight < 50;
+    const atBottom = scrollHeight - scrollTop - clientHeight < 50;
+    autoScrollRef.current = atBottom;
+    setIsAutoScroll(atBottom);
+  };
+
+  const scrollToBottom = () => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+      autoScrollRef.current = true;
+      setIsAutoScroll(true);
+    }
   };
 
   // Filter and search outputs
@@ -69,68 +73,68 @@ export function TerminalOutput({ outputs, title, role, status, agentId, onSendCo
       <div className="flex items-center justify-between px-3 py-1.5 bg-card border-b border-border">
         <div className="flex items-center gap-2">
           <span className="font-mono text-sm font-bold">{title}</span>
-          {role && (
-            <span className="text-[10px] px-1.5 py-0.5 rounded bg-secondary text-secondary-foreground">
-              {role}
-            </span>
-          )}
           <span className="text-[10px] text-muted-foreground">
             {outputs.length} lines
             {toolCount > 0 && ` | ${toolCount} tools`}
             {errorCount > 0 && ` | ${errorCount} errors`}
           </span>
         </div>
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1">
           {/* Search toggle */}
           <button
             onClick={() => { setShowSearch(!showSearch); if (showSearch) setSearchQuery(''); }}
-            className={`px-1.5 py-0.5 rounded text-[10px] transition-colors ${
-              showSearch ? 'bg-primary/20 text-primary' : 'text-muted-foreground hover:text-foreground'
+            className={`p-1 rounded transition-colors ${
+              showSearch ? 'bg-primary/20 text-primary' : 'text-muted-foreground hover:text-foreground hover:bg-muted'
             }`}
             title="Search output"
           >
-            &#x1F50D;
+            <IconSearch className="w-3.5 h-3.5" />
           </button>
           {/* Filter buttons */}
           {(['text', 'tool_use', 'error'] as const).map(type => (
             <button
               key={type}
               onClick={() => setFilterType(filterType === type ? null : type)}
-              className={`px-1.5 py-0.5 rounded text-[10px] transition-colors ${
+              className={`px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors ${
                 filterType === type
-                  ? `${STREAM_COLORS[type]} bg-current/10`
-                  : 'text-muted-foreground/50 hover:text-muted-foreground'
+                  ? type === 'text' ? 'bg-gray-500/20 text-gray-300'
+                    : type === 'tool_use' ? 'bg-cyan-500/15 text-cyan-400'
+                    : 'bg-red-500/15 text-red-400'
+                  : 'text-muted-foreground/50 hover:text-muted-foreground hover:bg-muted'
               }`}
               title={`Filter ${type}`}
             >
               {type === 'text' ? 'TXT' : type === 'tool_use' ? 'TOOL' : 'ERR'}
             </button>
           ))}
+
+          <div className="h-3 w-px bg-border mx-0.5" />
+
           {/* Agent actions */}
           {agentId && onAction && status === 'running' && (
             <button
               onClick={() => onAction(agentId, 'stop')}
-              className="px-1.5 py-0.5 rounded text-[10px] text-red-400 hover:bg-red-500/20 transition-colors"
+              className="p-1 rounded text-red-400 hover:bg-red-500/15 transition-colors"
               title="Stop agent"
             >
-              &#9632;
+              <IconStop className="w-3.5 h-3.5" />
             </button>
           )}
           {agentId && onAction && (status === 'stopped' || status === 'error') && (
             <button
               onClick={() => onAction(agentId, 'restart')}
-              className="px-1.5 py-0.5 rounded text-[10px] text-green-400 hover:bg-green-500/20 transition-colors"
+              className="p-1 rounded text-green-400 hover:bg-green-500/15 transition-colors"
               title="Restart agent"
             >
-              &#x21BB;
+              <IconRefresh className="w-3.5 h-3.5" />
             </button>
           )}
           {/* Status badge */}
           {status && (
-            <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${
-              status === 'running' ? 'bg-green-500/20 text-green-400 animate-pulse' :
-              status === 'error' ? 'bg-red-500/20 text-red-400' :
-              'bg-gray-500/20 text-gray-400'
+            <span className={`text-[10px] px-1.5 py-0.5 rounded-full ml-0.5 ${
+              status === 'running' ? 'bg-green-500/15 text-green-400 animate-breathe' :
+              status === 'error' ? 'bg-red-500/15 text-red-400' :
+              'bg-gray-500/15 text-gray-400'
             }`}>
               {status}
             </span>
@@ -141,6 +145,7 @@ export function TerminalOutput({ outputs, title, role, status, agentId, onSendCo
       {/* Search bar */}
       {showSearch && (
         <div className="flex items-center gap-2 px-3 py-1 bg-zinc-900 border-b border-border">
+          <IconSearch className="w-3 h-3 text-muted-foreground" />
           <input
             type="text"
             value={searchQuery}
@@ -158,28 +163,46 @@ export function TerminalOutput({ outputs, title, role, status, agentId, onSendCo
       )}
 
       {/* Output area */}
-      <div
-        ref={scrollRef}
-        onScroll={handleScroll}
-        className="flex-1 overflow-auto bg-zinc-950 font-mono text-xs p-2 min-h-0"
-      >
-        {filteredOutputs.length === 0 ? (
-          <div className="text-gray-600 italic">
-            {outputs.length === 0 ? 'Waiting for output...' :
-             searchQuery ? 'No matches found.' : 'No output for this filter.'}
-          </div>
-        ) : (
-          filteredOutputs.map((output, i) => (
-            <div key={i} className={`${STREAM_COLORS[output.streamType] || 'text-gray-300'} leading-5 whitespace-pre-wrap break-all`}>
-              {STREAM_LABELS[output.streamType] && (
-                <span className="opacity-50">{STREAM_LABELS[output.streamType]}</span>
-              )}
-              {output.streamType === 'tool_use' && output.toolName && (
-                <span className="text-cyan-600">[{output.toolName}] </span>
-              )}
-              {output.content}
+      <div className="relative flex-1 min-h-0">
+        <div
+          ref={scrollRef}
+          onScroll={handleScroll}
+          className="absolute inset-0 overflow-auto bg-zinc-950 font-mono text-xs p-2"
+        >
+          {filteredOutputs.length === 0 ? (
+            <div className="text-gray-600 italic">
+              {outputs.length === 0 ? 'Waiting for output...' :
+               searchQuery ? 'No matches found.' : 'No output for this filter.'}
             </div>
-          ))
+          ) : (
+            filteredOutputs.map((output, i) => (
+              <div key={i} className={`${STREAM_COLORS[output.streamType] || 'text-gray-300'} leading-5 whitespace-pre-wrap break-all`}>
+                {output.streamType === 'error' && (
+                  <span className="opacity-50">ERR </span>
+                )}
+                {output.streamType === 'system' && (
+                  <span className="opacity-50">SYS </span>
+                )}
+                {output.streamType === 'tool_use' && output.toolName && (
+                  <span className="inline-flex items-center px-1.5 py-0 rounded bg-cyan-500/10 text-cyan-500 text-[10px] font-medium mr-1.5">
+                    {output.toolName}
+                  </span>
+                )}
+                {output.content}
+              </div>
+            ))
+          )}
+        </div>
+
+        {/* Scroll to bottom button */}
+        {!isAutoScroll && outputs.length > 0 && (
+          <button
+            onClick={scrollToBottom}
+            className="absolute bottom-2 right-3 inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-primary/90 text-primary-foreground text-[10px] font-medium shadow-lg hover:bg-primary transition-colors animate-fade-in"
+          >
+            <IconChevronDown className="w-3 h-3" />
+            Latest
+          </button>
         )}
       </div>
 
@@ -188,7 +211,7 @@ export function TerminalOutput({ outputs, title, role, status, agentId, onSendCo
         const isActive = status === 'running' || status === 'starting';
         return (
           <form
-            className="flex items-center gap-2 px-2 py-1.5 bg-zinc-900 border-t border-border"
+            className="flex items-center gap-2 px-3 py-2 bg-zinc-900 border-t border-border"
             onSubmit={(e) => {
               e.preventDefault();
               if (isActive && commandInput.trim()) {
@@ -197,7 +220,7 @@ export function TerminalOutput({ outputs, title, role, status, agentId, onSendCo
               }
             }}
           >
-            <span className={`text-xs select-none ${isActive ? 'text-muted-foreground' : 'text-muted-foreground/30'}`}>&gt;</span>
+            <span className={`text-xs select-none ${isActive ? 'text-primary' : 'text-muted-foreground/30'}`}>&gt;</span>
             <input
               type="text"
               value={commandInput}
@@ -209,8 +232,9 @@ export function TerminalOutput({ outputs, title, role, status, agentId, onSendCo
             <button
               type="submit"
               disabled={!isActive || !commandInput.trim()}
-              className="px-2 py-0.5 text-xs bg-primary/20 text-primary rounded hover:bg-primary/30 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              className="inline-flex items-center gap-1 px-3 py-1 text-xs font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
             >
+              <IconSend className="w-3 h-3" />
               Send
             </button>
           </form>

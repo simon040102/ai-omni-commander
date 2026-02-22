@@ -1,10 +1,12 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, Fragment } from 'react';
 import { useWsStore } from '../../stores/wsStore';
 import { useToastStore } from '../../stores/toastStore';
 import { ModeSelector } from './ModeSelector';
 import { DocumentUpload } from './DocumentUpload';
 import { InterviewChat } from './InterviewChat';
 import { FolderPicker } from './FolderPicker';
+import { IconCheck, IconPlay, IconArrowRight, IconChevronLeft, IconPlus, IconX, IconRocket } from '../ui/Icons';
+import type { View } from '../layout/AppShell';
 
 interface WorkspaceEntry {
   label: string;
@@ -12,9 +14,19 @@ interface WorkspaceEntry {
 }
 
 type Step = 'mode' | 'workspaces' | 'content' | 'execute';
-const STEPS: Step[] = ['mode', 'workspaces', 'content', 'execute'];
 
-export function ProjectSetup() {
+const STEP_INFO: { key: Step; label: string; desc: string }[] = [
+  { key: 'mode', label: 'Mode', desc: 'Choose mode' },
+  { key: 'workspaces', label: 'Configure', desc: 'Name & paths' },
+  { key: 'content', label: 'Content', desc: 'Docs / Interview' },
+  { key: 'execute', label: 'Launch', desc: 'Start agents' },
+];
+
+interface ProjectSetupProps {
+  onViewChange: (view: View) => void;
+}
+
+export function ProjectSetup({ onViewChange }: ProjectSetupProps) {
   const client = useWsStore(s => s.client);
   const addToast = useToastStore(s => s.addToast);
   const [step, setStep] = useState<Step>('mode');
@@ -26,11 +38,12 @@ export function ProjectSetup() {
   const [projectId, setProjectId] = useState<string | null>(null);
   const [requirement, setRequirement] = useState('');
 
+  // Validation
+  const [touched, setTouched] = useState<Record<string, boolean>>({});
+
   // Code Review settings
   const [reviewEnabled, setReviewEnabled] = useState(true);
   const [reviewSkillSource, setReviewSkillSource] = useState<string>('auto');
-  // "auto" = use the workspace of the task being reviewed
-  // workspace label = use that specific workspace's agent skills
 
   const addWorkspace = () => {
     setWorkspaces([...workspaces, { label: '', path: '' }]);
@@ -48,6 +61,8 @@ export function ProjectSetup() {
   const isWorkspacesValid = name.trim() !== '' && workspaces.every(ws => ws.label.trim() !== '' && ws.path.trim() !== '');
 
   const handleCreate = useCallback(() => {
+    // Mark all as touched for validation display
+    setTouched({ name: true, ...Object.fromEntries(workspaces.flatMap((_, i) => [[`ws${i}label`, true], [`ws${i}path`, true]])) });
     if (!isWorkspacesValid) return;
 
     const id = crypto.randomUUID();
@@ -89,38 +104,65 @@ export function ProjectSetup() {
     setStep('execute');
   }, [projectId, client, addToast, requirement]);
 
+  const currentStepIndex = STEP_INFO.findIndex(s => s.key === step);
+
   return (
     <div className="max-w-2xl mx-auto">
       <h2 className="text-2xl font-bold mb-6">New Project</h2>
 
-      {/* Step indicator */}
-      <div className="flex gap-1 mb-8">
-        {STEPS.map((s, i) => (
-          <div
-            key={s}
-            className={`h-1 flex-1 rounded ${
-              i <= STEPS.indexOf(step) ? 'bg-primary' : 'bg-muted'
-            }`}
-          />
-        ))}
+      {/* ─── Stepper ─── */}
+      <div className="flex items-center mb-10">
+        {STEP_INFO.map((s, i) => {
+          const isCompleted = i < currentStepIndex;
+          const isActive = i === currentStepIndex;
+          return (
+            <Fragment key={s.key}>
+              {i > 0 && (
+                <div className={`h-0.5 flex-1 mx-2 rounded transition-colors duration-500 ${
+                  isCompleted ? 'bg-primary' : isActive ? 'bg-primary/40' : 'bg-border'
+                }`} />
+              )}
+              <div className="flex flex-col items-center gap-1.5 min-w-[4rem]">
+                <div className={`w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold border-2 transition-all duration-500 ${
+                  isCompleted
+                    ? 'bg-primary border-primary text-primary-foreground'
+                    : isActive
+                      ? 'border-primary text-primary bg-primary/10 shadow-[0_0_10px_rgba(59,130,246,0.25)]'
+                      : 'border-border text-muted-foreground'
+                }`}>
+                  {isCompleted ? <IconCheck className="w-4 h-4" /> : (i + 1)}
+                </div>
+                <div className="text-center">
+                  <div className={`text-xs font-medium ${isActive ? 'text-foreground' : 'text-muted-foreground'}`}>
+                    {s.label}
+                  </div>
+                  <div className="text-[10px] text-muted-foreground/60 hidden sm:block">
+                    {s.desc}
+                  </div>
+                </div>
+              </div>
+            </Fragment>
+          );
+        })}
       </div>
 
-      {/* Step 1: Mode Selection */}
+      {/* ─── Step 1: Mode Selection ─── */}
       {step === 'mode' && (
         <div>
           <ModeSelector mode={mode} onModeChange={setMode} />
-          <div className="mt-6">
+          <div className="mt-8">
             <button
               onClick={() => setStep('workspaces')}
-              className="px-4 py-2 bg-primary text-primary-foreground rounded-md text-sm"
+              className="inline-flex items-center gap-2 px-5 py-2.5 bg-primary text-primary-foreground rounded-lg text-sm font-semibold hover:bg-primary/90 transition-colors shadow-sm"
             >
               Next
+              <IconArrowRight className="w-4 h-4" />
             </button>
           </div>
         </div>
       )}
 
-      {/* Step 2: Project Name + Workspaces + Review Config */}
+      {/* ─── Step 2: Project Name + Workspaces + Review Config ─── */}
       {step === 'workspaces' && (
         <div className="space-y-6">
           <div>
@@ -129,9 +171,17 @@ export function ProjectSetup() {
               type="text"
               value={name}
               onChange={(e) => setName(e.target.value)}
+              onBlur={() => setTouched(prev => ({ ...prev, name: true }))}
               placeholder="My Awesome Project"
-              className="w-full bg-muted border border-border rounded-md px-3 py-2 text-sm"
+              className={`w-full bg-muted border rounded-md px-3 py-2 text-sm outline-none transition-colors ${
+                touched.name && !name.trim()
+                  ? 'border-red-500/50 focus:border-red-500 focus:ring-1 focus:ring-red-500/30'
+                  : 'border-border focus:border-primary focus:ring-1 focus:ring-primary/30'
+              }`}
             />
+            {touched.name && !name.trim() && (
+              <p className="text-xs text-red-400 mt-1">Project name is required</p>
+            )}
           </div>
 
           {/* Workspaces */}
@@ -140,9 +190,10 @@ export function ProjectSetup() {
               <label className="block text-sm font-medium">Workspaces</label>
               <button
                 onClick={addWorkspace}
-                className="text-xs px-2 py-1 bg-primary/20 text-primary rounded hover:bg-primary/30 transition-colors"
+                className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 bg-primary/15 text-primary rounded-md hover:bg-primary/25 transition-colors"
               >
-                + Add Workspace
+                <IconPlus className="w-3 h-3" />
+                Add Workspace
               </button>
             </div>
             <p className="text-xs text-muted-foreground mb-3">
@@ -157,9 +208,17 @@ export function ProjectSetup() {
                       type="text"
                       value={ws.label}
                       onChange={(e) => updateWorkspace(index, 'label', e.target.value)}
+                      onBlur={() => setTouched(prev => ({ ...prev, [`ws${index}label`]: true }))}
                       placeholder="Label"
-                      className="w-full bg-muted border border-border rounded-md px-3 py-2 text-sm"
+                      className={`w-full bg-muted border rounded-md px-3 py-2 text-sm outline-none transition-colors ${
+                        touched[`ws${index}label`] && !ws.label.trim()
+                          ? 'border-red-500/50 focus:border-red-500'
+                          : 'border-border focus:border-primary focus:ring-1 focus:ring-primary/30'
+                      }`}
                     />
+                    {touched[`ws${index}label`] && !ws.label.trim() && (
+                      <p className="text-[10px] text-red-400 mt-0.5">Required</p>
+                    )}
                   </div>
                   <div className="flex-1">
                     <FolderPicker
@@ -170,10 +229,10 @@ export function ProjectSetup() {
                   {workspaces.length > 1 && (
                     <button
                       onClick={() => removeWorkspace(index)}
-                      className="shrink-0 px-2 py-2 text-red-400 hover:text-red-300 text-sm"
+                      className="shrink-0 p-2 text-muted-foreground hover:text-red-400 hover:bg-red-500/10 rounded-md transition-colors"
                       title="Remove"
                     >
-                      x
+                      <IconX className="w-3.5 h-3.5" />
                     </button>
                   )}
                 </div>
@@ -210,7 +269,7 @@ export function ProjectSetup() {
                 <select
                   value={reviewSkillSource}
                   onChange={(e) => setReviewSkillSource(e.target.value)}
-                  className="w-full bg-muted border border-border rounded-md px-3 py-2 text-sm"
+                  className="w-full bg-muted border border-border rounded-md px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
                 >
                   <option value="auto">Auto (use reviewed task's workspace)</option>
                   {workspaces
@@ -228,32 +287,33 @@ export function ProjectSetup() {
             )}
           </div>
 
-          <div className="flex gap-2">
+          <div className="flex gap-3">
             <button
               onClick={() => setStep('mode')}
-              className="px-4 py-2 bg-muted text-foreground rounded-md text-sm"
+              className="inline-flex items-center gap-1.5 px-4 py-2 bg-secondary text-secondary-foreground rounded-lg text-sm font-medium hover:bg-secondary/80 transition-colors"
             >
+              <IconChevronLeft className="w-4 h-4" />
               Back
             </button>
             <button
               onClick={handleCreate}
               disabled={!isWorkspacesValid}
-              className="px-4 py-2 bg-primary text-primary-foreground rounded-md text-sm disabled:opacity-50"
+              className="inline-flex items-center gap-2 px-5 py-2.5 bg-primary text-primary-foreground rounded-lg text-sm font-semibold hover:bg-primary/90 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shadow-sm"
             >
               Create Project
+              <IconArrowRight className="w-4 h-4" />
             </button>
           </div>
         </div>
       )}
 
-      {/* Step 3: Content (Spec: upload docs, Creative: interview) */}
+      {/* ─── Step 3: Content (Spec: upload docs, Creative: interview) ─── */}
       {step === 'content' && projectId && (
         <div>
           {mode === 'spec' ? (
             <div className="space-y-4">
               <DocumentUpload projectId={projectId} />
 
-              {/* Requirement input */}
               <div>
                 <label className="block text-sm font-medium mb-1">Requirement / Instructions</label>
                 <p className="text-xs text-muted-foreground mb-2">
@@ -263,14 +323,15 @@ export function ProjectSetup() {
                   value={requirement}
                   onChange={(e) => setRequirement(e.target.value)}
                   placeholder="e.g. Implement the user authentication module based on the SD spec, including login, registration, and JWT token management..."
-                  className="w-full bg-muted border border-border rounded-md px-3 py-2 text-sm min-h-[100px] resize-y"
+                  className="w-full bg-muted border border-border rounded-md px-3 py-2 text-sm min-h-[100px] resize-y outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
                 />
               </div>
 
               <button
                 onClick={handleStartExecution}
-                className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-md text-sm"
+                className="group inline-flex items-center gap-2 px-6 py-3 bg-green-600 hover:bg-green-500 text-white rounded-lg text-sm font-semibold shadow-lg shadow-green-600/20 hover:shadow-green-500/30 transition-all"
               >
+                <IconPlay className="w-4 h-4" />
                 Start Execution
               </button>
             </div>
@@ -280,13 +341,23 @@ export function ProjectSetup() {
         </div>
       )}
 
-      {/* Step 4: Execution started */}
+      {/* ─── Step 4: Execution started ─── */}
       {step === 'execute' && (
-        <div className="text-center py-12">
+        <div className="text-center py-16">
+          <div className="w-16 h-16 mx-auto mb-6 rounded-full bg-green-500/10 flex items-center justify-center">
+            <IconRocket className="w-8 h-8 text-green-400" />
+          </div>
           <h3 className="text-xl font-bold mb-2">Execution Started!</h3>
-          <p className="text-muted-foreground">
-            Switch to the Dashboard view to monitor agent progress.
+          <p className="text-muted-foreground mb-8 max-w-sm mx-auto">
+            Agents are being spawned and will begin working on your project. Monitor their progress in real time.
           </p>
+          <button
+            onClick={() => onViewChange('dashboard')}
+            className="inline-flex items-center gap-2 px-5 py-2.5 bg-primary text-primary-foreground rounded-lg text-sm font-semibold hover:bg-primary/90 transition-colors shadow-sm"
+          >
+            Go to Dashboard
+            <IconArrowRight className="w-4 h-4" />
+          </button>
         </div>
       )}
     </div>
