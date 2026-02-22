@@ -113,21 +113,53 @@ export class OmniWebSocketServer {
   }
 
   private async routeMessage(msg: WsMessage, ws: WebSocket): Promise<void> {
+    // Validate basic message structure
+    if (!msg.type || typeof msg.type !== 'string') {
+      this.send(ws, {
+        type: 'error',
+        id: genId(),
+        timestamp: new Date().toISOString(),
+        payload: { code: 'INVALID_MESSAGE', message: 'Missing or invalid "type" field' },
+      } as WsMessage);
+      return;
+    }
+
+    if (!('payload' in msg) || (msg as Record<string, unknown>).payload == null) {
+      this.send(ws, {
+        type: 'error',
+        id: genId(),
+        timestamp: new Date().toISOString(),
+        payload: { code: 'INVALID_MESSAGE', message: 'Missing "payload" field' },
+      } as WsMessage);
+      return;
+    }
+
     const handler = this.handlers.get(msg.type);
     if (handler) {
       try {
         await handler(msg, ws);
       } catch (err) {
         logger.error({ type: msg.type, err }, 'Handler error');
+        const errMsg = err instanceof Error ? err.message : String(err);
+        // Don't leak internal details like SQL errors
+        const safeMsg = errMsg.includes('SqliteError') || errMsg.includes('SQLITE')
+          ? 'Invalid request: missing or invalid required fields'
+          : errMsg;
         this.send(ws, {
           type: 'error',
           id: genId(),
           timestamp: new Date().toISOString(),
-          payload: { code: 'HANDLER_ERROR', message: String(err) },
+          payload: { code: 'HANDLER_ERROR', message: safeMsg },
         } as WsMessage);
       }
     } else {
       logger.warn({ type: msg.type }, 'No handler for message type');
+      this.send(ws, {
+        type: 'error',
+        id: genId(),
+        timestamp: new Date().toISOString(),
+        payload: { code: 'UNKNOWN_TYPE', message: `Unknown message type: ${msg.type}` },
+      } as WsMessage);
     }
   }
 }

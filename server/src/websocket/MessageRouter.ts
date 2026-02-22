@@ -29,6 +29,15 @@ export function registerHandlers(
   // PROJECT.CREATE
   wsServer.registerHandler('project.create', (msg: WsMessage, ws: WebSocket) => {
     const { payload } = msg as WsCreateProject;
+    if (!payload.name || !payload.projectId || !payload.mode) {
+      wsServer.send(ws, {
+        type: 'error',
+        id: genId(),
+        timestamp: new Date().toISOString(),
+        payload: { code: 'VALIDATION_ERROR', message: 'Missing required fields: name, projectId, mode' },
+      } as WsMessage);
+      return;
+    }
     const config: Record<string, unknown> = {};
     if (payload.workspaces?.length) config['workspaces'] = payload.workspaces;
     if (payload.reviewConfig) config['reviewConfig'] = payload.reviewConfig;

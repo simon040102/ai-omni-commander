@@ -8,7 +8,7 @@ export function InterventionBell() {
   const resolveIntervention = useProjectStore(s => s.resolveIntervention);
   const client = useWsStore(s => s.client);
   const [isOpen, setIsOpen] = useState(false);
-  const [userInput, setUserInput] = useState('');
+  const [userInputs, setUserInputs] = useState<Record<string, string>>({});
 
   const pending = interventions.filter(i => i.status === 'pending');
 
@@ -20,6 +20,7 @@ export function InterventionBell() {
   }, [pending.length]);
 
   const handleResolve = (interventionId: string, decision: 'approve' | 'reject' | 'modify') => {
+    const input = userInputs[interventionId] || '';
     client?.send({
       type: 'intervention.resolve',
       id: crypto.randomUUID(),
@@ -27,11 +28,15 @@ export function InterventionBell() {
       payload: {
         interventionId,
         decision,
-        userInput: decision === 'modify' ? userInput : undefined,
+        userInput: decision === 'modify' ? input : undefined,
       },
     });
     resolveIntervention(interventionId);
-    setUserInput('');
+    setUserInputs(prev => {
+      const next = { ...prev };
+      delete next[interventionId];
+      return next;
+    });
   };
 
   if (pending.length === 0 && !isOpen) return null;
@@ -79,8 +84,8 @@ export function InterventionBell() {
                 </p>
 
                 <textarea
-                  value={userInput}
-                  onChange={(e) => setUserInput(e.target.value)}
+                  value={userInputs[intervention.id] || ''}
+                  onChange={(e) => setUserInputs(prev => ({ ...prev, [intervention.id]: e.target.value }))}
                   placeholder="Provide instructions (optional)..."
                   className="w-full bg-muted border border-border rounded-md p-2.5 text-sm mb-3 resize-none outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
                   rows={3}
