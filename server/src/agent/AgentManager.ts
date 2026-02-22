@@ -201,11 +201,19 @@ export class AgentManager {
     } else {
       const agent = getAgent(agentId);
       if (!agent || !agent.sessionId) throw new Error('No session to resume');
+
+      // Update agent status to indicate it's resuming
+      updateAgent(agentId, { status: 'starting' });
+
+      const roleConfig = getAgentRoleConfig(agent.role);
+
       // Create new process with session resume
       const newProc = new AgentProcess(agentId, agent.role, {
         workingDir: this.getWorkingDir(agent.projectId, agent.role),
         sessionId: agent.sessionId,
         model: agent.model,
+        systemPrompt: roleConfig.systemPrompt,
+        allowedTools: roleConfig.allowedTools,
       });
 
       // Wire up event handlers (same as startAgent)
@@ -213,6 +221,8 @@ export class AgentManager {
 
       this.processes.set(agentId, newProc);
       await newProc.resume(followUpPrompt);
+
+      logger.info({ agentId, sessionId: agent.sessionId }, 'Agent session resumed');
     }
   }
 
@@ -223,23 +233,31 @@ export class AgentManager {
    */
   async sendInputToAgent(agentId: string, text: string): Promise<boolean> {
     const proc = this.processes.get(agentId);
-    if (!proc) return false;
 
-    // If stdin is still writable (shouldn't normally happen), try direct write
-    if (proc.sendInput(text)) return true;
+    // If process exists and stdin is writable, try direct write
+    if (proc && proc.sendInput(text)) return true;
 
-    // Otherwise: stop current process and resume session with the new instruction
-    const sessionId = proc.sessionId;
+    // Get session ID from process or database
+    let sessionId = proc?.sessionId;
     if (!sessionId) {
-      logger.warn({ agentId }, 'Cannot resume: no session ID');
+      const agent = getAgent(agentId);
+      sessionId = agent?.sessionId ?? null;
+    }
+
+    if (!sessionId) {
+      logger.warn({ agentId }, 'Cannot resume: no session ID found');
       return false;
     }
 
-    logger.info({ agentId, sessionId }, 'Stopping agent to resume with new instruction');
-    await proc.stop();
-    this.processes.delete(agentId);
+    // Stop current process if running
+    if (proc) {
+      logger.info({ agentId, sessionId }, 'Stopping agent to resume with new instruction');
+      await proc.stop();
+      this.processes.delete(agentId);
+    }
 
     // Resume the session with the user's instruction as the new prompt
+    logger.info({ agentId, sessionId }, 'Resuming agent session with user instruction');
     await this.resumeAgent(agentId, text);
     return true;
   }
