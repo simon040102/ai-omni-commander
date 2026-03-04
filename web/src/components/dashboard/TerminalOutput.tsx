@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useMemo } from 'react';
 import type { AgentOutput } from '../../stores/agentStore';
+import { useAgentStore } from '../../stores/agentStore';
 import { IconSearch, IconStop, IconRefresh, IconSend, IconChevronDown } from '../ui/Icons';
 
 const STREAM_COLORS: Record<string, string> = {
@@ -24,10 +25,14 @@ export function TerminalOutput({ outputs, title, role, status, agentId, onSendCo
   const scrollRef = useRef<HTMLDivElement>(null);
   const autoScrollRef = useRef(true);
   const [isAutoScroll, setIsAutoScroll] = useState(true);
-  const [commandInput, setCommandInput] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [showSearch, setShowSearch] = useState(false);
   const [filterType, setFilterType] = useState<string | null>(null);
+
+  // Use store for command input to persist across project switches
+  const commandInputs = useAgentStore((s) => s.commandInputs);
+  const setCommandInput = useAgentStore((s) => s.setCommandInput);
+  const commandInput = agentId ? (commandInputs[agentId] ?? '') : '';
 
   useEffect(() => {
     if (autoScrollRef.current && scrollRef.current) {
@@ -223,7 +228,7 @@ export function TerminalOutput({ outputs, title, role, status, agentId, onSendCo
               e.preventDefault();
               if (canSend && commandInput.trim()) {
                 onSendCommand(agentId, commandInput.trim());
-                setCommandInput('');
+                setCommandInput(agentId, '');
               }
             }}
           >
@@ -231,7 +236,7 @@ export function TerminalOutput({ outputs, title, role, status, agentId, onSendCo
             <input
               type="text"
               value={commandInput}
-              onChange={(e) => setCommandInput(e.target.value)}
+              onChange={(e) => agentId && setCommandInput(agentId, e.target.value)}
               placeholder={placeholder}
               disabled={!canSend}
               className="flex-1 bg-transparent text-xs text-gray-200 font-mono outline-none placeholder:text-gray-600 disabled:opacity-40 disabled:cursor-not-allowed"
