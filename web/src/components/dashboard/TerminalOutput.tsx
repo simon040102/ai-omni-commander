@@ -17,11 +17,14 @@ interface TerminalOutputProps {
   role?: string;
   status?: string;
   agentId?: string;
+  totalInputTokens?: number;
+  totalOutputTokens?: number;
+  totalCostUsd?: number;
   onSendCommand?: (agentId: string, command: string) => void;
   onAction?: (agentId: string, action: 'stop' | 'restart') => void;
 }
 
-export function TerminalOutput({ outputs, title, role, status, agentId, onSendCommand, onAction }: TerminalOutputProps) {
+export function TerminalOutput({ outputs, title, role, status, agentId, totalInputTokens, totalOutputTokens, totalCostUsd, onSendCommand, onAction }: TerminalOutputProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const autoScrollRef = useRef(true);
   const [isAutoScroll, setIsAutoScroll] = useState(true);
@@ -87,6 +90,17 @@ export function TerminalOutput({ outputs, title, role, status, agentId, onSendCo
             {toolCount > 0 && ` | ${toolCount} tools`}
             {errorCount > 0 && ` | ${errorCount} errors`}
           </span>
+          {/* Token usage display */}
+          {(totalInputTokens !== undefined && totalInputTokens > 0) && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400">
+              {((totalInputTokens + (totalOutputTokens || 0)) / 1000).toFixed(1)}k tokens
+            </span>
+          )}
+          {totalCostUsd !== undefined && totalCostUsd > 0 && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400">
+              ${totalCostUsd.toFixed(4)}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-1">
           {/* Search toggle */}
@@ -214,6 +228,17 @@ export function TerminalOutput({ outputs, title, role, status, agentId, onSendCo
             <div className="text-gray-200 leading-5 whitespace-pre-wrap break-all">
               {streamingBuffer.text}
               <span className="animate-pulse text-primary">▌</span>
+            </div>
+          )}
+          {/* Working indicator when running but no streaming content */}
+          {(status === 'running' || status === 'starting') && !streamingBuffer?.text && !streamingBuffer?.thinking && (
+            <div className="flex items-center gap-2 text-muted-foreground text-xs py-2">
+              <span className="flex gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-primary animate-bounce" style={{ animationDelay: '0ms' }} />
+                <span className="w-1.5 h-1.5 rounded-full bg-primary animate-bounce" style={{ animationDelay: '150ms' }} />
+                <span className="w-1.5 h-1.5 rounded-full bg-primary animate-bounce" style={{ animationDelay: '300ms' }} />
+              </span>
+              <span className="animate-pulse">Agent is working...</span>
             </div>
           )}
         </div>

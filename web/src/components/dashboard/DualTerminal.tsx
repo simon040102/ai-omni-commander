@@ -43,6 +43,9 @@ export function DualTerminal({ focusAgentId }: DualTerminalProps) {
             role={agent.role}
             status={agent.status}
             agentId={agent.id}
+            totalInputTokens={agent.totalInputTokens}
+            totalOutputTokens={agent.totalOutputTokens}
+            totalCostUsd={agent.totalCostUsd}
             onSendCommand={handleSendCommand}
             onAction={handleAgentAction}
           />
@@ -86,6 +89,9 @@ export function DualTerminal({ focusAgentId }: DualTerminalProps) {
               role={agent.role}
               status={agent.status}
               agentId={agent.id}
+              totalInputTokens={agent.totalInputTokens}
+              totalOutputTokens={agent.totalOutputTokens}
+              totalCostUsd={agent.totalCostUsd}
               onSendCommand={handleSendCommand}
               onAction={handleAgentAction}
             />
@@ -112,6 +118,9 @@ export function DualTerminal({ focusAgentId }: DualTerminalProps) {
             role="review"
             status={reviewAgent.status}
             agentId={reviewAgent.id}
+            totalInputTokens={reviewAgent.totalInputTokens}
+            totalOutputTokens={reviewAgent.totalOutputTokens}
+            totalCostUsd={reviewAgent.totalCostUsd}
             onSendCommand={handleSendCommand}
             onAction={handleAgentAction}
           />

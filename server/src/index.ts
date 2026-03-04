@@ -16,6 +16,7 @@ import { MasterOrchestrator } from './orchestrator/MasterOrchestrator.js';
 import { OmniWebSocketServer } from './websocket/WebSocketServer.js';
 import { registerHandlers } from './websocket/MessageRouter.js';
 import { listProjects } from './db/queries/projects.js';
+import { getRecentPaths, addRecentPath, removeRecentPath, clearRecentPaths } from './db/queries/recentPaths.js';
 import { genId } from './utils/uuid.js';
 import { logger } from './utils/logger.js';
 import type { WsMessage } from '@omni/shared';
@@ -82,6 +83,39 @@ async function main() {
     } catch (err) {
       res.status(400).json({ error: `Cannot read directory: ${dir}` });
     }
+  });
+
+  // Recent paths API
+  app.get('/api/recent-paths', (req, res) => {
+    const limit = parseInt(req.query['limit'] as string) || 10;
+    const paths = getRecentPaths(limit);
+    res.json({ paths });
+  });
+
+  app.post('/api/recent-paths', (req, res) => {
+    const { path: pathValue, label } = req.body as { path?: string; label?: string };
+    if (!pathValue) {
+      res.status(400).json({ error: 'path is required' });
+      return;
+    }
+    const result = addRecentPath(pathValue, label);
+    res.json(result);
+  });
+
+  app.delete('/api/recent-paths/:id', (req, res) => {
+    const idOrPath = req.params['id'];
+    const numId = parseInt(idOrPath);
+    if (!isNaN(numId)) {
+      removeRecentPath(numId);
+    } else {
+      removeRecentPath(idOrPath);
+    }
+    res.json({ success: true });
+  });
+
+  app.delete('/api/recent-paths', (_req, res) => {
+    clearRecentPaths();
+    res.json({ success: true });
   });
 
   // 4. Create HTTP server and WebSocket server

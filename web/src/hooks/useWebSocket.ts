@@ -141,6 +141,9 @@ export function useWebSocket() {
           }
 
           case 'agent.completed': {
+            const inputTokens = (payload['inputTokens'] as number) || 0;
+            const outputTokens = (payload['outputTokens'] as number) || 0;
+            const totalTokens = inputTokens + outputTokens;
             addOrUpdateAgent({
               id: payload['agentId'] as string,
               projectId: payload['projectId'] as string,
@@ -150,8 +153,14 @@ export function useWebSocket() {
               model: '',
               totalCostUsd: (payload['costUsd'] as number) || 0,
               totalTurns: (payload['turns'] as number) || 0,
+              totalInputTokens: inputTokens,
+              totalOutputTokens: outputTokens,
             });
-            addToast({ type: 'success', title: 'Agent completed', message: `Cost: $${((payload['costUsd'] as number) || 0).toFixed(4)}` });
+            addToast({
+              type: 'success',
+              title: 'Agent completed',
+              message: `Cost: $${((payload['costUsd'] as number) || 0).toFixed(4)} | ${(totalTokens / 1000).toFixed(1)}k tokens`,
+            });
             break;
           }
 
