@@ -386,6 +386,8 @@ export class AgentManager {
       status: 'stopped',
       totalCostUsd: result.cost_usd,
       totalTurns: result.num_turns,
+      totalInputTokens: result.input_tokens || 0,
+      totalOutputTokens: result.output_tokens || 0,
       pid: null,
     });
 
@@ -407,7 +409,14 @@ export class AgentManager {
     await this.eventBus.emit({
       type: EventTypes.AGENT_COMPLETED,
       source: agentId,
-      payload: { agentId, projectId, costUsd: result.cost_usd, turns: result.num_turns },
+      payload: {
+        agentId,
+        projectId,
+        costUsd: result.cost_usd,
+        turns: result.num_turns,
+        inputTokens: result.input_tokens || 0,
+        outputTokens: result.output_tokens || 0,
+      },
       timestamp: new Date().toISOString(),
     });
 

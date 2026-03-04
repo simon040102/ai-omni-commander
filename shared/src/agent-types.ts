@@ -16,6 +16,13 @@ export type AgentStatus =
   | 'stopped'
   | 'error';
 
+export interface AgentUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
+}
+
 export interface Agent {
   id: string;
   projectId: string;
@@ -29,6 +36,8 @@ export interface Agent {
   allowedTools: string | null;
   totalCostUsd: number;
   totalTurns: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
   lastHeartbeat: string | null;
   createdAt: string;
   updatedAt: string;

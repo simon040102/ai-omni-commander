@@ -31,6 +31,8 @@ export interface Agent {
   model: string;
   totalCostUsd: number;
   totalTurns: number;
+  totalInputTokens?: number;
+  totalOutputTokens?: number;
 }
 
 export interface DependencyEdge {

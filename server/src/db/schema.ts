@@ -31,6 +31,8 @@ export function runMigrations(db: Database.Database): void {
       allowed_tools   TEXT,
       total_cost_usd  REAL NOT NULL DEFAULT 0.0,
       total_turns     INTEGER NOT NULL DEFAULT 0,
+      total_input_tokens  INTEGER NOT NULL DEFAULT 0,
+      total_output_tokens INTEGER NOT NULL DEFAULT 0,
       last_heartbeat  TEXT,
       created_at      TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
@@ -108,6 +110,15 @@ export function runMigrations(db: Database.Database): void {
       resolved_at     TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS recent_paths (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      path          TEXT NOT NULL UNIQUE,
+      label         TEXT,
+      use_count     INTEGER NOT NULL DEFAULT 1,
+      last_used_at  TEXT NOT NULL DEFAULT (datetime('now')),
+      created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
     CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
     CREATE INDEX IF NOT EXISTS idx_agents_project ON agents(project_id);
@@ -115,11 +126,21 @@ export function runMigrations(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
     CREATE INDEX IF NOT EXISTS idx_agent_outputs_agent ON agent_outputs(agent_id);
     CREATE INDEX IF NOT EXISTS idx_interventions_status ON interventions(status);
+    CREATE INDEX IF NOT EXISTS idx_recent_paths_last_used ON recent_paths(last_used_at DESC);
   `);
 
   // Migration: add doc_type column if missing (for existing DBs)
   const cols = db.prepare("PRAGMA table_info(documents)").all() as Array<{ name: string }>;
   if (!cols.some(c => c.name === 'doc_type')) {
     db.exec("ALTER TABLE documents ADD COLUMN doc_type TEXT CHECK(doc_type IN ('SA', 'SD', 'other')) DEFAULT 'other'");
+  }
+
+  // Migration: add token tracking columns to agents (for existing DBs)
+  const agentCols = db.prepare("PRAGMA table_info(agents)").all() as Array<{ name: string }>;
+  if (!agentCols.some(c => c.name === 'total_input_tokens')) {
+    db.exec("ALTER TABLE agents ADD COLUMN total_input_tokens INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!agentCols.some(c => c.name === 'total_output_tokens')) {
+    db.exec("ALTER TABLE agents ADD COLUMN total_output_tokens INTEGER NOT NULL DEFAULT 0");
   }
 }

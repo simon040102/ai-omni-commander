@@ -46,6 +46,8 @@ export interface ClaudeStreamResult {
   num_turns: number;
   duration_ms: number;
   is_error: boolean;
+  input_tokens?: number;
+  output_tokens?: number;
 }
 
 export interface ClaudeStreamRaw {

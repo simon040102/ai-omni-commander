@@ -175,6 +175,15 @@ export class AgentProcess extends EventEmitter {
     // Result message (completion)
     if (msg.type === 'result') {
       const result = msg as SDKResultMessage;
+      // Extract token usage from modelUsage (aggregate all models)
+      let inputTokens = 0;
+      let outputTokens = 0;
+      if ('modelUsage' in result && result.modelUsage) {
+        for (const usage of Object.values(result.modelUsage)) {
+          inputTokens += usage.inputTokens || 0;
+          outputTokens += usage.outputTokens || 0;
+        }
+      }
       this.emit('result', {
         type: 'result',
         subtype: result.subtype,
@@ -184,6 +193,8 @@ export class AgentProcess extends EventEmitter {
         num_turns: result.num_turns,
         duration_ms: result.duration_ms,
         is_error: result.is_error,
+        input_tokens: inputTokens,
+        output_tokens: outputTokens,
       });
     }
 

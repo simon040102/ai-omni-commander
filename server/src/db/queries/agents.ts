@@ -53,6 +53,8 @@ export function updateAgent(id: string, data: Partial<{
   currentTaskId: string | null;
   totalCostUsd: number;
   totalTurns: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
   lastHeartbeat: string;
 }>): void {
   const db = getDb();
@@ -65,6 +67,8 @@ export function updateAgent(id: string, data: Partial<{
   if (data.currentTaskId !== undefined) { sets.push('current_task_id = ?'); values.push(data.currentTaskId); }
   if (data.totalCostUsd !== undefined) { sets.push('total_cost_usd = ?'); values.push(data.totalCostUsd); }
   if (data.totalTurns !== undefined) { sets.push('total_turns = ?'); values.push(data.totalTurns); }
+  if (data.totalInputTokens !== undefined) { sets.push('total_input_tokens = ?'); values.push(data.totalInputTokens); }
+  if (data.totalOutputTokens !== undefined) { sets.push('total_output_tokens = ?'); values.push(data.totalOutputTokens); }
   if (data.lastHeartbeat !== undefined) { sets.push('last_heartbeat = ?'); values.push(data.lastHeartbeat); }
 
   if (sets.length === 0) return;
@@ -100,6 +104,8 @@ function mapAgent(row: Record<string, unknown>): Agent {
     allowedTools: row['allowed_tools'] as string | null,
     totalCostUsd: row['total_cost_usd'] as number,
     totalTurns: row['total_turns'] as number,
+    totalInputTokens: (row['total_input_tokens'] as number) || 0,
+    totalOutputTokens: (row['total_output_tokens'] as number) || 0,
     lastHeartbeat: row['last_heartbeat'] as string | null,
     createdAt: row['created_at'] as string,
     updatedAt: row['updated_at'] as string,
