@@ -12,7 +12,7 @@ import type { OmniWebSocketServer } from './WebSocketServer.js';
 import { createProject, listProjects, getProject, deleteProject, updateProject } from '../db/queries/projects.js';
 import { getTasksByProject, getDependencies, updateTask } from '../db/queries/tasks.js';
 import { getAgentsByProject, deleteAgent } from '../db/queries/agents.js';
-import { resolveIntervention, getAgentOutputs } from '../db/queries/events.js';
+import { resolveIntervention, getAgentOutputs, logAgentOutput } from '../db/queries/events.js';
 import { genId } from '../utils/uuid.js';
 import { createChildLogger } from '../utils/logger.js';
 
@@ -138,6 +138,13 @@ export function registerHandlers(
       const sent = await agentManager.sendInputToAgent(payload.agentId, payload.command);
       if (sent) {
         logger.info({ agentId: payload.agentId }, 'Command sent to agent (session resumed)');
+        const userInstructionContent = `[USER INSTRUCTION] ${payload.command}`;
+        // Persist to DB so it survives project switches
+        logAgentOutput({
+          agentId: payload.agentId,
+          streamType: 'system',
+          content: userInstructionContent,
+        });
         // Broadcast feedback so the instruction appears in the terminal output
         wsServer.broadcast({
           type: 'agent.output',
@@ -146,7 +153,7 @@ export function registerHandlers(
           payload: {
             agentId: payload.agentId,
             streamType: 'system',
-            content: `[USER INSTRUCTION] ${payload.command}`,
+            content: userInstructionContent,
             timestamp: new Date().toISOString(),
           },
         } as WsMessage);

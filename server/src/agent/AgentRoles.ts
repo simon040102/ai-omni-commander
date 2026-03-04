@@ -13,6 +13,20 @@ Always check for CLAUDE.md first before starting work.
 `.trim();
 }
 
+/**
+ * Context management instructions for handling long conversations.
+ */
+function contextManagementInjection(): string {
+  return `
+CONTEXT MANAGEMENT:
+- When the conversation approaches context limits, it will be automatically compacted
+- After compaction, you may lose some earlier conversation details
+- Always re-read relevant files before making changes if you're unsure of the current state
+- Keep track of your progress by noting completed steps and remaining work
+- If resuming after compaction, check git status and recent file changes to understand current state
+`.trim();
+}
+
 export const AGENT_ROLES: Record<AgentRole, AgentRoleConfig> = {
   master: {
     role: 'master',
@@ -20,6 +34,7 @@ export const AGENT_ROLES: Record<AgentRole, AgentRoleConfig> = {
     model: 'opus',
     systemPrompt: `You are the Master Orchestrator for a collaborative development project.
 ${projectSkillsInjection()}
+${contextManagementInjection()}
 
 Your responsibilities:
 - Parse SA/SD documents to extract API definitions, UI specs, and DB schema
@@ -60,6 +75,7 @@ Output format for task plans:
     model: 'opus',
     systemPrompt: `You are a Software Architect conducting a requirements interview.
 ${projectSkillsInjection()}
+${contextManagementInjection()}
 
 Your job:
 - Ask clarifying questions ONE AT A TIME to understand the user's vision
@@ -79,6 +95,7 @@ Your job:
     model: 'sonnet',
     systemPrompt: `You are a Backend Developer agent. You implement server-side code.
 ${projectSkillsInjection()}
+${contextManagementInjection()}
 
 Rules:
 - Follow the API contract in .ai_context/api-contracts/ exactly
@@ -102,6 +119,7 @@ Completion criteria:
     model: 'sonnet',
     systemPrompt: `You are a Frontend Developer agent. You implement UI components.
 ${projectSkillsInjection()}
+${contextManagementInjection()}
 
 Rules:
 - Use React + TypeScript + Tailwind CSS + shadcn/ui
@@ -125,6 +143,7 @@ Completion criteria:
     model: 'sonnet',
     systemPrompt: `You are a DevOps agent. You handle infrastructure and deployment.
 ${projectSkillsInjection()}
+${contextManagementInjection()}
 
 - Set up Docker configurations
 - Configure CI/CD pipelines
@@ -140,6 +159,7 @@ ${projectSkillsInjection()}
     model: 'sonnet',
     systemPrompt: `You are a Testing agent. You write and run integration tests.
 ${projectSkillsInjection()}
+${contextManagementInjection()}
 
 - Write integration tests that verify API endpoints work correctly
 - Test cross-component interactions
@@ -155,6 +175,7 @@ ${projectSkillsInjection()}
     model: 'sonnet',
     systemPrompt: `You are a Code Review agent. You review code changes for quality.
 ${projectSkillsInjection()}
+${contextManagementInjection()}
 
 IMPORTANT: You are READ-ONLY. You must NOT use Edit, Write, or any tools that modify files.
 - Review code for bugs, security issues, and best practices

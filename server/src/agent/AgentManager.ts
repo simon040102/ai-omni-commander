@@ -196,10 +196,14 @@ export class AgentManager {
   /** Resume an agent using its Claude session ID */
   async resumeAgent(agentId: string, followUpPrompt?: string): Promise<void> {
     const proc = this.processes.get(agentId);
+    logger.info({ agentId, hasProc: !!proc, promptLen: followUpPrompt?.length }, 'resumeAgent called');
+
     if (proc) {
+      logger.info({ agentId, sessionId: proc.sessionId }, 'Resuming existing process');
       await proc.resume(followUpPrompt);
     } else {
       const agent = getAgent(agentId);
+      logger.info({ agentId, agentSessionId: agent?.sessionId, agentStatus: agent?.status }, 'Resuming from DB agent');
       if (!agent || !agent.sessionId) throw new Error('No session to resume');
 
       // Update agent status to indicate it's resuming
@@ -233,15 +237,19 @@ export class AgentManager {
    */
   async sendInputToAgent(agentId: string, text: string): Promise<boolean> {
     const proc = this.processes.get(agentId);
+    logger.info({ agentId, hasProc: !!proc, procStatus: proc?.status }, 'sendInputToAgent called');
 
     // If process exists and stdin is writable, try direct write
     if (proc && proc.sendInput(text)) return true;
 
     // Get session ID from process or database
     let sessionId = proc?.sessionId;
+    logger.info({ agentId, sessionIdFromProc: sessionId }, 'Checking sessionId from process');
+
     if (!sessionId) {
       const agent = getAgent(agentId);
       sessionId = agent?.sessionId ?? null;
+      logger.info({ agentId, sessionIdFromDB: sessionId, agentStatus: agent?.status }, 'Checking sessionId from DB');
     }
 
     if (!sessionId) {
@@ -293,18 +301,20 @@ export class AgentManager {
       });
     });
 
-    proc.on('output', (output: AgentOutputEvent) => {
+    proc.on('output', (output: AgentOutputEvent & { isStreaming?: boolean }) => {
       output.taskId = taskId;
 
-      // Persist to DB
-      logAgentOutput({
-        agentId,
-        taskId: taskId || undefined,
-        streamType: output.streamType,
-        content: output.content,
-      });
+      // Only persist non-streaming outputs to DB (streaming will be followed by full message)
+      if (!output.isStreaming) {
+        logAgentOutput({
+          agentId,
+          taskId: taskId || undefined,
+          streamType: output.streamType,
+          content: output.content,
+        });
+      }
 
-      // Broadcast via event bus (WebSocket will pick this up)
+      // Broadcast via event bus (WebSocket will pick this up) — including streaming for real-time display
       this.eventBus.emit({
         type: EventTypes.AGENT_OUTPUT,
         source: agentId,
