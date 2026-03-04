@@ -18,6 +18,8 @@ export function useWebSocket() {
   const addOrUpdateAgent = useProjectStore(s => s.addOrUpdateAgent);
   const addIntervention = useProjectStore(s => s.addIntervention);
   const appendOutput = useAgentStore(s => s.appendOutput);
+  const appendStreaming = useAgentStore(s => s.appendStreaming);
+  const clearStreamingBuffer = useAgentStore(s => s.clearStreamingBuffer);
   const setOutputsBulk = useAgentStore(s => s.setOutputsBulk);
   const clearOutputs = useAgentStore(s => s.clearOutputs);
   const clearAllOutputs = useAgentStore(s => s.clearAll);
@@ -60,9 +62,37 @@ export function useWebSocket() {
 
           case 'agent.output': {
             const agentId = payload['agentId'] as string;
+            const isStreaming = payload['isStreaming'] as boolean;
+            const streamType = payload['streamType'] as string;
+            const content = payload['content'] as string;
+
+            // Handle streaming content — accumulate in buffer for real-time display
+            if (isStreaming) {
+              if (streamType === 'text') {
+                appendStreaming(agentId, 'text', content);
+              } else if (streamType === 'system' && content.startsWith('[thinking]')) {
+                appendStreaming(agentId, 'thinking', content.replace('[thinking] ', ''));
+              }
+              break;
+            }
+
+            // Non-streaming text or thinking = server flush after streaming
+            // Add the complete content to outputs (for persistence) and clear the streaming buffer
+            if (streamType === 'text' || (streamType === 'system' && content.startsWith('[thinking]'))) {
+              // Add to outputs so it persists in the UI
+              appendOutput(agentId, {
+                streamType: streamType as 'text',
+                content: content,
+                timestamp: payload['timestamp'] as string,
+              });
+              clearStreamingBuffer(agentId);
+              break;
+            }
+
+            // Other non-streaming output (tool_use, tool_result, system, etc.) — add normally
             appendOutput(agentId, {
-              streamType: payload['streamType'] as 'text',
-              content: payload['content'] as string,
+              streamType: streamType as 'text',
+              content: content,
               toolName: payload['toolName'] as string | undefined,
               timestamp: payload['timestamp'] as string,
             });

@@ -15,6 +15,10 @@ export class AgentProcess extends EventEmitter {
   private _sessionId: string | null = null;
   private _pid: number | null = null;
 
+  // Buffers for accumulating streamed content
+  private _streamingTextBuffer = '';
+  private _streamingThinkingBuffer = '';
+
   constructor(
     public readonly agentId: string,
     public readonly role: AgentRole,
@@ -70,6 +74,8 @@ export class AgentProcess extends EventEmitter {
         sessionId: (!this.config.sessionId && this._sessionId) ? this._sessionId : undefined,
         // Load project-level CLAUDE.md and .claude/settings.json
         settingSources: ['project'],
+        // Enable streaming partial messages for real-time output
+        includePartialMessages: true,
         // Avoid nested session detection
         env: cleanEnv,
       },
@@ -138,10 +144,14 @@ export class AgentProcess extends EventEmitter {
 
   /** Resume with the same session ID */
   async resume(newPrompt?: string): Promise<void> {
-    if (!this._sessionId) {
+    // Check both _sessionId (from previous run) and config.sessionId (from AgentManager when recreating process)
+    const sessionId = this._sessionId || this.config.sessionId;
+    if (!sessionId) {
       throw new Error('No session ID to resume');
     }
-    this.config.sessionId = this._sessionId;
+    // Ensure both are set for spawn() to use
+    this._sessionId = sessionId;
+    this.config.sessionId = sessionId;
     await this.spawn(newPrompt || 'Continue where you left off.');
   }
 
@@ -177,18 +187,12 @@ export class AgentProcess extends EventEmitter {
       });
     }
 
-    // Assistant messages
+    // Assistant messages (only handle tool_use, text is handled via streaming flush)
     if (msg.type === 'assistant') {
       const assistantMsg = msg as SDKAssistantMessage;
       for (const block of assistantMsg.message.content) {
-        if (block.type === 'text') {
-          this.emit('output', {
-            agentId: this.agentId,
-            streamType: 'text',
-            content: block.text,
-            timestamp: new Date().toISOString(),
-          });
-        } else if (block.type === 'tool_use') {
+        // Skip text blocks - already flushed via content_block_stop
+        if (block.type === 'tool_use') {
           this.emit('output', {
             agentId: this.agentId,
             streamType: 'tool_use',
@@ -197,6 +201,61 @@ export class AgentProcess extends EventEmitter {
             toolInput: block.input as Record<string, unknown>,
             timestamp: new Date().toISOString(),
           });
+        }
+      }
+    }
+
+    // Streaming partial messages (real-time text output)
+    if (msg.type === 'stream_event') {
+      const event = (msg as { event: { type: string; index?: number; delta?: { type: string; text?: string; thinking?: string } } }).event;
+
+      // Accumulate streaming content
+      if (event.type === 'content_block_delta' && event.delta) {
+        // Handle text streaming
+        if (event.delta.type === 'text_delta' && event.delta.text) {
+          this._streamingTextBuffer += event.delta.text;
+          this.emit('output', {
+            agentId: this.agentId,
+            streamType: 'text',
+            content: event.delta.text,
+            timestamp: new Date().toISOString(),
+            isStreaming: true,
+          });
+        }
+        // Handle thinking streaming
+        if (event.delta.type === 'thinking_delta' && event.delta.thinking) {
+          this._streamingThinkingBuffer += event.delta.thinking;
+          this.emit('output', {
+            agentId: this.agentId,
+            streamType: 'system',
+            content: `[thinking] ${event.delta.thinking}`,
+            timestamp: new Date().toISOString(),
+            isStreaming: true,
+          });
+        }
+      }
+
+      // When content block ends, emit buffered content for DB persistence
+      if (event.type === 'content_block_stop') {
+        // Flush thinking buffer
+        if (this._streamingThinkingBuffer.trim()) {
+          this.emit('output', {
+            agentId: this.agentId,
+            streamType: 'system',
+            content: `[thinking] ${this._streamingThinkingBuffer.trim()}`,
+            timestamp: new Date().toISOString(),
+          });
+          this._streamingThinkingBuffer = '';
+        }
+        // Flush text buffer
+        if (this._streamingTextBuffer.trim()) {
+          this.emit('output', {
+            agentId: this.agentId,
+            streamType: 'text',
+            content: this._streamingTextBuffer.trim(),
+            timestamp: new Date().toISOString(),
+          });
+          this._streamingTextBuffer = '';
         }
       }
     }

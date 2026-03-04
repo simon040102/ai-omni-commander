@@ -34,6 +34,10 @@ export function TerminalOutput({ outputs, title, role, status, agentId, onSendCo
   const setCommandInput = useAgentStore((s) => s.setCommandInput);
   const commandInput = agentId ? (commandInputs[agentId] ?? '') : '';
 
+  // Get streaming buffer for real-time display
+  const streamingBuffers = useAgentStore((s) => s.streamingBuffers);
+  const streamingBuffer = agentId ? streamingBuffers[agentId] : undefined;
+
   useEffect(() => {
     if (autoScrollRef.current && scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -196,6 +200,21 @@ export function TerminalOutput({ outputs, title, role, status, agentId, onSendCo
                 {output.content}
               </div>
             ))
+          )}
+          {/* Real-time streaming content */}
+          {streamingBuffer?.thinking && (
+            <div className="text-yellow-400 leading-5 whitespace-pre-wrap break-all opacity-70">
+              <span className="opacity-50">SYS </span>
+              <span className="text-yellow-500">[thinking] </span>
+              {streamingBuffer.thinking}
+              <span className="animate-pulse">▌</span>
+            </div>
+          )}
+          {streamingBuffer?.text && (
+            <div className="text-gray-200 leading-5 whitespace-pre-wrap break-all">
+              {streamingBuffer.text}
+              <span className="animate-pulse text-primary">▌</span>
+            </div>
           )}
         </div>
 

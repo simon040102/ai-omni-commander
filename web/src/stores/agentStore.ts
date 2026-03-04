@@ -16,8 +16,20 @@ interface AgentStoreState {
   /** Map of agentId -> command input draft (persisted across project switches) */
   commandInputs: Record<string, string>;
 
+  /** Map of agentId -> current streaming text buffer (not persisted) */
+  streamingBuffers: Record<string, { text: string; thinking: string }>;
+
   /** Append output to an agent's buffer */
   appendOutput: (agentId: string, output: AgentOutput) => void;
+
+  /** Append streaming text (accumulates until flushed) */
+  appendStreaming: (agentId: string, type: 'text' | 'thinking', content: string) => void;
+
+  /** Flush streaming buffer to output */
+  flushStreaming: (agentId: string) => void;
+
+  /** Clear streaming buffer without adding to outputs (when server already saved) */
+  clearStreamingBuffer: (agentId: string) => void;
 
   /** Set bulk outputs for an agent (used when loading from DB) */
   setOutputsBulk: (agentId: string, outputs: AgentOutput[]) => void;
@@ -52,6 +64,7 @@ export const useAgentStore = create<AgentStoreState>()(
     (set) => ({
       outputs: {},
       commandInputs: {},
+      streamingBuffers: {},
 
       appendOutput: (agentId, output) => set((state) => {
         const existing = state.outputs[agentId] || [];
@@ -64,6 +77,63 @@ export const useAgentStore = create<AgentStoreState>()(
           outputs: { ...state.outputs, [agentId]: trimmed },
         };
       }),
+
+      appendStreaming: (agentId, type, content) => set((state) => {
+        const buffer = state.streamingBuffers[agentId] || { text: '', thinking: '' };
+        return {
+          streamingBuffers: {
+            ...state.streamingBuffers,
+            [agentId]: {
+              ...buffer,
+              [type]: buffer[type] + content,
+            },
+          },
+        };
+      }),
+
+      flushStreaming: (agentId) => set((state) => {
+        const buffer = state.streamingBuffers[agentId];
+        if (!buffer) return state;
+
+        const newOutputs: AgentOutput[] = [];
+        const timestamp = new Date().toISOString();
+
+        if (buffer.thinking.trim()) {
+          newOutputs.push({
+            streamType: 'system',
+            content: `[thinking] ${buffer.thinking.trim()}`,
+            timestamp,
+          });
+        }
+        if (buffer.text.trim()) {
+          newOutputs.push({
+            streamType: 'text',
+            content: buffer.text.trim(),
+            timestamp,
+          });
+        }
+
+        if (newOutputs.length === 0) {
+          return {
+            streamingBuffers: { ...state.streamingBuffers, [agentId]: { text: '', thinking: '' } },
+          };
+        }
+
+        const existing = state.outputs[agentId] || [];
+        const updated = [...existing, ...newOutputs];
+        const trimmed = updated.length > MAX_OUTPUT_LINES
+          ? updated.slice(-MAX_OUTPUT_LINES)
+          : updated;
+
+        return {
+          outputs: { ...state.outputs, [agentId]: trimmed },
+          streamingBuffers: { ...state.streamingBuffers, [agentId]: { text: '', thinking: '' } },
+        };
+      }),
+
+      clearStreamingBuffer: (agentId) => set((state) => ({
+        streamingBuffers: { ...state.streamingBuffers, [agentId]: { text: '', thinking: '' } },
+      })),
 
       setOutputsBulk: (agentId, outputs) => set((state) => {
         const trimmed = outputs.length > MAX_OUTPUT_LINES
@@ -82,12 +152,12 @@ export const useAgentStore = create<AgentStoreState>()(
         commandInputs: { ...state.commandInputs, [agentId]: value },
       })),
 
-      clearAll: () => set({ outputs: {}, commandInputs: {} }),
+      clearAll: () => set({ outputs: {}, commandInputs: {}, streamingBuffers: {} }),
     }),
     {
       name: 'omni-agent-store',
       storage: createJSONStorage(() => indexedDBStorage),
-      // Only persist outputs and commandInputs (not functions)
+      // Only persist outputs and commandInputs (not streaming buffers)
       partialize: (state) => ({
         outputs: state.outputs,
         commandInputs: state.commandInputs,
