@@ -37,8 +37,13 @@ interface DashboardProps {
 export function Dashboard({ onViewChange }: DashboardProps) {
   const currentProjectId = useProjectStore(s => s.currentProjectId);
   const projects = useProjectStore(s => s.projects);
-  const agents = useProjectStore(s => s.agents);
+  const allAgents = useProjectStore(s => s.agents);
   const outputs = useAgentStore(s => s.outputs);
+
+  // Only show agents for the current project
+  const agents = currentProjectId
+    ? allAgents.filter(a => a.projectId === currentProjectId)
+    : allAgents;
   const client = useWsStore(s => s.client);
   const addToast = useToastStore(s => s.addToast);
   const [elapsed, setElapsed] = useState('00:00');

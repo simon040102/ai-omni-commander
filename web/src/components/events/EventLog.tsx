@@ -4,7 +4,13 @@ import { IconClock } from '../ui/Icons';
 
 export function EventLog() {
   const outputs = useAgentStore(s => s.outputs);
-  const agents = useProjectStore(s => s.agents);
+  const allAgents = useProjectStore(s => s.agents);
+  const currentProjectId = useProjectStore(s => s.currentProjectId);
+
+  // Only show agents for the current project
+  const agents = currentProjectId
+    ? allAgents.filter(a => a.projectId === currentProjectId)
+    : allAgents;
 
   // Combine all agent outputs into a single sorted timeline
   const allEvents: (AgentOutput & { agentId: string; agentRole: string })[] = [];

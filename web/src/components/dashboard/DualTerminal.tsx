@@ -9,9 +9,15 @@ interface DualTerminalProps {
 }
 
 export function DualTerminal({ focusAgentId }: DualTerminalProps) {
-  const agents = useProjectStore(s => s.agents);
+  const allAgents = useProjectStore(s => s.agents);
+  const currentProjectId = useProjectStore(s => s.currentProjectId);
   const outputs = useAgentStore(s => s.outputs);
   const client = useWsStore(s => s.client);
+
+  // Only show agents for the current project
+  const agents = currentProjectId
+    ? allAgents.filter(a => a.projectId === currentProjectId)
+    : allAgents;
 
   const handleSendCommand = useCallback((agentId: string, command: string) => {
     client?.send({

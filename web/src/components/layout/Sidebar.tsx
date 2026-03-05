@@ -37,9 +37,9 @@ export function Sidebar({ currentView, onViewChange, collapsed, onToggleCollapse
   const currentProjectId = useProjectStore(s => s.currentProjectId);
   const setCurrentProject = useProjectStore(s => s.setCurrentProject);
   const projectsWithActivity = useProjectStore(s => s.projectsWithActivity);
-  const agents = useProjectStore(s => s.agents);
-  const tasks = useProjectStore(s => s.tasks);
-  const interventions = useProjectStore(s => s.interventions);
+  const allAgents = useProjectStore(s => s.agents);
+  const allTasks = useProjectStore(s => s.tasks);
+  const allInterventions = useProjectStore(s => s.interventions);
   const connected = useWsStore(s => s.connected);
   const client = useWsStore(s => s.client);
   const addToast = useToastStore(s => s.addToast);
@@ -51,6 +51,11 @@ export function Sidebar({ currentView, onViewChange, collapsed, onToggleCollapse
   const [menuDropUp, setMenuDropUp] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const kebabRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
+
+  // Filter by current project
+  const agents = currentProjectId ? allAgents.filter(a => a.projectId === currentProjectId) : allAgents;
+  const tasks = allTasks; // Tasks are already project-scoped by setProjectState
+  const interventions = allInterventions; // Interventions are already project-scoped
 
   const pendingInterventions = interventions.filter(i => i.status === 'pending').length;
   const runningAgents = agents.filter(a => a.status === 'running').length;
