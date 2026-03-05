@@ -1,7 +1,40 @@
 import { useEffect, useRef, useState, useMemo, useCallback } from 'react';
 import type { AgentOutput } from '../../stores/agentStore';
 import { useAgentStore } from '../../stores/agentStore';
-import { IconSearch, IconStop, IconRefresh, IconSend, IconChevronDown, IconX } from '../ui/Icons';
+import { IconSearch, IconStop, IconRefresh, IconSend, IconChevronDown, IconChevronRight, IconX } from '../ui/Icons';
+
+/** Collapsible thinking block component */
+function ThinkingBlock({ content, defaultExpanded = false }: { content: string; defaultExpanded?: boolean }) {
+  const [isExpanded, setIsExpanded] = useState(defaultExpanded);
+  // Remove [thinking] prefix for display
+  const thinkingContent = content.replace(/^\[thinking\]\s*/i, '');
+  // Truncate preview to ~50 chars
+  const preview = thinkingContent.slice(0, 50) + (thinkingContent.length > 50 ? '...' : '');
+
+  return (
+    <div className="my-1">
+      <button
+        onClick={() => setIsExpanded(!isExpanded)}
+        className="flex items-center gap-1 text-yellow-600 dark:text-yellow-400 hover:text-yellow-500 dark:hover:text-yellow-300 transition-colors"
+      >
+        {isExpanded ? (
+          <IconChevronDown className="w-3 h-3 shrink-0" />
+        ) : (
+          <IconChevronRight className="w-3 h-3 shrink-0" />
+        )}
+        <span className="text-[10px] px-1.5 py-0.5 rounded bg-yellow-500/10 font-medium">thinking</span>
+        {!isExpanded && (
+          <span className="opacity-50 text-[10px] truncate max-w-[300px]">{preview}</span>
+        )}
+      </button>
+      {isExpanded && (
+        <div className="ml-4 mt-1 pl-2 border-l-2 border-yellow-500/30 text-yellow-600 dark:text-yellow-400 opacity-80 whitespace-pre-wrap break-all">
+          {thinkingContent}
+        </div>
+      )}
+    </div>
+  );
+}
 
 interface PastedFile {
   id: string;
@@ -317,22 +350,30 @@ export function TerminalOutput({ outputs, title, role, status, agentId, model, t
                searchQuery ? 'No matches found.' : 'No output for this filter.'}
             </div>
           ) : (
-            filteredOutputs.map((output, i) => (
-              <div key={i} className={`${STREAM_COLORS[output.streamType] || 'text-gray-300'} leading-5 whitespace-pre-wrap break-all`}>
-                {output.streamType === 'error' && (
-                  <span className="opacity-50">ERR </span>
-                )}
-                {output.streamType === 'system' && (
-                  <span className="opacity-50">SYS </span>
-                )}
-                {output.streamType === 'tool_use' && output.toolName && (
-                  <span className="inline-flex items-center px-1.5 py-0 rounded bg-cyan-500/10 text-cyan-600 dark:text-cyan-500 text-[10px] font-medium mr-1.5">
-                    {output.toolName}
-                  </span>
-                )}
-                {output.content}
-              </div>
-            ))
+            filteredOutputs.map((output, i) => {
+              // Check if this is a thinking block
+              const isThinking = output.streamType === 'system' && output.content.startsWith('[thinking]');
+              if (isThinking) {
+                return <ThinkingBlock key={i} content={output.content} />;
+              }
+
+              return (
+                <div key={i} className={`${STREAM_COLORS[output.streamType] || 'text-gray-300'} leading-5 whitespace-pre-wrap break-all`}>
+                  {output.streamType === 'error' && (
+                    <span className="opacity-50">ERR </span>
+                  )}
+                  {output.streamType === 'system' && (
+                    <span className="opacity-50">SYS </span>
+                  )}
+                  {output.streamType === 'tool_use' && output.toolName && (
+                    <span className="inline-flex items-center px-1.5 py-0 rounded bg-cyan-500/10 text-cyan-600 dark:text-cyan-500 text-[10px] font-medium mr-1.5">
+                      {output.toolName}
+                    </span>
+                  )}
+                  {output.content}
+                </div>
+              );
+            })
           )}
           {/* Real-time streaming content */}
           {streamingBuffer?.thinking && (
