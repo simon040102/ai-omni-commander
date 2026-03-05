@@ -45,6 +45,9 @@ export function ProjectSetup({ onViewChange }: ProjectSetupProps) {
   const [reviewEnabled, setReviewEnabled] = useState(true);
   const [reviewSkillSource, setReviewSkillSource] = useState<string>('auto');
 
+  // Model selection
+  const [selectedModel, setSelectedModel] = useState<string>('sonnet');
+
   const addWorkspace = () => {
     setWorkspaces([...workspaces, { label: '', path: '' }]);
   };
@@ -109,11 +112,12 @@ export function ProjectSetup({ onViewChange }: ProjectSetupProps) {
       payload: {
         projectId,
         requirement: requirement.trim() || undefined,
+        model: selectedModel,
       },
     });
-    addToast({ type: 'info', title: 'Execution started', message: 'Sending tasks to agents...' });
+    addToast({ type: 'info', title: 'Execution started', message: `Using ${selectedModel} model...` });
     setStep('execute');
-  }, [projectId, client, addToast, requirement]);
+  }, [projectId, client, addToast, requirement, selectedModel]);
 
   const currentStepIndex = STEP_INFO.findIndex(s => s.key === step);
 
@@ -336,6 +340,35 @@ export function ProjectSetup({ onViewChange }: ProjectSetupProps) {
                   placeholder="e.g. Implement the user authentication module based on the SD spec, including login, registration, and JWT token management..."
                   className="w-full bg-muted border border-border rounded-md px-3 py-2 text-sm min-h-[100px] resize-y outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
                 />
+              </div>
+
+              {/* Model Selection */}
+              <div>
+                <label className="block text-sm font-medium mb-1">Model</label>
+                <p className="text-xs text-muted-foreground mb-2">
+                  Choose which Claude model the agents will use.
+                </p>
+                <div className="flex gap-2">
+                  {(['sonnet', 'opus', 'haiku'] as const).map((model) => (
+                    <button
+                      key={model}
+                      onClick={() => setSelectedModel(model)}
+                      className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                        selectedModel === model
+                          ? model === 'opus'
+                            ? 'bg-purple-500/20 text-purple-400 border border-purple-500/50'
+                            : model === 'haiku'
+                              ? 'bg-green-500/20 text-green-400 border border-green-500/50'
+                              : 'bg-blue-500/20 text-blue-400 border border-blue-500/50'
+                          : 'bg-muted text-muted-foreground border border-border hover:border-primary/50 hover:text-foreground'
+                      }`}
+                    >
+                      {model.charAt(0).toUpperCase() + model.slice(1)}
+                      {model === 'opus' && <span className="ml-1 text-[10px] opacity-60">(most capable)</span>}
+                      {model === 'haiku' && <span className="ml-1 text-[10px] opacity-60">(fastest)</span>}
+                    </button>
+                  ))}
+                </div>
               </div>
 
               <button

@@ -46,6 +46,8 @@ export interface WsStartExecution extends WsMessage {
   payload: {
     projectId: string;
     requirement?: string;
+    /** Model to use for agents (e.g., 'sonnet', 'opus', 'haiku') */
+    model?: string;
   };
 }
 

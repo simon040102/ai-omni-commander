@@ -52,7 +52,7 @@ export class SpecModeHandler {
   }
 
   /** Start execution: spawn one agent per workspace with appropriate documents */
-  async execute(projectId: string, requirement?: string): Promise<void> {
+  async execute(projectId: string, requirement?: string, model?: string): Promise<void> {
     const project = getProject(projectId);
     if (!project) throw new Error(`Project ${projectId} not found`);
 
@@ -110,14 +110,14 @@ export class SpecModeHandler {
         await this.agentManager.rerunAgent(agent.id, prompt);
       } else {
         logger.info(
-          { projectId, workspace: ws.label, role: resolvedRole, docCount: finalDocs.length },
+          { projectId, workspace: ws.label, role: resolvedRole, model: model || 'sonnet', docCount: finalDocs.length },
           'Starting new workspace agent',
         );
         await this.agentManager.startAgent({
           projectId,
           role: resolvedRole,
           prompt,
-          model: 'sonnet',
+          model: model || 'sonnet',
         });
       }
     }
