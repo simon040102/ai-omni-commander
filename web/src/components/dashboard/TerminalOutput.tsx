@@ -12,11 +12,11 @@ interface PastedFile {
 }
 
 const STREAM_COLORS: Record<string, string> = {
-  text: 'text-gray-200',
-  tool_use: 'text-cyan-400',
-  tool_result: 'text-gray-500',
-  error: 'text-red-400',
-  system: 'text-yellow-400',
+  text: 'text-foreground',
+  tool_use: 'text-cyan-600 dark:text-cyan-400',
+  tool_result: 'text-muted-foreground',
+  error: 'text-red-600 dark:text-red-400',
+  system: 'text-yellow-600 dark:text-yellow-400',
 };
 
 interface TerminalOutputProps {
@@ -25,13 +25,14 @@ interface TerminalOutputProps {
   role?: string;
   status?: string;
   agentId?: string;
+  model?: string;
   totalInputTokens?: number;
   totalOutputTokens?: number;
   onSendCommand?: (agentId: string, command: string) => void;
   onAction?: (agentId: string, action: 'stop' | 'restart') => void;
 }
 
-export function TerminalOutput({ outputs, title, role, status, agentId, totalInputTokens, totalOutputTokens, onSendCommand, onAction }: TerminalOutputProps) {
+export function TerminalOutput({ outputs, title, role, status, agentId, model, totalInputTokens, totalOutputTokens, onSendCommand, onAction }: TerminalOutputProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const autoScrollRef = useRef(true);
   const [isAutoScroll, setIsAutoScroll] = useState(true);
@@ -207,9 +208,15 @@ export function TerminalOutput({ outputs, title, role, status, agentId, totalInp
             {toolCount > 0 && ` | ${toolCount} tools`}
             {errorCount > 0 && ` | ${errorCount} errors`}
           </span>
+          {/* Model display */}
+          {model && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-600 dark:text-purple-400">
+              {model.replace('claude-', '').replace(/-\d+$/, '')}
+            </span>
+          )}
           {/* Token usage display */}
           {(totalInputTokens !== undefined && totalInputTokens > 0) && (
-            <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400">
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-600 dark:text-blue-400">
               {((totalInputTokens + (totalOutputTokens || 0)) / 1000).toFixed(1)}k tokens
             </span>
           )}
@@ -279,14 +286,14 @@ export function TerminalOutput({ outputs, title, role, status, agentId, totalInp
 
       {/* Search bar */}
       {showSearch && (
-        <div className="flex items-center gap-2 px-3 py-1 bg-zinc-900 border-b border-border">
+        <div className="flex items-center gap-2 px-3 py-1 bg-muted/50 border-b border-border">
           <IconSearch className="w-3 h-3 text-muted-foreground" />
           <input
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder="Search output..."
-            className="flex-1 bg-transparent text-xs text-gray-200 font-mono outline-none placeholder:text-gray-600"
+            className="flex-1 bg-transparent text-xs text-foreground font-mono outline-none placeholder:text-muted-foreground"
             autoFocus
           />
           {searchQuery && (
@@ -302,10 +309,10 @@ export function TerminalOutput({ outputs, title, role, status, agentId, totalInp
         <div
           ref={scrollRef}
           onScroll={handleScroll}
-          className="absolute inset-0 overflow-auto bg-zinc-950 font-mono text-xs p-2"
+          className="absolute inset-0 overflow-auto bg-slate-100 dark:bg-zinc-950 font-mono text-xs p-2"
         >
           {filteredOutputs.length === 0 ? (
-            <div className="text-gray-600 italic">
+            <div className="text-muted-foreground italic">
               {outputs.length === 0 ? 'Waiting for output...' :
                searchQuery ? 'No matches found.' : 'No output for this filter.'}
             </div>
@@ -319,7 +326,7 @@ export function TerminalOutput({ outputs, title, role, status, agentId, totalInp
                   <span className="opacity-50">SYS </span>
                 )}
                 {output.streamType === 'tool_use' && output.toolName && (
-                  <span className="inline-flex items-center px-1.5 py-0 rounded bg-cyan-500/10 text-cyan-500 text-[10px] font-medium mr-1.5">
+                  <span className="inline-flex items-center px-1.5 py-0 rounded bg-cyan-500/10 text-cyan-600 dark:text-cyan-500 text-[10px] font-medium mr-1.5">
                     {output.toolName}
                   </span>
                 )}
@@ -329,15 +336,15 @@ export function TerminalOutput({ outputs, title, role, status, agentId, totalInp
           )}
           {/* Real-time streaming content */}
           {streamingBuffer?.thinking && (
-            <div className="text-yellow-400 leading-5 whitespace-pre-wrap break-all opacity-70">
+            <div className="text-yellow-600 dark:text-yellow-400 leading-5 whitespace-pre-wrap break-all opacity-70">
               <span className="opacity-50">SYS </span>
-              <span className="text-yellow-500">[thinking] </span>
+              <span className="text-yellow-700 dark:text-yellow-500">[thinking] </span>
               {streamingBuffer.thinking}
               <span className="animate-pulse">▌</span>
             </div>
           )}
           {streamingBuffer?.text && (
-            <div className="text-gray-200 leading-5 whitespace-pre-wrap break-all">
+            <div className="text-foreground leading-5 whitespace-pre-wrap break-all">
               {streamingBuffer.text}
               <span className="animate-pulse text-primary">▌</span>
             </div>
@@ -401,27 +408,27 @@ export function TerminalOutput({ outputs, title, role, status, agentId, totalInp
         };
 
         return (
-          <div className="bg-zinc-900 border-t border-border">
+          <div className="bg-slate-200 dark:bg-zinc-900 border-t border-border">
             {/* Pasted files preview */}
             {pastedFiles.length > 0 && (
               <div className="flex flex-wrap gap-2 px-3 py-2 border-b border-border/50">
                 {pastedFiles.map(file => (
                   <div
                     key={file.id}
-                    className="relative group flex items-center gap-1.5 px-2 py-1 bg-zinc-800 rounded-md text-xs"
+                    className="relative group flex items-center gap-1.5 px-2 py-1 bg-slate-300 dark:bg-zinc-800 rounded-md text-xs"
                   >
                     {file.preview ? (
                       <img src={file.preview} alt={file.name} className="w-8 h-8 object-cover rounded" />
                     ) : (
-                      <span className="w-8 h-8 flex items-center justify-center bg-zinc-700 rounded text-[10px]">
+                      <span className="w-8 h-8 flex items-center justify-center bg-slate-400 dark:bg-zinc-700 rounded text-[10px]">
                         📄
                       </span>
                     )}
-                    <span className="max-w-[100px] truncate text-gray-300">{file.name}</span>
+                    <span className="max-w-[100px] truncate text-foreground">{file.name}</span>
                     <button
                       type="button"
                       onClick={() => removePastedFile(file.id)}
-                      className="p-0.5 rounded hover:bg-red-500/20 text-gray-500 hover:text-red-400"
+                      className="p-0.5 rounded hover:bg-red-500/20 text-muted-foreground hover:text-red-500 dark:hover:text-red-400"
                     >
                       <IconX className="w-3 h-3" />
                     </button>
@@ -462,7 +469,7 @@ export function TerminalOutput({ outputs, title, role, status, agentId, totalInp
                 placeholder={placeholder}
                 disabled={!canSend}
                 rows={1}
-                className="flex-1 bg-transparent text-xs text-gray-200 font-mono outline-none placeholder:text-gray-600 disabled:opacity-40 disabled:cursor-not-allowed resize-none min-h-[24px] max-h-[150px] leading-5"
+                className="flex-1 bg-transparent text-xs text-foreground font-mono outline-none placeholder:text-muted-foreground disabled:opacity-40 disabled:cursor-not-allowed resize-none min-h-[24px] max-h-[150px] leading-5"
               />
               <button
                 type="submit"
