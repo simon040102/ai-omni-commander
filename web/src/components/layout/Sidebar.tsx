@@ -61,7 +61,6 @@ export function Sidebar({ currentView, onViewChange, collapsed, onToggleCollapse
   const runningAgents = agents.filter(a => a.status === 'running').length;
   const completedTasks = tasks.filter(t => t.status === 'completed').length;
   const failedTasks = tasks.filter(t => t.status === 'failed').length;
-  const totalCost = agents.reduce((sum, a) => sum + a.totalCostUsd, 0);
 
   // Close menu on outside click
   useEffect(() => {
@@ -314,10 +313,6 @@ export function Sidebar({ currentView, onViewChange, collapsed, onToggleCollapse
                 {completedTasks} done
                 {failedTasks > 0 && <span className="text-red-400 ml-1">/ {failedTasks} failed</span>}
               </span>
-            </div>
-            <div className="flex justify-between">
-              <span>Cost</span>
-              <span>${totalCost.toFixed(2)}</span>
             </div>
             {pendingInterventions > 0 && (
               <div className="flex justify-between text-yellow-400">

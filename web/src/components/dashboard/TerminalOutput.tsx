@@ -27,12 +27,11 @@ interface TerminalOutputProps {
   agentId?: string;
   totalInputTokens?: number;
   totalOutputTokens?: number;
-  totalCostUsd?: number;
   onSendCommand?: (agentId: string, command: string) => void;
   onAction?: (agentId: string, action: 'stop' | 'restart') => void;
 }
 
-export function TerminalOutput({ outputs, title, role, status, agentId, totalInputTokens, totalOutputTokens, totalCostUsd, onSendCommand, onAction }: TerminalOutputProps) {
+export function TerminalOutput({ outputs, title, role, status, agentId, totalInputTokens, totalOutputTokens, onSendCommand, onAction }: TerminalOutputProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const autoScrollRef = useRef(true);
   const [isAutoScroll, setIsAutoScroll] = useState(true);
@@ -212,11 +211,6 @@ export function TerminalOutput({ outputs, title, role, status, agentId, totalInp
           {(totalInputTokens !== undefined && totalInputTokens > 0) && (
             <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400">
               {((totalInputTokens + (totalOutputTokens || 0)) / 1000).toFixed(1)}k tokens
-            </span>
-          )}
-          {totalCostUsd !== undefined && totalCostUsd > 0 && (
-            <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400">
-              ${totalCostUsd.toFixed(4)}
             </span>
           )}
         </div>
@@ -443,27 +437,41 @@ export function TerminalOutput({ outputs, title, role, status, agentId, totalInp
             )}
 
             <form
-              className="flex items-center gap-2 px-3 py-2"
+              className="flex items-start gap-2 px-3 py-2"
               onSubmit={handleSubmit}
             >
-              <span className={`text-xs select-none ${canSend ? 'text-primary' : 'text-muted-foreground/30'}`}>&gt;</span>
-              <input
-                type="text"
+              <span className={`text-xs select-none mt-1.5 ${canSend ? 'text-primary' : 'text-muted-foreground/30'}`}>&gt;</span>
+              <textarea
                 value={commandInput}
-                onChange={(e) => agentId && setCommandInput(agentId, e.target.value)}
+                onChange={(e) => {
+                  if (agentId) setCommandInput(agentId, e.target.value);
+                  // Auto-resize
+                  e.target.style.height = 'auto';
+                  e.target.style.height = Math.min(e.target.scrollHeight, 150) + 'px';
+                }}
+                onKeyDown={(e) => {
+                  // Submit on Enter (without Shift)
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    if (canSend && (commandInput.trim() || pastedFiles.length > 0)) {
+                      handleSubmit(e);
+                    }
+                  }
+                }}
                 onPaste={handlePaste}
                 placeholder={placeholder}
                 disabled={!canSend}
-                className="flex-1 bg-transparent text-xs text-gray-200 font-mono outline-none placeholder:text-gray-600 disabled:opacity-40 disabled:cursor-not-allowed"
+                rows={1}
+                className="flex-1 bg-transparent text-xs text-gray-200 font-mono outline-none placeholder:text-gray-600 disabled:opacity-40 disabled:cursor-not-allowed resize-none min-h-[24px] max-h-[150px] leading-5"
               />
               <button
                 type="submit"
                 disabled={!canSend || (!commandInput.trim() && pastedFiles.length === 0)}
-              className="inline-flex items-center gap-1 px-3 py-1 text-xs font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-            >
-              <IconSend className="w-3 h-3" />
-              Send
-            </button>
+                className="inline-flex items-center gap-1 px-3 py-1 text-xs font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-30 disabled:cursor-not-allowed transition-colors mt-0.5"
+              >
+                <IconSend className="w-3 h-3" />
+                Send
+              </button>
             </form>
           </div>
         );
