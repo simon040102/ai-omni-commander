@@ -4,6 +4,7 @@ import { Sidebar } from './Sidebar';
 import { ToastContainer } from '../ui/ToastContainer';
 import { useWebSocket } from '../../hooks/useWebSocket';
 import { useProjectStore } from '../../stores/projectStore';
+import { initTabNotification } from '../../lib/tabNotification';
 
 export type View = 'dashboard' | 'tasks' | 'setup' | 'events';
 
@@ -19,6 +20,11 @@ export function AppShell({ children }: AppShellProps) {
 
   // Initialize WebSocket connection
   useWebSocket();
+
+  // Initialize tab notification (once)
+  useEffect(() => {
+    initTabNotification();
+  }, []);
 
   // Auto-switch to dashboard when agents appear
   useEffect(() => {

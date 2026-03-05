@@ -85,6 +85,17 @@ export function ProjectSetup({ onViewChange }: ProjectSetupProps) {
       },
     });
 
+    // Save workspace paths to recent paths
+    for (const ws of workspaces) {
+      if (ws.path.trim()) {
+        fetch('/api/recent-paths', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: ws.path.trim(), label: ws.label.trim() || undefined }),
+        }).catch(() => { /* ignore */ });
+      }
+    }
+
     addToast({ type: 'success', title: 'Project created', message: `"${name}" (${mode} mode)` });
     setStep('content');
   }, [name, mode, workspaces, client, isWorkspacesValid, reviewEnabled, reviewSkillSource, addToast]);

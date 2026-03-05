@@ -92,3 +92,27 @@ export function clearRecentPaths(): void {
   const db = getDb();
   db.prepare(`DELETE FROM recent_paths`).run();
 }
+
+/**
+ * Migrate existing project working directories to recent_paths
+ * Only adds paths that don't already exist
+ */
+export function migrateProjectPathsToRecent(): void {
+  const db = getDb();
+
+  // Get all unique working_dir from projects
+  const projectPaths = db.prepare(`
+    SELECT DISTINCT working_dir FROM projects WHERE working_dir IS NOT NULL AND working_dir != ''
+  `).all() as Array<{ working_dir: string }>;
+
+  for (const row of projectPaths) {
+    const path = row.working_dir.trim();
+    if (!path) continue;
+
+    // Check if already exists
+    const existing = db.prepare(`SELECT 1 FROM recent_paths WHERE path = ?`).get(path);
+    if (!existing) {
+      db.prepare(`INSERT INTO recent_paths (path) VALUES (?)`).run(path);
+    }
+  }
+}

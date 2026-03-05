@@ -301,8 +301,9 @@ export class AgentManager {
       });
     });
 
-    proc.on('output', (output: AgentOutputEvent & { isStreaming?: boolean }) => {
+    proc.on('output', (output: AgentOutputEvent & { isStreaming?: boolean; projectId?: string }) => {
       output.taskId = taskId;
+      output.projectId = projectId;
 
       // Only persist non-streaming outputs to DB (streaming will be followed by full message)
       if (!output.isStreaming) {
