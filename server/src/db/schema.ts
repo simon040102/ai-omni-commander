@@ -19,7 +19,7 @@ export function runMigrations(db: Database.Database): void {
       id              TEXT PRIMARY KEY,
       project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
       role            TEXT NOT NULL CHECK(role IN ('master', 'architect', 'backend',
-                                                    'frontend', 'devops', 'testing', 'review')),
+                                                    'frontend', 'devops', 'testing', 'review', 'quick')),
       status          TEXT NOT NULL DEFAULT 'idle'
                         CHECK(status IN ('idle', 'starting', 'running', 'paused',
                                           'stopping', 'stopped', 'error')),
@@ -131,11 +131,15 @@ export function runMigrations(db: Database.Database): void {
 
   // Migration: add 'quick' mode to projects table (for existing DBs)
   // SQLite doesn't support altering CHECK constraints, so we recreate the table
-  const projectCols = db.prepare("PRAGMA table_info(projects)").all() as Array<{ name: string }>;
-  if (projectCols.length > 0) {
-    // Check if we need to migrate by trying to insert a quick mode project
+  // Check if the table schema includes 'quick' in the mode CHECK constraint
+  const projectTableInfo = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='projects'").get() as { sql: string } | undefined;
+  const needsQuickModeMigration = projectTableInfo?.sql && !projectTableInfo.sql.includes("'quick'");
+
+  if (needsQuickModeMigration) {
     try {
       db.exec(`
+        PRAGMA foreign_keys = OFF;
+
         CREATE TABLE IF NOT EXISTS projects_new (
           id            TEXT PRIMARY KEY,
           name          TEXT NOT NULL,
@@ -151,9 +155,12 @@ export function runMigrations(db: Database.Database): void {
         INSERT OR IGNORE INTO projects_new SELECT * FROM projects;
         DROP TABLE projects;
         ALTER TABLE projects_new RENAME TO projects;
+
+        PRAGMA foreign_keys = ON;
       `);
     } catch {
-      // Table already has correct constraint or migration not needed
+      // Migration failed, make sure foreign keys are back on
+      db.exec('PRAGMA foreign_keys = ON');
     }
   }
 
@@ -170,5 +177,52 @@ export function runMigrations(db: Database.Database): void {
   }
   if (!agentCols.some(c => c.name === 'total_output_tokens')) {
     db.exec("ALTER TABLE agents ADD COLUMN total_output_tokens INTEGER NOT NULL DEFAULT 0");
+  }
+
+  // Migration: add 'quick' role to agents table (for existing DBs)
+  // SQLite doesn't support altering CHECK constraints, so we recreate the table
+  // IMPORTANT: We must disable foreign keys to prevent CASCADE deletes on agent_outputs
+  // Check if the table schema includes 'quick' in the role CHECK constraint
+  const tableInfo = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='agents'").get() as { sql: string } | undefined;
+  const needsQuickRoleMigration = tableInfo?.sql && !tableInfo.sql.includes("'quick'");
+
+  if (needsQuickRoleMigration) {
+    try {
+      db.exec(`
+        PRAGMA foreign_keys = OFF;
+
+        CREATE TABLE IF NOT EXISTS agents_new (
+          id              TEXT PRIMARY KEY,
+          project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          role            TEXT NOT NULL CHECK(role IN ('master', 'architect', 'backend',
+                                                        'frontend', 'devops', 'testing', 'review', 'quick')),
+          status          TEXT NOT NULL DEFAULT 'idle'
+                            CHECK(status IN ('idle', 'starting', 'running', 'paused',
+                                              'stopping', 'stopped', 'error')),
+          session_id      TEXT,
+          pid             INTEGER,
+          current_task_id TEXT,
+          system_prompt   TEXT,
+          model           TEXT NOT NULL DEFAULT 'sonnet',
+          allowed_tools   TEXT,
+          total_cost_usd  REAL NOT NULL DEFAULT 0.0,
+          total_turns     INTEGER NOT NULL DEFAULT 0,
+          total_input_tokens  INTEGER NOT NULL DEFAULT 0,
+          total_output_tokens INTEGER NOT NULL DEFAULT 0,
+          last_heartbeat  TEXT,
+          created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT OR IGNORE INTO agents_new SELECT * FROM agents;
+        DROP TABLE agents;
+        ALTER TABLE agents_new RENAME TO agents;
+        CREATE INDEX IF NOT EXISTS idx_agents_project ON agents(project_id);
+
+        PRAGMA foreign_keys = ON;
+      `);
+    } catch {
+      // Migration failed, make sure foreign keys are back on
+      db.exec('PRAGMA foreign_keys = ON');
+    }
   }
 }

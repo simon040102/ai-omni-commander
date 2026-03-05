@@ -1,4 +1,4 @@
-import type { Workspace, QuickTaskType } from '@omni/shared';
+import type { Workspace, QuickTaskType, AgentRole } from '@omni/shared';
 import type { AgentManager } from '../agent/AgentManager.js';
 import type { EventBus } from '../eventbus/EventBus.js';
 import { updateProject, getProject } from '../db/queries/projects.js';
@@ -6,11 +6,14 @@ import { createChildLogger } from '../utils/logger.js';
 
 const logger = createChildLogger('QuickModeHandler');
 
+export type QuickAgentRole = 'backend' | 'frontend' | 'devops' | 'testing';
+
 export interface QuickTask {
   type: QuickTaskType;
   description: string;
   errorLog?: string;
   relatedFiles?: string[];
+  role?: QuickAgentRole;
 }
 
 const TASK_TYPE_LABELS: Record<QuickTaskType, string> = {
@@ -53,15 +56,16 @@ export class QuickModeHandler {
     updateProject(projectId, { status: 'executing' });
 
     const prompt = this.buildQuickPrompt(workspace, quickTask);
+    const agentRole: AgentRole = quickTask.role || 'backend';
 
     logger.info(
-      { projectId, workspace: workspace.label, taskType: quickTask.type, model: model || 'sonnet' },
+      { projectId, workspace: workspace.label, taskType: quickTask.type, role: agentRole, model: model || 'sonnet' },
       'Starting quick task agent',
     );
 
     await this.agentManager.startAgent({
       projectId,
-      role: 'backend', // Use a generic role for quick tasks
+      role: agentRole,
       prompt,
       model: model || 'sonnet',
     });

@@ -2,6 +2,8 @@ import { useState } from 'react';
 import type { QuickTaskType } from '@omni/shared';
 import { IconPlay } from '../ui/Icons';
 
+type QuickRole = 'backend' | 'frontend' | 'devops' | 'testing';
+
 interface QuickModeSetupProps {
   projectId: string;
   selectedModel: string;
@@ -11,6 +13,7 @@ interface QuickModeSetupProps {
     description: string;
     errorLog?: string;
     relatedFiles?: string[];
+    role?: QuickRole;
   }) => void;
 }
 
@@ -21,12 +24,20 @@ const TASK_TYPES: { value: QuickTaskType; label: string; emoji: string; desc: st
   { value: 'other', label: 'Other', emoji: '📝', desc: 'General task' },
 ];
 
+const ROLES: { value: QuickRole; label: string; emoji: string; desc: string }[] = [
+  { value: 'backend', label: 'Backend', emoji: '⚙️', desc: 'Server-side, API, database' },
+  { value: 'frontend', label: 'Frontend', emoji: '🎨', desc: 'UI, React, styling' },
+  { value: 'devops', label: 'DevOps', emoji: '🚀', desc: 'CI/CD, Docker, deployment' },
+  { value: 'testing', label: 'Testing', emoji: '🧪', desc: 'Tests, QA, automation' },
+];
+
 export function QuickModeSetup({
   selectedModel,
   onModelChange,
   onStartExecution,
 }: QuickModeSetupProps) {
   const [taskType, setTaskType] = useState<QuickTaskType>('bug');
+  const [role, setRole] = useState<QuickRole>('backend');
   const [description, setDescription] = useState('');
   const [errorLog, setErrorLog] = useState('');
   const [relatedFiles, setRelatedFiles] = useState('');
@@ -42,6 +53,7 @@ export function QuickModeSetup({
       relatedFiles: relatedFiles.trim()
         ? relatedFiles.split('\n').map(f => f.trim()).filter(Boolean)
         : undefined,
+      role,
     });
   };
 
@@ -64,6 +76,28 @@ export function QuickModeSetup({
               <div className="text-lg mb-1">{type.emoji}</div>
               <div className="text-xs font-medium">{type.label}</div>
               <div className="text-[10px] text-muted-foreground">{type.desc}</div>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Role Selection */}
+      <div>
+        <label className="block text-sm font-medium mb-2">Agent Role</label>
+        <div className="grid grid-cols-4 gap-2">
+          {ROLES.map((r) => (
+            <button
+              key={r.value}
+              onClick={() => setRole(r.value)}
+              className={`p-3 rounded-lg border-2 text-left transition-all ${
+                role === r.value
+                  ? 'border-blue-500 bg-blue-500/10'
+                  : 'border-border hover:border-muted-foreground'
+              }`}
+            >
+              <div className="text-lg mb-1">{r.emoji}</div>
+              <div className="text-xs font-medium">{r.label}</div>
+              <div className="text-[10px] text-muted-foreground">{r.desc}</div>
             </button>
           ))}
         </div>
