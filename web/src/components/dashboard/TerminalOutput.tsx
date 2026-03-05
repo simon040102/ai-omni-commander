@@ -6,6 +6,14 @@ import { IconSearch, IconStop, IconRefresh, IconSend, IconChevronDown, IconChevr
 /** Collapsible thinking block component - memoized for performance */
 const ThinkingBlock = memo(function ThinkingBlock({ content, defaultExpanded = false }: { content: string; defaultExpanded?: boolean }) {
   const [isExpanded, setIsExpanded] = useState(defaultExpanded);
+  const [wasManuallyToggled, setWasManuallyToggled] = useState(false);
+
+  // Auto-collapse when thinking is no longer active (only if user hasn't manually toggled)
+  useEffect(() => {
+    if (!wasManuallyToggled) {
+      setIsExpanded(defaultExpanded);
+    }
+  }, [defaultExpanded, wasManuallyToggled]);
 
   // Memoize processed content to avoid re-computing on every render
   const { thinkingContent, preview } = useMemo(() => {
@@ -17,6 +25,7 @@ const ThinkingBlock = memo(function ThinkingBlock({ content, defaultExpanded = f
   }, [content]);
 
   const handleToggle = useCallback(() => {
+    setWasManuallyToggled(true);
     setIsExpanded(prev => !prev);
   }, []);
 
@@ -362,11 +371,14 @@ export function TerminalOutput({ outputs, title, role, status, agentId, model, t
             filteredOutputs.map((output, i) => {
               // Use timestamp + index as stable key to preserve component state
               const stableKey = `${output.timestamp}-${i}`;
+              const isLastItem = i === filteredOutputs.length - 1;
 
               // Check if this is a thinking block
               const isThinking = output.streamType === 'system' && output.content.startsWith('[thinking]');
               if (isThinking) {
-                return <ThinkingBlock key={stableKey} content={output.content} />;
+                // Keep expanded if agent is running and this is the last (active) thinking block
+                const isActiveThinking = isLastItem && status === 'running';
+                return <ThinkingBlock key={stableKey} content={output.content} defaultExpanded={isActiveThinking} />;
               }
 
               return (
