@@ -157,9 +157,10 @@ export const useAgentStore = create<AgentStoreState>()(
     {
       name: 'omni-agent-store',
       storage: createJSONStorage(() => indexedDBStorage),
-      // Only persist outputs and commandInputs (not streaming buffers)
+      // Only persist commandInputs (not outputs or streaming buffers)
+      // Outputs are always loaded fresh from server when switching projects
+      // to avoid stale IndexedDB data overriding server data
       partialize: (state) => ({
-        outputs: state.outputs,
         commandInputs: state.commandInputs,
       }),
     }

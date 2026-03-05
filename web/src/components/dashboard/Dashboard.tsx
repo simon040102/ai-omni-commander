@@ -52,7 +52,9 @@ export function Dashboard({ onViewChange }: DashboardProps) {
   const [showAddAgent, setShowAddAgent] = useState(false);
   const [addAgentRole, setAddAgentRole] = useState('backend');
   const [addAgentPrompt, setAddAgentPrompt] = useState('');
+  const [addAgentModel, setAddAgentModel] = useState('sonnet');
   const [confirmDeleteAgentId, setConfirmDeleteAgentId] = useState<string | null>(null);
+  const [selectedModel, setSelectedModel] = useState('sonnet');
 
   const project = projects.find(p => p.id === currentProjectId);
 
@@ -94,12 +96,13 @@ export function Dashboard({ onViewChange }: DashboardProps) {
       payload: {
         projectId: currentProjectId,
         requirement: newRequirement.trim() || undefined,
+        model: selectedModel,
       },
     });
-    addToast({ type: 'info', title: 'New execution started', message: 'Agents are being spawned...' });
+    addToast({ type: 'info', title: 'New execution started', message: `Using ${selectedModel} model...` });
     setShowNewExecution(false);
     setNewRequirement('');
-  }, [currentProjectId, client, addToast, newRequirement]);
+  }, [currentProjectId, client, addToast, newRequirement, selectedModel]);
 
   const handleDeleteAgent = useCallback((agentId: string) => {
     client?.send({
@@ -122,12 +125,13 @@ export function Dashboard({ onViewChange }: DashboardProps) {
         projectId: currentProjectId,
         role: addAgentRole,
         prompt: addAgentPrompt.trim(),
+        model: addAgentModel,
       },
     });
-    addToast({ type: 'info', title: 'Agent added', message: `Starting ${addAgentRole} agent...` });
+    addToast({ type: 'info', title: 'Agent added', message: `Starting ${addAgentRole} agent (${addAgentModel})...` });
     setShowAddAgent(false);
     setAddAgentPrompt('');
-  }, [currentProjectId, client, addToast, addAgentRole, addAgentPrompt]);
+  }, [currentProjectId, client, addToast, addAgentRole, addAgentPrompt, addAgentModel]);
 
   /* ─── Empty state ─── */
   if (!currentProjectId || !project) {
@@ -252,6 +256,29 @@ export function Dashboard({ onViewChange }: DashboardProps) {
                 />
               </div>
               <DocumentUpload projectId={currentProjectId} />
+              {/* Model Selection */}
+              <div>
+                <label className="block text-xs font-medium mb-1">Model</label>
+                <div className="flex gap-1.5">
+                  {(['sonnet', 'opus', 'haiku'] as const).map((model) => (
+                    <button
+                      key={model}
+                      onClick={() => setSelectedModel(model)}
+                      className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+                        selectedModel === model
+                          ? model === 'opus'
+                            ? 'bg-purple-500/20 text-purple-400 border border-purple-500/50'
+                            : model === 'haiku'
+                              ? 'bg-green-500/20 text-green-400 border border-green-500/50'
+                              : 'bg-blue-500/20 text-blue-400 border border-blue-500/50'
+                          : 'bg-muted text-muted-foreground border border-border hover:border-primary/50'
+                      }`}
+                    >
+                      {model.charAt(0).toUpperCase() + model.slice(1)}
+                    </button>
+                  ))}
+                </div>
+              </div>
               <div className="flex items-center gap-3 pt-2 border-t border-border">
                 <button
                   onClick={handleNewExecution}
@@ -363,17 +390,28 @@ export function Dashboard({ onViewChange }: DashboardProps) {
                 <IconX className="w-3 h-3" />
               </button>
             </div>
-            <select
-              value={addAgentRole}
-              onChange={(e) => setAddAgentRole(e.target.value)}
-              className="w-full bg-muted border border-border rounded-md px-2 py-1.5 text-xs focus:ring-1 focus:ring-primary/50 focus:border-primary outline-none"
-            >
-              <option value="frontend">Frontend</option>
-              <option value="backend">Backend</option>
-              <option value="devops">DevOps</option>
-              <option value="testing">Testing</option>
-              <option value="review">Review</option>
-            </select>
+            <div className="flex gap-2">
+              <select
+                value={addAgentRole}
+                onChange={(e) => setAddAgentRole(e.target.value)}
+                className="flex-1 bg-muted border border-border rounded-md px-2 py-1.5 text-xs focus:ring-1 focus:ring-primary/50 focus:border-primary outline-none"
+              >
+                <option value="frontend">Frontend</option>
+                <option value="backend">Backend</option>
+                <option value="devops">DevOps</option>
+                <option value="testing">Testing</option>
+                <option value="review">Review</option>
+              </select>
+              <select
+                value={addAgentModel}
+                onChange={(e) => setAddAgentModel(e.target.value)}
+                className="w-24 bg-muted border border-border rounded-md px-2 py-1.5 text-xs focus:ring-1 focus:ring-primary/50 focus:border-primary outline-none"
+              >
+                <option value="sonnet">Sonnet</option>
+                <option value="opus">Opus</option>
+                <option value="haiku">Haiku</option>
+              </select>
+            </div>
             <textarea
               value={addAgentPrompt}
               onChange={(e) => setAddAgentPrompt(e.target.value)}

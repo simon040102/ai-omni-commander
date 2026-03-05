@@ -15,14 +15,14 @@ export class MasterOrchestrator {
   ) {}
 
   /** Start execution for a project based on its mode */
-  async start(projectId: string, requirement?: string): Promise<void> {
+  async start(projectId: string, requirement?: string, model?: string): Promise<void> {
     const project = getProject(projectId);
     if (!project) throw new Error(`Project ${projectId} not found`);
 
-    logger.info({ projectId, mode: project.mode }, 'Starting orchestration');
+    logger.info({ projectId, mode: project.mode, model }, 'Starting orchestration');
 
     if (project.mode === 'spec') {
-      await this.specHandler.execute(projectId, requirement);
+      await this.specHandler.execute(projectId, requirement, model);
     } else if (project.mode === 'creative') {
       // Creative mode requires an initial requirement from the user
       throw new Error('Creative mode requires startInterview() to be called with a requirement');

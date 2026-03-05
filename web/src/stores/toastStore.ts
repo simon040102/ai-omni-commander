@@ -19,9 +19,11 @@ export const useToastStore = create<ToastState>((set) => ({
 
   addToast: (toast) => {
     const id = crypto.randomUUID();
-    set((state) => ({
-      toasts: [...state.toasts, { ...toast, id }],
-    }));
+    set((state) => {
+      const newToasts = [...state.toasts, { ...toast, id }];
+      // Keep only the latest 3 toasts
+      return { toasts: newToasts.slice(-3) };
+    });
 
     // Auto-remove after duration (default 5s)
     const duration = toast.duration ?? 5000;
