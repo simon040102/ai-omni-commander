@@ -1,20 +1,29 @@
-import { useEffect, useRef, useState, useMemo, useCallback } from 'react';
+import { useEffect, useRef, useState, useMemo, useCallback, memo } from 'react';
 import type { AgentOutput } from '../../stores/agentStore';
 import { useAgentStore } from '../../stores/agentStore';
 import { IconSearch, IconStop, IconRefresh, IconSend, IconChevronDown, IconChevronRight, IconX } from '../ui/Icons';
 
-/** Collapsible thinking block component */
-function ThinkingBlock({ content, defaultExpanded = false }: { content: string; defaultExpanded?: boolean }) {
+/** Collapsible thinking block component - memoized for performance */
+const ThinkingBlock = memo(function ThinkingBlock({ content, defaultExpanded = false }: { content: string; defaultExpanded?: boolean }) {
   const [isExpanded, setIsExpanded] = useState(defaultExpanded);
-  // Remove [thinking] prefix for display
-  const thinkingContent = content.replace(/^\[thinking\]\s*/i, '');
-  // Truncate preview to ~50 chars
-  const preview = thinkingContent.slice(0, 50) + (thinkingContent.length > 50 ? '...' : '');
+
+  // Memoize processed content to avoid re-computing on every render
+  const { thinkingContent, preview } = useMemo(() => {
+    const cleaned = content.replace(/^\[thinking\]\s*/i, '');
+    return {
+      thinkingContent: cleaned,
+      preview: cleaned.slice(0, 50) + (cleaned.length > 50 ? '...' : ''),
+    };
+  }, [content]);
+
+  const handleToggle = useCallback(() => {
+    setIsExpanded(prev => !prev);
+  }, []);
 
   return (
     <div className="my-1">
       <button
-        onClick={() => setIsExpanded(!isExpanded)}
+        onClick={handleToggle}
         className="flex items-center gap-1 text-yellow-600 dark:text-yellow-400 hover:text-yellow-500 dark:hover:text-yellow-300 transition-colors"
       >
         {isExpanded ? (
@@ -28,13 +37,13 @@ function ThinkingBlock({ content, defaultExpanded = false }: { content: string; 
         )}
       </button>
       {isExpanded && (
-        <div className="ml-4 mt-1 pl-2 border-l-2 border-yellow-500/30 text-yellow-600 dark:text-yellow-400 opacity-80 whitespace-pre-wrap break-all">
+        <div className="ml-4 mt-1 pl-2 border-l-2 border-yellow-500/30 text-yellow-600 dark:text-yellow-400 opacity-80 whitespace-pre-wrap break-all max-h-[400px] overflow-y-auto">
           {thinkingContent}
         </div>
       )}
     </div>
   );
-}
+});
 
 interface PastedFile {
   id: string;
@@ -244,7 +253,7 @@ export function TerminalOutput({ outputs, title, role, status, agentId, model, t
           {/* Model display */}
           {model && (
             <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-600 dark:text-purple-400">
-              {model.replace('claude-', '').replace(/-\d+$/, '')}
+              {model.replace('claude-', '').replace(/-\d{8}$/, '')}
             </span>
           )}
           {/* Token usage display */}
@@ -366,9 +375,16 @@ export function TerminalOutput({ outputs, title, role, status, agentId, model, t
                     <span className="opacity-50">SYS </span>
                   )}
                   {output.streamType === 'tool_use' && output.toolName && (
-                    <span className="inline-flex items-center px-1.5 py-0 rounded bg-cyan-500/10 text-cyan-600 dark:text-cyan-500 text-[10px] font-medium mr-1.5">
-                      {output.toolName}
-                    </span>
+                    <>
+                      <span className="inline-flex items-center px-1.5 py-0 rounded bg-cyan-500/10 text-cyan-600 dark:text-cyan-500 text-[10px] font-medium mr-1.5">
+                        {output.toolName}
+                      </span>
+                      {model && (
+                        <span className="text-[9px] text-purple-500/70 mr-1.5">
+                          [{model.replace('claude-', '').replace(/-\d{8}$/, '')}]
+                        </span>
+                      )}
+                    </>
                   )}
                   {output.content}
                 </div>
@@ -520,6 +536,16 @@ export function TerminalOutput({ outputs, title, role, status, agentId, model, t
                 <IconSend className="w-3 h-3" />
                 Send
               </button>
+              {status === 'running' && onAction && agentId && (
+                <button
+                  type="button"
+                  onClick={() => onAction(agentId, 'stop')}
+                  className="inline-flex items-center gap-1 px-3 py-1 text-xs font-medium bg-red-500/10 text-red-600 dark:text-red-400 rounded-md hover:bg-red-500/20 transition-colors mt-0.5"
+                >
+                  <IconStop className="w-3 h-3" />
+                  Stop
+                </button>
+              )}
             </form>
           </div>
         );

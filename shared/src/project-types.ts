@@ -1,4 +1,6 @@
-export type ProjectMode = 'spec' | 'creative';
+export type ProjectMode = 'spec' | 'creative' | 'quick';
+
+export type QuickTaskType = 'bug' | 'change' | 'refactor' | 'other';
 
 export type ProjectStatus =
   | 'setup'
@@ -31,6 +33,13 @@ export interface ProjectConfig {
   defaultModel?: string;
   autoReview?: boolean;
   autoTest?: boolean;
+  // Quick Mode specific
+  quickTask?: {
+    type: QuickTaskType;
+    description: string;
+    errorLog?: string;
+    relatedFiles?: string[];
+  };
 }
 
 export type DocType = 'SA' | 'SD' | 'other';

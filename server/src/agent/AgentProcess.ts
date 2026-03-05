@@ -157,6 +157,22 @@ export class AgentProcess extends EventEmitter {
 
   /** Map SDK messages to internal events */
   private handleSDKMessage(msg: SDKMessage): void {
+    // Log all system messages to understand what SDK sends
+    if (msg.type === 'system') {
+      const subtype = 'subtype' in msg ? msg.subtype : 'unknown';
+      logger.info({ agentId: this.agentId, subtype, msg }, '[SDK System Message]');
+
+      // Emit non-init system messages to terminal for visibility
+      if (subtype !== 'init') {
+        this.emit('output', {
+          agentId: this.agentId,
+          streamType: 'system',
+          content: `[${subtype}] ${JSON.stringify(msg, null, 2).slice(0, 500)}`,
+          timestamp: new Date().toISOString(),
+        });
+      }
+    }
+
     // Init message
     if (msg.type === 'system' && 'subtype' in msg && msg.subtype === 'init') {
       const initMsg = msg as SDKSystemMessage;
@@ -175,6 +191,9 @@ export class AgentProcess extends EventEmitter {
     // Result message (completion)
     if (msg.type === 'result') {
       const result = msg as SDKResultMessage;
+      // Log full result for debugging
+      logger.info({ agentId: this.agentId, result }, '[SDK Result Message]');
+
       // Extract token usage from modelUsage (aggregate all models)
       let inputTokens = 0;
       let outputTokens = 0;

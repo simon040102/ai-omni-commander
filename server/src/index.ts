@@ -12,6 +12,7 @@ import { AgentManager } from './agent/AgentManager.js';
 import { TaskDispatcher } from './orchestrator/TaskDispatcher.js';
 import { SpecModeHandler } from './orchestrator/SpecModeHandler.js';
 import { CreativeModeHandler } from './orchestrator/CreativeModeHandler.js';
+import { QuickModeHandler } from './orchestrator/QuickModeHandler.js';
 import { MasterOrchestrator } from './orchestrator/MasterOrchestrator.js';
 import { OmniWebSocketServer } from './websocket/WebSocketServer.js';
 import { registerHandlers } from './websocket/MessageRouter.js';
@@ -20,11 +21,24 @@ import { getRecentPaths, addRecentPath, removeRecentPath, clearRecentPaths, migr
 import { genId } from './utils/uuid.js';
 import { logger } from './utils/logger.js';
 import type { WsMessage } from '@omni/shared';
-import { EventTypes } from '@omni/shared';
+import { EventTypes, CURRENT_MODELS, LEGACY_MODELS } from '@omni/shared';
 
 async function main() {
   const config = getConfig();
   logger.info({ port: config.port }, 'Starting AI-OmniCommander (SDK mode)');
+
+  // Log available Claude models
+  logger.info('=== Available Claude Models ===');
+  logger.info('Current models:');
+  for (const [alias, info] of Object.entries(CURRENT_MODELS)) {
+    logger.info(`  ${alias.padEnd(8)} -> ${info.id.padEnd(30)} (${info.displayName}, $${info.pricing.inputPerMTok}/$${info.pricing.outputPerMTok} per MTok)`);
+  }
+  logger.info('Legacy models:');
+  for (const [alias, info] of Object.entries(LEGACY_MODELS)) {
+    const deprecated = info.deprecated ? ' [DEPRECATED]' : '';
+    logger.info(`  ${alias.padEnd(12)} -> ${info.id.padEnd(35)} (${info.displayName})${deprecated}`);
+  }
+  logger.info('===============================');
 
   // 1. Initialize database
   const db = getDb();
@@ -55,7 +69,8 @@ async function main() {
 
   const specHandler = new SpecModeHandler(agentManager, dispatcher, contextSync, eventBus);
   const creativeHandler = new CreativeModeHandler(agentManager, dispatcher, contextSync, eventBus);
-  const orchestrator = new MasterOrchestrator(specHandler, creativeHandler);
+  const quickHandler = new QuickModeHandler(agentManager, eventBus);
+  const orchestrator = new MasterOrchestrator(specHandler, creativeHandler, quickHandler);
 
   // 3. Create Express app for HTTP
   const app = express();
@@ -67,6 +82,15 @@ async function main() {
       status: 'ok',
       mode: 'sdk',
       activeAgents: agentManager.getActiveAgents().length,
+    });
+  });
+
+  // Get available Claude models
+  app.get('/api/models', (_req, res) => {
+    res.json({
+      current: CURRENT_MODELS,
+      legacy: LEGACY_MODELS,
+      selectable: ['sonnet', 'opus', 'haiku'],
     });
   });
 
