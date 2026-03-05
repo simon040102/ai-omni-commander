@@ -121,6 +121,43 @@ async function main() {
     res.json({ success: true });
   });
 
+  // Upload file (for pasted images/files from clipboard)
+  const uploadsDir = path.join(path.dirname(config.dbPath), 'uploads');
+  if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+  }
+
+  app.post('/api/upload', (req, res) => {
+    try {
+      const { data, filename, mimeType } = req.body as {
+        data: string; // base64 encoded
+        filename?: string;
+        mimeType?: string;
+      };
+
+      if (!data) {
+        res.status(400).json({ error: 'data is required' });
+        return;
+      }
+
+      // Generate unique filename
+      const ext = mimeType?.split('/')[1] || 'bin';
+      const name = filename || `upload_${Date.now()}.${ext}`;
+      const safeName = name.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const filePath = path.join(uploadsDir, `${Date.now()}_${safeName}`);
+
+      // Decode base64 and save
+      const buffer = Buffer.from(data, 'base64');
+      fs.writeFileSync(filePath, buffer);
+
+      logger.info({ filePath, size: buffer.length }, 'File uploaded');
+      res.json({ success: true, path: filePath, size: buffer.length });
+    } catch (err) {
+      logger.error({ err }, 'Upload failed');
+      res.status(500).json({ error: 'Upload failed' });
+    }
+  });
+
   // 4. Create HTTP server and WebSocket server
   const httpServer = createServer(app);
   const wsServer = new OmniWebSocketServer(httpServer);
