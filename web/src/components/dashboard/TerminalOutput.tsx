@@ -360,14 +360,17 @@ export function TerminalOutput({ outputs, title, role, status, agentId, model, t
             </div>
           ) : (
             filteredOutputs.map((output, i) => {
+              // Use timestamp + index as stable key to preserve component state
+              const stableKey = `${output.timestamp}-${i}`;
+
               // Check if this is a thinking block
               const isThinking = output.streamType === 'system' && output.content.startsWith('[thinking]');
               if (isThinking) {
-                return <ThinkingBlock key={i} content={output.content} />;
+                return <ThinkingBlock key={stableKey} content={output.content} />;
               }
 
               return (
-                <div key={i} className={`${STREAM_COLORS[output.streamType] || 'text-gray-300'} leading-5 whitespace-pre-wrap break-all`}>
+                <div key={stableKey} className={`${STREAM_COLORS[output.streamType] || 'text-gray-300'} leading-5 whitespace-pre-wrap break-all`}>
                   {output.streamType === 'error' && (
                     <span className="opacity-50">ERR </span>
                   )}
