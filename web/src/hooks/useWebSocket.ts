@@ -4,6 +4,7 @@ import { useWsStore } from '../stores/wsStore';
 import { useProjectStore } from '../stores/projectStore';
 import { useAgentStore } from '../stores/agentStore';
 import { useToastStore } from '../stores/toastStore';
+import { notifyTab } from '../lib/tabNotification';
 
 /**
  * Connect to the server WebSocket and dispatch incoming messages to stores.
@@ -17,6 +18,7 @@ export function useWebSocket() {
   const updateAgentStatus = useProjectStore(s => s.updateAgentStatus);
   const addOrUpdateAgent = useProjectStore(s => s.addOrUpdateAgent);
   const addIntervention = useProjectStore(s => s.addIntervention);
+  const markProjectActivity = useProjectStore(s => s.markProjectActivity);
   const appendOutput = useAgentStore(s => s.appendOutput);
   const appendStreaming = useAgentStore(s => s.appendStreaming);
   const clearStreamingBuffer = useAgentStore(s => s.clearStreamingBuffer);
@@ -65,6 +67,17 @@ export function useWebSocket() {
             const isStreaming = payload['isStreaming'] as boolean;
             const streamType = payload['streamType'] as string;
             const content = payload['content'] as string;
+            const outputProjectId = payload['projectId'] as string | undefined;
+
+            // Mark activity for non-current projects
+            if (outputProjectId) {
+              markProjectActivity(outputProjectId);
+            }
+
+            // Notify browser tab when text output arrives (not tool results/etc)
+            if (streamType === 'text' && !isStreaming) {
+              notifyTab();
+            }
 
             // Handle streaming content — accumulate in buffer for real-time display
             if (isStreaming) {
@@ -109,10 +122,13 @@ export function useWebSocket() {
           }
 
           case 'agent.started': {
+            const startedProjectId = payload['projectId'] as string;
+            // Mark activity for non-current projects
+            markProjectActivity(startedProjectId);
             // A new agent was spawned — add it to the store
             addOrUpdateAgent({
               id: payload['agentId'] as string,
-              projectId: payload['projectId'] as string,
+              projectId: startedProjectId,
               role: payload['role'] as string,
               status: 'running',
               currentTaskId: null,
@@ -141,12 +157,15 @@ export function useWebSocket() {
           }
 
           case 'agent.completed': {
+            const completedProjectId = payload['projectId'] as string;
+            // Mark activity for non-current projects
+            markProjectActivity(completedProjectId);
             const inputTokens = (payload['inputTokens'] as number) || 0;
             const outputTokens = (payload['outputTokens'] as number) || 0;
             const totalTokens = inputTokens + outputTokens;
             addOrUpdateAgent({
               id: payload['agentId'] as string,
-              projectId: payload['projectId'] as string,
+              projectId: completedProjectId,
               role: '',
               status: 'stopped',
               currentTaskId: null,

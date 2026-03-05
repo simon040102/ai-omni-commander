@@ -16,7 +16,7 @@ import { MasterOrchestrator } from './orchestrator/MasterOrchestrator.js';
 import { OmniWebSocketServer } from './websocket/WebSocketServer.js';
 import { registerHandlers } from './websocket/MessageRouter.js';
 import { listProjects } from './db/queries/projects.js';
-import { getRecentPaths, addRecentPath, removeRecentPath, clearRecentPaths } from './db/queries/recentPaths.js';
+import { getRecentPaths, addRecentPath, removeRecentPath, clearRecentPaths, migrateProjectPathsToRecent } from './db/queries/recentPaths.js';
 import { genId } from './utils/uuid.js';
 import { logger } from './utils/logger.js';
 import type { WsMessage } from '@omni/shared';
@@ -29,6 +29,9 @@ async function main() {
   // 1. Initialize database
   const db = getDb();
   logger.info({ dbPath: config.dbPath }, 'Database initialized');
+
+  // Migrate existing project paths to recent_paths (one-time on startup)
+  migrateProjectPathsToRecent();
 
   // 2. Create core services
   const eventBus = new EventBus();

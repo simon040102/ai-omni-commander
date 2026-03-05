@@ -36,6 +36,7 @@ export function Sidebar({ currentView, onViewChange, collapsed, onToggleCollapse
   const projects = useProjectStore(s => s.projects);
   const currentProjectId = useProjectStore(s => s.currentProjectId);
   const setCurrentProject = useProjectStore(s => s.setCurrentProject);
+  const projectsWithActivity = useProjectStore(s => s.projectsWithActivity);
   const agents = useProjectStore(s => s.agents);
   const tasks = useProjectStore(s => s.tasks);
   const interventions = useProjectStore(s => s.interventions);
@@ -233,6 +234,10 @@ export function Sidebar({ currentView, onViewChange, collapsed, onToggleCollapse
                   >
                     <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${STATUS_COLORS[p.status] || 'bg-gray-500'}`} />
                     <span className="truncate">{p.name}</span>
+                    {/* Activity indicator for projects with new agent activity */}
+                    {projectsWithActivity.has(p.id) && (
+                      <span className="ml-auto w-2 h-2 rounded-full bg-blue-500 animate-pulse flex-shrink-0" title="New activity" />
+                    )}
                   </button>
                   {/* Kebab menu button */}
                   <button
