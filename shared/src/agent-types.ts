@@ -5,7 +5,8 @@ export type AgentRole =
   | 'frontend'
   | 'devops'
   | 'testing'
-  | 'review';
+  | 'review'
+  | 'quick';
 
 export type AgentStatus =
   | 'idle'

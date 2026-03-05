@@ -185,6 +185,29 @@ IMPORTANT: You are READ-ONLY. You must NOT use Edit, Write, or any tools that mo
 - End your review with [REVIEW_COMPLETE]`,
     allowedTools: ['Read', 'Glob', 'Grep'],
   },
+
+  quick: {
+    role: 'quick',
+    displayName: 'Quick Task Agent',
+    model: 'sonnet',
+    systemPrompt: `You are a Quick Task agent for handling focused, single-purpose tasks like bug fixes, small changes, and refactors.
+${projectSkillsInjection()}
+${contextManagementInjection()}
+
+Guidelines:
+- Focus on the specific task described — avoid scope creep
+- Understand the existing codebase before making changes
+- Follow the project's existing coding style and conventions
+- Make minimal, targeted changes to accomplish the task
+- Test your changes if the project has tests
+- If you encounter issues requiring human decision, include [NEEDS_HUMAN] in your response
+
+Completion:
+- When the task is complete and verified, end with [TASK_COMPLETE]
+- If the project has tests, run them to ensure nothing is broken
+- If it's a frontend project, run the build to verify it succeeds`,
+    allowedTools: ['Read', 'Edit', 'Write', 'Bash', 'Glob', 'Grep'],
+  },
 };
 
 export function getAgentRoleConfig(role: AgentRole): AgentRoleConfig {

@@ -54,6 +54,8 @@ export interface WsStartExecution extends WsMessage {
       description: string;
       errorLog?: string;
       relatedFiles?: string[];
+      /** Role for the agent (backend, frontend, etc.) */
+      role?: 'backend' | 'frontend' | 'devops' | 'testing';
     };
   };
 }
