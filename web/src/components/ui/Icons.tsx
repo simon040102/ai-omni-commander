@@ -236,3 +236,11 @@ export function IconMoon({ className = 'w-4 h-4' }: IconProps) {
     </svg>
   );
 }
+
+export function IconLightning({ className = 'w-4 h-4' }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M9 1.5L3 9h5l-1 5.5 6-7.5H8l1-5.5z" />
+    </svg>
+  );
+}

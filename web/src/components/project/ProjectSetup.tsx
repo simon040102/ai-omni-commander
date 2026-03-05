@@ -4,9 +4,11 @@ import { useToastStore } from '../../stores/toastStore';
 import { ModeSelector } from './ModeSelector';
 import { DocumentUpload } from './DocumentUpload';
 import { InterviewChat } from './InterviewChat';
+import { QuickModeSetup } from './QuickModeSetup';
 import { FolderPicker } from './FolderPicker';
 import { IconCheck, IconPlay, IconArrowRight, IconChevronLeft, IconPlus, IconX, IconRocket } from '../ui/Icons';
 import type { View } from '../layout/AppShell';
+import type { ProjectMode, QuickTaskType } from '@omni/shared';
 
 interface WorkspaceEntry {
   label: string;
@@ -30,7 +32,7 @@ export function ProjectSetup({ onViewChange }: ProjectSetupProps) {
   const client = useWsStore(s => s.client);
   const addToast = useToastStore(s => s.addToast);
   const [step, setStep] = useState<Step>('mode');
-  const [mode, setMode] = useState<'spec' | 'creative'>('spec');
+  const [mode, setMode] = useState<ProjectMode>('spec');
   const [name, setName] = useState('');
   const [workspaces, setWorkspaces] = useState<WorkspaceEntry[]>([
     { label: '', path: '' },
@@ -119,7 +121,38 @@ export function ProjectSetup({ onViewChange }: ProjectSetupProps) {
     setStep('execute');
   }, [projectId, client, addToast, requirement, selectedModel]);
 
+  const handleQuickStartExecution = useCallback((quickTask: {
+    type: QuickTaskType;
+    description: string;
+    errorLog?: string;
+    relatedFiles?: string[];
+  }) => {
+    if (!projectId) return;
+    client?.send({
+      type: 'project.startExecution',
+      id: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+      payload: {
+        projectId,
+        model: selectedModel,
+        quickTask,
+      },
+    });
+    addToast({ type: 'info', title: 'Quick task started', message: `Using ${selectedModel} model...` });
+    setStep('execute');
+  }, [projectId, client, addToast, selectedModel]);
+
   const currentStepIndex = STEP_INFO.findIndex(s => s.key === step);
+
+  // For quick mode, adjust step labels
+  const stepInfo = mode === 'quick'
+    ? [
+        { key: 'mode' as const, label: 'Mode', desc: 'Choose mode' },
+        { key: 'workspaces' as const, label: 'Configure', desc: 'Name & path' },
+        { key: 'content' as const, label: 'Task', desc: 'Describe task' },
+        { key: 'execute' as const, label: 'Launch', desc: 'Start agent' },
+      ]
+    : STEP_INFO;
 
   return (
     <div className="max-w-2xl mx-auto">
@@ -127,7 +160,7 @@ export function ProjectSetup({ onViewChange }: ProjectSetupProps) {
 
       {/* ─── Stepper ─── */}
       <div className="flex items-center mb-10">
-        {STEP_INFO.map((s, i) => {
+        {stepInfo.map((s, i) => {
           const isCompleted = i < currentStepIndex;
           const isActive = i === currentStepIndex;
           return (
@@ -187,7 +220,7 @@ export function ProjectSetup({ onViewChange }: ProjectSetupProps) {
               value={name}
               onChange={(e) => setName(e.target.value)}
               onBlur={() => setTouched(prev => ({ ...prev, name: true }))}
-              placeholder="My Awesome Project"
+              placeholder={mode === 'quick' ? "Quick Fix - Login Bug" : "My Awesome Project"}
               className={`w-full bg-muted border rounded-md px-3 py-2 text-sm outline-none transition-colors ${
                 touched.name && !name.trim()
                   ? 'border-red-500/50 focus:border-red-500 focus:ring-1 focus:ring-red-500/30'
@@ -202,17 +235,24 @@ export function ProjectSetup({ onViewChange }: ProjectSetupProps) {
           {/* Workspaces */}
           <div>
             <div className="flex items-center justify-between mb-3">
-              <label className="block text-sm font-medium">Workspaces</label>
-              <button
-                onClick={addWorkspace}
-                className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 bg-primary/15 text-primary rounded-md hover:bg-primary/25 transition-colors"
-              >
-                <IconPlus className="w-3 h-3" />
-                Add Workspace
-              </button>
+              <label className="block text-sm font-medium">
+                {mode === 'quick' ? 'Workspace' : 'Workspaces'}
+              </label>
+              {mode !== 'quick' && (
+                <button
+                  onClick={addWorkspace}
+                  className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 bg-primary/15 text-primary rounded-md hover:bg-primary/25 transition-colors"
+                >
+                  <IconPlus className="w-3 h-3" />
+                  Add Workspace
+                </button>
+              )}
             </div>
             <p className="text-xs text-muted-foreground mb-3">
-              Add the folders that agents will work on. Give each a label (e.g. "frontend", "backend").
+              {mode === 'quick'
+                ? 'Select the folder where the agent will work.'
+                : 'Add the folders that agents will work on. Give each a label (e.g. "frontend", "backend").'
+              }
             </p>
 
             <div className="space-y-3">
@@ -241,7 +281,7 @@ export function ProjectSetup({ onViewChange }: ProjectSetupProps) {
                       onChange={(p) => updateWorkspace(index, 'path', p)}
                     />
                   </div>
-                  {workspaces.length > 1 && (
+                  {workspaces.length > 1 && mode !== 'quick' && (
                     <button
                       onClick={() => removeWorkspace(index)}
                       className="shrink-0 p-2 text-muted-foreground hover:text-red-400 hover:bg-red-500/10 rounded-md transition-colors"
@@ -255,52 +295,54 @@ export function ProjectSetup({ onViewChange }: ProjectSetupProps) {
             </div>
           </div>
 
-          {/* Code Review Agent Config */}
-          <div className="border border-border rounded-lg p-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <div>
-                <h4 className="text-sm font-medium">Code Review Agent</h4>
-                <p className="text-xs text-muted-foreground">Automatically reviews code after tasks complete</p>
-              </div>
-              <button
-                onClick={() => setReviewEnabled(!reviewEnabled)}
-                className={`w-10 h-5 rounded-full transition-colors relative ${
-                  reviewEnabled ? 'bg-emerald-500' : 'bg-muted'
-                }`}
-              >
-                <span
-                  className={`block w-4 h-4 rounded-full bg-white absolute top-0.5 transition-all ${
-                    reviewEnabled ? 'left-5' : 'left-0.5'
+          {/* Code Review Agent Config - hide for quick mode */}
+          {mode !== 'quick' && (
+            <div className="border border-border rounded-lg p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h4 className="text-sm font-medium">Code Review Agent</h4>
+                  <p className="text-xs text-muted-foreground">Automatically reviews code after tasks complete</p>
+                </div>
+                <button
+                  onClick={() => setReviewEnabled(!reviewEnabled)}
+                  className={`w-10 h-5 rounded-full transition-colors relative ${
+                    reviewEnabled ? 'bg-emerald-500' : 'bg-muted'
                   }`}
-                />
-              </button>
-            </div>
-
-            {reviewEnabled && workspaces.some(ws => ws.label.trim()) && (
-              <div>
-                <label className="block text-xs text-muted-foreground mb-1">
-                  Agent Skills Source (CLAUDE.md / .claude/)
-                </label>
-                <select
-                  value={reviewSkillSource}
-                  onChange={(e) => setReviewSkillSource(e.target.value)}
-                  className="w-full bg-muted border border-border rounded-md px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
                 >
-                  <option value="auto">Auto (use reviewed task's workspace)</option>
-                  {workspaces
-                    .filter(ws => ws.label.trim())
-                    .map(ws => (
-                      <option key={ws.label} value={ws.label.trim()}>
-                        Use "{ws.label.trim()}" workspace skills
-                      </option>
-                    ))}
-                </select>
-                <p className="text-xs text-muted-foreground mt-1">
-                  Choose which workspace's CLAUDE.md and .claude/ settings the review agent should follow.
-                </p>
+                  <span
+                    className={`block w-4 h-4 rounded-full bg-white absolute top-0.5 transition-all ${
+                      reviewEnabled ? 'left-5' : 'left-0.5'
+                    }`}
+                  />
+                </button>
               </div>
-            )}
-          </div>
+
+              {reviewEnabled && workspaces.some(ws => ws.label.trim()) && (
+                <div>
+                  <label className="block text-xs text-muted-foreground mb-1">
+                    Agent Skills Source (CLAUDE.md / .claude/)
+                  </label>
+                  <select
+                    value={reviewSkillSource}
+                    onChange={(e) => setReviewSkillSource(e.target.value)}
+                    className="w-full bg-muted border border-border rounded-md px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
+                  >
+                    <option value="auto">Auto (use reviewed task's workspace)</option>
+                    {workspaces
+                      .filter(ws => ws.label.trim())
+                      .map(ws => (
+                        <option key={ws.label} value={ws.label.trim()}>
+                          Use "{ws.label.trim()}" workspace skills
+                        </option>
+                      ))}
+                  </select>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Choose which workspace's CLAUDE.md and .claude/ settings the review agent should follow.
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
 
           <div className="flex gap-3">
             <button
@@ -322,7 +364,7 @@ export function ProjectSetup({ onViewChange }: ProjectSetupProps) {
         </div>
       )}
 
-      {/* ─── Step 3: Content (Spec: upload docs, Creative: interview) ─── */}
+      {/* ─── Step 3: Content (Spec: upload docs, Creative: interview, Quick: task form) ─── */}
       {step === 'content' && projectId && (
         <div>
           {mode === 'spec' ? (
@@ -379,8 +421,15 @@ export function ProjectSetup({ onViewChange }: ProjectSetupProps) {
                 Start Execution
               </button>
             </div>
-          ) : (
+          ) : mode === 'creative' ? (
             <InterviewChat projectId={projectId} />
+          ) : (
+            <QuickModeSetup
+              projectId={projectId}
+              selectedModel={selectedModel}
+              onModelChange={setSelectedModel}
+              onStartExecution={handleQuickStartExecution}
+            />
           )}
         </div>
       )}
@@ -388,12 +437,19 @@ export function ProjectSetup({ onViewChange }: ProjectSetupProps) {
       {/* ─── Step 4: Execution started ─── */}
       {step === 'execute' && (
         <div className="text-center py-16">
-          <div className="w-16 h-16 mx-auto mb-6 rounded-full bg-green-500/10 flex items-center justify-center">
-            <IconRocket className="w-8 h-8 text-green-400" />
+          <div className={`w-16 h-16 mx-auto mb-6 rounded-full flex items-center justify-center ${
+            mode === 'quick' ? 'bg-amber-500/10' : 'bg-green-500/10'
+          }`}>
+            <IconRocket className={`w-8 h-8 ${mode === 'quick' ? 'text-amber-400' : 'text-green-400'}`} />
           </div>
-          <h3 className="text-xl font-bold mb-2">Execution Started!</h3>
+          <h3 className="text-xl font-bold mb-2">
+            {mode === 'quick' ? 'Quick Task Started!' : 'Execution Started!'}
+          </h3>
           <p className="text-muted-foreground mb-8 max-w-sm mx-auto">
-            Agents are being spawned and will begin working on your project. Monitor their progress in real time.
+            {mode === 'quick'
+              ? 'The agent is working on your task. Monitor progress in real time.'
+              : 'Agents are being spawned and will begin working on your project. Monitor their progress in real time.'
+            }
           </p>
           <button
             onClick={() => onViewChange('dashboard')}

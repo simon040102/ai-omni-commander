@@ -5,3 +5,4 @@ export * from './event-types.js';
 export * from './ws-protocol.js';
 export * from './claude-stream.js';
 export * from './contracts.js';
+export * from './model-info.js';

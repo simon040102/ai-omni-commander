@@ -48,6 +48,13 @@ export interface WsStartExecution extends WsMessage {
     requirement?: string;
     /** Model to use for agents (e.g., 'sonnet', 'opus', 'haiku') */
     model?: string;
+    /** Quick mode task details */
+    quickTask?: {
+      type: 'bug' | 'change' | 'refactor' | 'other';
+      description: string;
+      errorLog?: string;
+      relatedFiles?: string[];
+    };
   };
 }
 

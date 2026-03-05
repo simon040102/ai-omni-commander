@@ -5,7 +5,7 @@ export function runMigrations(db: Database.Database): void {
     CREATE TABLE IF NOT EXISTS projects (
       id            TEXT PRIMARY KEY,
       name          TEXT NOT NULL,
-      mode          TEXT NOT NULL CHECK(mode IN ('spec', 'creative')),
+      mode          TEXT NOT NULL CHECK(mode IN ('spec', 'creative', 'quick')),
       status        TEXT NOT NULL DEFAULT 'setup'
                       CHECK(status IN ('setup', 'interviewing', 'planning',
                                         'executing', 'paused', 'completed', 'failed')),
@@ -128,6 +128,34 @@ export function runMigrations(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_interventions_status ON interventions(status);
     CREATE INDEX IF NOT EXISTS idx_recent_paths_last_used ON recent_paths(last_used_at DESC);
   `);
+
+  // Migration: add 'quick' mode to projects table (for existing DBs)
+  // SQLite doesn't support altering CHECK constraints, so we recreate the table
+  const projectCols = db.prepare("PRAGMA table_info(projects)").all() as Array<{ name: string }>;
+  if (projectCols.length > 0) {
+    // Check if we need to migrate by trying to insert a quick mode project
+    try {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS projects_new (
+          id            TEXT PRIMARY KEY,
+          name          TEXT NOT NULL,
+          mode          TEXT NOT NULL CHECK(mode IN ('spec', 'creative', 'quick')),
+          status        TEXT NOT NULL DEFAULT 'setup'
+                          CHECK(status IN ('setup', 'interviewing', 'planning',
+                                            'executing', 'paused', 'completed', 'failed')),
+          working_dir   TEXT NOT NULL,
+          config_json   TEXT,
+          created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT OR IGNORE INTO projects_new SELECT * FROM projects;
+        DROP TABLE projects;
+        ALTER TABLE projects_new RENAME TO projects;
+      `);
+    } catch {
+      // Table already has correct constraint or migration not needed
+    }
+  }
 
   // Migration: add doc_type column if missing (for existing DBs)
   const cols = db.prepare("PRAGMA table_info(documents)").all() as Array<{ name: string }>;
