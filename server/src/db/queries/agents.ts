@@ -51,6 +51,7 @@ export function updateAgent(id: string, data: Partial<{
   sessionId: string | null;
   pid: number | null;
   currentTaskId: string | null;
+  model: string;
   totalCostUsd: number;
   totalTurns: number;
   totalInputTokens: number;
@@ -65,6 +66,7 @@ export function updateAgent(id: string, data: Partial<{
   if (data.sessionId !== undefined) { sets.push('session_id = ?'); values.push(data.sessionId); }
   if (data.pid !== undefined) { sets.push('pid = ?'); values.push(data.pid); }
   if (data.currentTaskId !== undefined) { sets.push('current_task_id = ?'); values.push(data.currentTaskId); }
+  if (data.model !== undefined) { sets.push('model = ?'); values.push(data.model); }
   if (data.totalCostUsd !== undefined) { sets.push('total_cost_usd = ?'); values.push(data.totalCostUsd); }
   if (data.totalTurns !== undefined) { sets.push('total_turns = ?'); values.push(data.totalTurns); }
   if (data.totalInputTokens !== undefined) { sets.push('total_input_tokens = ?'); values.push(data.totalInputTokens); }

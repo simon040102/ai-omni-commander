@@ -132,7 +132,7 @@ export function useWebSocket() {
               role: payload['role'] as string,
               status: 'running',
               currentTaskId: null,
-              model: '',
+              model: (payload['model'] as string) || '',
               totalCostUsd: 0,
               totalTurns: 0,
             });

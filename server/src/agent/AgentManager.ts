@@ -292,11 +292,13 @@ export class AgentManager {
         status: 'running',
         sessionId: msg.session_id,
         pid: proc.pid,
+        // Store the actual model from Claude SDK (e.g., "claude-sonnet-4-20250514")
+        model: msg.model || undefined,
       });
       this.eventBus.emit({
         type: EventTypes.AGENT_STARTED,
         source: agentId,
-        payload: { agentId, role: proc.role, projectId },
+        payload: { agentId, role: proc.role, projectId, model: msg.model },
         timestamp: new Date().toISOString(),
       });
     });
