@@ -30,7 +30,12 @@ const AGENT_STATUS_STYLE: Record<string, { icon: string; color: string }> = {
 export function StepTracker() {
   const projects = useProjectStore(s => s.projects);
   const currentProjectId = useProjectStore(s => s.currentProjectId);
-  const agents = useProjectStore(s => s.agents);
+  const allAgents = useProjectStore(s => s.agents);
+
+  // Only show agents for the current project
+  const agents = currentProjectId
+    ? allAgents.filter(a => a.projectId === currentProjectId)
+    : allAgents;
 
   const project = projects.find(p => p.id === currentProjectId);
   if (!project) return null;
