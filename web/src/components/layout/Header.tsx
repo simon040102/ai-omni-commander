@@ -1,7 +1,8 @@
 import { useProjectStore } from '../../stores/projectStore';
 import { useWsStore } from '../../stores/wsStore';
+import { useThemeStore } from '../../stores/themeStore';
 import { InterventionBell } from '../dashboard/InterventionBell';
-import { IconChevronRight } from '../ui/Icons';
+import { IconChevronRight, IconSun, IconMoon } from '../ui/Icons';
 import type { View } from './AppShell';
 
 const VIEW_LABELS: Record<string, string> = {
@@ -20,6 +21,8 @@ export function Header({ currentView, onViewChange }: HeaderProps) {
   const currentProjectId = useProjectStore(s => s.currentProjectId);
   const projects = useProjectStore(s => s.projects);
   const connected = useWsStore(s => s.connected);
+  const theme = useThemeStore(s => s.theme);
+  const toggleTheme = useThemeStore(s => s.toggleTheme);
   const currentProject = projects.find(p => p.id === currentProjectId);
 
   return (
@@ -86,8 +89,19 @@ export function Header({ currentView, onViewChange }: HeaderProps) {
         )}
       </div>
 
-      {/* Right: Intervention bell + Connection status */}
+      {/* Right: Theme toggle + Intervention bell + Connection status */}
       <div className="flex items-center gap-2">
+        {/* Theme toggle */}
+        <button
+          onClick={toggleTheme}
+          className="p-2 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+          title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+        >
+          {theme === 'dark' ? <IconSun className="w-4 h-4" /> : <IconMoon className="w-4 h-4" />}
+        </button>
+
+        <div className="h-5 w-px bg-border" />
+
         <InterventionBell />
 
         <div className="h-5 w-px bg-border" />

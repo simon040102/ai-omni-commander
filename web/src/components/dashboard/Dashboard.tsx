@@ -4,7 +4,6 @@ import { useAgentStore } from '../../stores/agentStore';
 import { useWsStore } from '../../stores/wsStore';
 import { useToastStore } from '../../stores/toastStore';
 import { DualTerminal } from './DualTerminal';
-import { StepTracker } from './StepTracker';
 import { DocumentUpload } from '../project/DocumentUpload';
 import { IconStop, IconPlay, IconPlus, IconX, IconGrid, IconClock } from '../ui/Icons';
 import type { View } from '../layout/AppShell';
@@ -155,8 +154,6 @@ export function Dashboard({ onViewChange }: DashboardProps) {
   }
 
   const runningAgents = agents.filter(a => a.status === 'running');
-  const totalCost = agents.reduce((sum, a) => sum + a.totalCostUsd, 0);
-  const totalTurns = agents.reduce((sum, a) => sum + a.totalTurns, 0);
 
   return (
     <div className="flex flex-col gap-3 h-full">
@@ -190,8 +187,6 @@ export function Dashboard({ onViewChange }: DashboardProps) {
                 value={`${runningAgents.length}/${agents.length}`}
                 accent={runningAgents.length > 0 ? 'text-green-400' : undefined}
               />
-              <StatCard icon={<span className="text-xs font-mono">$</span>} label="Cost" value={`$${totalCost.toFixed(4)}`} />
-              <StatCard icon={<span className="text-xs">T</span>} label="Turns" value={String(totalTurns)} />
             </div>
 
             {/* Actions */}
@@ -207,9 +202,6 @@ export function Dashboard({ onViewChange }: DashboardProps) {
           </div>
         </div>
       </div>
-
-      {/* ─── Step tracker ─── */}
-      <StepTracker />
 
       {/* ─── New Execution panel ─── */}
       {runningAgents.length === 0 && agents.length > 0 && (
@@ -344,11 +336,7 @@ export function Dashboard({ onViewChange }: DashboardProps) {
                   }>
                     {agent.status}
                   </span>
-                  <span className="font-mono">${agent.totalCostUsd.toFixed(4)}</span>
-                </div>
-                <div className="flex justify-between">
                   <span>{toolCalls} tools</span>
-                  <span>{agent.totalTurns} turns</span>
                 </div>
               </div>
             </div>
