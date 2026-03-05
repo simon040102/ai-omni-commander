@@ -1,7 +1,15 @@
-import { useEffect, useRef, useState, useMemo } from 'react';
+import { useEffect, useRef, useState, useMemo, useCallback } from 'react';
 import type { AgentOutput } from '../../stores/agentStore';
 import { useAgentStore } from '../../stores/agentStore';
-import { IconSearch, IconStop, IconRefresh, IconSend, IconChevronDown } from '../ui/Icons';
+import { IconSearch, IconStop, IconRefresh, IconSend, IconChevronDown, IconX } from '../ui/Icons';
+
+interface PastedFile {
+  id: string;
+  name: string;
+  path: string;
+  preview?: string; // base64 data URL for images
+  type: 'image' | 'file';
+}
 
 const STREAM_COLORS: Record<string, string> = {
   text: 'text-gray-200',
@@ -40,6 +48,116 @@ export function TerminalOutput({ outputs, title, role, status, agentId, totalInp
   // Get streaming buffer for real-time display
   const streamingBuffers = useAgentStore((s) => s.streamingBuffers);
   const streamingBuffer = agentId ? streamingBuffers[agentId] : undefined;
+
+  // Pasted files state
+  const [pastedFiles, setPastedFiles] = useState<PastedFile[]>([]);
+  const [isUploading, setIsUploading] = useState(false);
+
+  // Handle paste from clipboard
+  const handlePaste = useCallback(async (e: React.ClipboardEvent) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+
+    for (const item of items) {
+      // Handle images
+      if (item.type.startsWith('image/')) {
+        e.preventDefault();
+        const file = item.getAsFile();
+        if (!file) continue;
+
+        setIsUploading(true);
+        try {
+          // Read file as base64
+          const reader = new FileReader();
+          const base64 = await new Promise<string>((resolve, reject) => {
+            reader.onload = () => {
+              const result = reader.result as string;
+              resolve(result.split(',')[1]); // Remove data URL prefix
+            };
+            reader.onerror = reject;
+            reader.readAsDataURL(file);
+          });
+
+          // Upload to server
+          const resp = await fetch('/api/upload', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              data: base64,
+              filename: file.name || 'pasted_image.png',
+              mimeType: file.type,
+            }),
+          });
+
+          if (resp.ok) {
+            const result = await resp.json();
+            setPastedFiles(prev => [...prev, {
+              id: crypto.randomUUID(),
+              name: file.name || 'pasted_image.png',
+              path: result.path,
+              preview: `data:${file.type};base64,${base64}`,
+              type: 'image',
+            }]);
+          }
+        } catch (err) {
+          console.error('Failed to upload pasted image:', err);
+        } finally {
+          setIsUploading(false);
+        }
+        return;
+      }
+
+      // Handle files (from file manager paste)
+      if (item.kind === 'file') {
+        e.preventDefault();
+        const file = item.getAsFile();
+        if (!file) continue;
+
+        setIsUploading(true);
+        try {
+          const reader = new FileReader();
+          const base64 = await new Promise<string>((resolve, reject) => {
+            reader.onload = () => {
+              const result = reader.result as string;
+              resolve(result.split(',')[1]);
+            };
+            reader.onerror = reject;
+            reader.readAsDataURL(file);
+          });
+
+          const resp = await fetch('/api/upload', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              data: base64,
+              filename: file.name,
+              mimeType: file.type,
+            }),
+          });
+
+          if (resp.ok) {
+            const result = await resp.json();
+            const isImage = file.type.startsWith('image/');
+            setPastedFiles(prev => [...prev, {
+              id: crypto.randomUUID(),
+              name: file.name,
+              path: result.path,
+              preview: isImage ? `data:${file.type};base64,${base64}` : undefined,
+              type: isImage ? 'image' : 'file',
+            }]);
+          }
+        } catch (err) {
+          console.error('Failed to upload pasted file:', err);
+        } finally {
+          setIsUploading(false);
+        }
+      }
+    }
+  }, []);
+
+  const removePastedFile = useCallback((id: string) => {
+    setPastedFiles(prev => prev.filter(f => f.id !== id));
+  }, []);
 
   useEffect(() => {
     if (autoScrollRef.current && scrollRef.current) {
@@ -261,39 +379,93 @@ export function TerminalOutput({ outputs, title, role, status, agentId, totalInp
         const canSend = status === 'running' || status === 'starting' || status === 'stopped';
         const isRunning = status === 'running' || status === 'starting';
         const placeholder = isRunning
-          ? 'Send instruction to agent...'
+          ? 'Send instruction to agent... (Ctrl+V to paste images)'
           : status === 'stopped'
             ? 'Send to resume agent session...'
             : 'Agent is not available';
+
+        const handleSubmit = (e: React.FormEvent) => {
+          e.preventDefault();
+          if (!canSend) return;
+
+          // Build command with file paths
+          let fullCommand = commandInput.trim();
+          if (pastedFiles.length > 0) {
+            const filePaths = pastedFiles.map(f => f.path).join('\n');
+            if (fullCommand) {
+              fullCommand = `${fullCommand}\n\n[Attached files - please read these files using the Read tool]:\n${filePaths}`;
+            } else {
+              fullCommand = `Please analyze these files using the Read tool:\n${filePaths}`;
+            }
+          }
+
+          if (fullCommand) {
+            onSendCommand(agentId, fullCommand);
+            setCommandInput(agentId, '');
+            setPastedFiles([]);
+          }
+        };
+
         return (
-          <form
-            className="flex items-center gap-2 px-3 py-2 bg-zinc-900 border-t border-border"
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (canSend && commandInput.trim()) {
-                onSendCommand(agentId, commandInput.trim());
-                setCommandInput(agentId, '');
-              }
-            }}
-          >
-            <span className={`text-xs select-none ${canSend ? 'text-primary' : 'text-muted-foreground/30'}`}>&gt;</span>
-            <input
-              type="text"
-              value={commandInput}
-              onChange={(e) => agentId && setCommandInput(agentId, e.target.value)}
-              placeholder={placeholder}
-              disabled={!canSend}
-              className="flex-1 bg-transparent text-xs text-gray-200 font-mono outline-none placeholder:text-gray-600 disabled:opacity-40 disabled:cursor-not-allowed"
-            />
-            <button
-              type="submit"
-              disabled={!canSend || !commandInput.trim()}
+          <div className="bg-zinc-900 border-t border-border">
+            {/* Pasted files preview */}
+            {pastedFiles.length > 0 && (
+              <div className="flex flex-wrap gap-2 px-3 py-2 border-b border-border/50">
+                {pastedFiles.map(file => (
+                  <div
+                    key={file.id}
+                    className="relative group flex items-center gap-1.5 px-2 py-1 bg-zinc-800 rounded-md text-xs"
+                  >
+                    {file.preview ? (
+                      <img src={file.preview} alt={file.name} className="w-8 h-8 object-cover rounded" />
+                    ) : (
+                      <span className="w-8 h-8 flex items-center justify-center bg-zinc-700 rounded text-[10px]">
+                        📄
+                      </span>
+                    )}
+                    <span className="max-w-[100px] truncate text-gray-300">{file.name}</span>
+                    <button
+                      type="button"
+                      onClick={() => removePastedFile(file.id)}
+                      className="p-0.5 rounded hover:bg-red-500/20 text-gray-500 hover:text-red-400"
+                    >
+                      <IconX className="w-3 h-3" />
+                    </button>
+                  </div>
+                ))}
+                {isUploading && (
+                  <div className="flex items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground">
+                    <span className="animate-spin">⏳</span>
+                    Uploading...
+                  </div>
+                )}
+              </div>
+            )}
+
+            <form
+              className="flex items-center gap-2 px-3 py-2"
+              onSubmit={handleSubmit}
+            >
+              <span className={`text-xs select-none ${canSend ? 'text-primary' : 'text-muted-foreground/30'}`}>&gt;</span>
+              <input
+                type="text"
+                value={commandInput}
+                onChange={(e) => agentId && setCommandInput(agentId, e.target.value)}
+                onPaste={handlePaste}
+                placeholder={placeholder}
+                disabled={!canSend}
+                className="flex-1 bg-transparent text-xs text-gray-200 font-mono outline-none placeholder:text-gray-600 disabled:opacity-40 disabled:cursor-not-allowed"
+              />
+              <button
+                type="submit"
+                disabled={!canSend || (!commandInput.trim() && pastedFiles.length === 0)}
               className="inline-flex items-center gap-1 px-3 py-1 text-xs font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
             >
               <IconSend className="w-3 h-3" />
               Send
             </button>
-          </form>
+            </form>
+          </div>
         );
       })()}
     </div>
