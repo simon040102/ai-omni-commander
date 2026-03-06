@@ -4,7 +4,9 @@ import { useWsStore } from '../stores/wsStore';
 import { useProjectStore } from '../stores/projectStore';
 import { useAgentStore } from '../stores/agentStore';
 import { useToastStore } from '../stores/toastStore';
+import { useAsanaStore } from '../stores/asanaStore';
 import { notifyTab } from '../lib/tabNotification';
+import type { AsanaTask, AsanaConnectionStatus } from '@omni/shared';
 
 /**
  * Connect to the server WebSocket and dispatch incoming messages to stores.
@@ -26,6 +28,12 @@ export function useWebSocket() {
   const clearOutputs = useAgentStore(s => s.clearOutputs);
   const clearAllOutputs = useAgentStore(s => s.clearAll);
   const addToast = useToastStore(s => s.addToast);
+
+  // Asana store actions
+  const setAsanaTasks = useAsanaStore(s => s.setTasks);
+  const setAsanaLoading = useAsanaStore(s => s.setLoading);
+  const setAsanaError = useAsanaStore(s => s.setError);
+  const setAsanaConnectionStatus = useAsanaStore(s => s.setConnectionStatus);
 
   useEffect(() => {
     const wsUrl = `ws://${window.location.host}/omni-ws`;
@@ -228,6 +236,26 @@ export function useWebSocket() {
               title: `Error: ${payload['code'] || 'unknown'}`,
               message: payload['message'] as string,
               duration: 10000,
+            });
+            break;
+
+          // Asana MCP messages
+          case 'asana.tasks':
+            setAsanaTasks(payload['tasks'] as AsanaTask[]);
+            break;
+
+          case 'asana.connectionStatus':
+            setAsanaConnectionStatus(payload as unknown as AsanaConnectionStatus);
+            break;
+
+          case 'asana.error':
+            setAsanaError(payload['message'] as string);
+            setAsanaLoading(false);
+            addToast({
+              type: 'error',
+              title: 'Asana Error',
+              message: payload['message'] as string,
+              duration: 5000,
             });
             break;
 

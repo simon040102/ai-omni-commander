@@ -17,6 +17,10 @@ export interface Config {
   logLevel: string;
   projectRoot: string;
   aiContextDir: string;
+  /** Asana Personal Access Token for MCP integration */
+  asanaPat: string | null;
+  /** Optional: Filter tasks to specific Asana workspace */
+  asanaWorkspace: string | null;
 }
 
 function detectClaudePath(): string {
@@ -61,6 +65,8 @@ export function getConfig(): Config {
     logLevel: process.env['LOG_LEVEL'] || 'info',
     projectRoot: PROJECT_ROOT,
     aiContextDir: path.join(PROJECT_ROOT, '.ai_context'),
+    asanaPat: process.env['ASANA_PAT'] || null,
+    asanaWorkspace: process.env['ASANA_WORKSPACE'] || null,
   };
 
   return cachedConfig;

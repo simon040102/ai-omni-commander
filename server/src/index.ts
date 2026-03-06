@@ -16,6 +16,7 @@ import { QuickModeHandler } from './orchestrator/QuickModeHandler.js';
 import { MasterOrchestrator } from './orchestrator/MasterOrchestrator.js';
 import { OmniWebSocketServer } from './websocket/WebSocketServer.js';
 import { registerHandlers } from './websocket/MessageRouter.js';
+import { AsanaMcpClient } from './asana/AsanaMcpClient.js';
 import { listProjects } from './db/queries/projects.js';
 import { getRecentPaths, addRecentPath, removeRecentPath, clearRecentPaths, migrateProjectPathsToRecent } from './db/queries/recentPaths.js';
 import { genId } from './utils/uuid.js';
@@ -71,6 +72,14 @@ async function main() {
   const creativeHandler = new CreativeModeHandler(agentManager, dispatcher, contextSync, eventBus);
   const quickHandler = new QuickModeHandler(agentManager, eventBus);
   const orchestrator = new MasterOrchestrator(specHandler, creativeHandler, quickHandler);
+
+  // Create Asana MCP client (optional - only connects when ASANA_PAT is set)
+  const asanaClient = new AsanaMcpClient(config);
+  if (config.asanaPat) {
+    logger.info('Asana MCP integration enabled (ASANA_PAT configured)');
+  } else {
+    logger.info('Asana MCP integration disabled (ASANA_PAT not set)');
+  }
 
   // 3. Create Express app for HTTP
   const app = express();
@@ -187,7 +196,7 @@ async function main() {
   const wsServer = new OmniWebSocketServer(httpServer);
 
   // 5. Register WebSocket message handlers
-  registerHandlers(wsServer, orchestrator, agentManager);
+  registerHandlers(wsServer, orchestrator, agentManager, asanaClient);
 
   // 6. Wire EventBus to WebSocket broadcast
   eventBus.on('agent.*', (event) => {
@@ -281,6 +290,7 @@ async function main() {
     logger.info('Shutting down...');
     await agentManager.stopAllForProject('*');
     await contractWatcher.stop();
+    await asanaClient.disconnect();
     httpServer.close();
     db.close();
     process.exit(0);

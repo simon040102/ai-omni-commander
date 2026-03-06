@@ -1,6 +1,7 @@
 import type { Agent, AgentStatus, AgentOutputEvent } from './agent-types.js';
 import type { Task, TaskStatus, DependencyEdge, TaskSummary } from './task-types.js';
-import type { Project, Workspace, DocType } from './project-types.js';
+import type { Project, Workspace, DocType, SuperpowersConfig } from './project-types.js';
+import type { AsanaTask, AsanaConnectionStatus, AsanaFetchTasksOptions } from './asana-types.js';
 
 // Base envelope for all WebSocket messages
 export interface WsMessage {
@@ -23,10 +24,11 @@ export interface WsCreateProject extends WsMessage {
   payload: {
     projectId?: string;
     name: string;
-    mode: 'spec' | 'creative';
+    mode: 'spec' | 'creative' | 'quick';
     workingDir: string;
     workspaces: Workspace[];
     reviewConfig?: ReviewConfig;
+    superpowers?: SuperpowersConfig;
   };
 }
 
@@ -154,6 +156,20 @@ export interface WsAddAgent extends WsMessage {
   };
 }
 
+// ============================================
+// ASANA MCP messages (CLIENT -> SERVER)
+// ============================================
+
+export interface WsAsanaFetchTasks extends WsMessage {
+  type: 'asana.fetchTasks';
+  payload: AsanaFetchTasksOptions;
+}
+
+export interface WsAsanaCheckConnection extends WsMessage {
+  type: 'asana.checkConnection';
+  payload: Record<string, never>;
+}
+
 export type ClientMessage =
   | WsCreateProject
   | WsUploadDocument
@@ -169,7 +185,9 @@ export type ClientMessage =
   | WsDeleteProject
   | WsUpdateProject
   | WsDeleteAgent
-  | WsAddAgent;
+  | WsAddAgent
+  | WsAsanaFetchTasks
+  | WsAsanaCheckConnection;
 
 // ============================================
 // SERVER -> CLIENT messages
@@ -269,6 +287,30 @@ export interface WsError extends WsMessage {
   };
 }
 
+// ============================================
+// ASANA MCP messages (SERVER -> CLIENT)
+// ============================================
+
+export interface WsAsanaTasks extends WsMessage {
+  type: 'asana.tasks';
+  payload: {
+    tasks: AsanaTask[];
+  };
+}
+
+export interface WsAsanaConnectionStatus extends WsMessage {
+  type: 'asana.connectionStatus';
+  payload: AsanaConnectionStatus;
+}
+
+export interface WsAsanaError extends WsMessage {
+  type: 'asana.error';
+  payload: {
+    code: string;
+    message: string;
+  };
+}
+
 export type ServerMessage =
   | WsProjectState
   | WsProjectsList
@@ -279,4 +321,7 @@ export type ServerMessage =
   | WsInterventionRequest
   | WsInterviewQuestion
   | WsSpecDraft
-  | WsError;
+  | WsError
+  | WsAsanaTasks
+  | WsAsanaConnectionStatus
+  | WsAsanaError;

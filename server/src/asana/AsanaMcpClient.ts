@@ -1,0 +1,187 @@
+import type { Config } from '../config.js';
+import type { AsanaTask, AsanaConnectionStatus, AsanaFetchTasksOptions } from '@omni/shared';
+import { createChildLogger } from '../utils/logger.js';
+
+const logger = createChildLogger('AsanaMcpClient');
+
+const ASANA_API_BASE = 'https://app.asana.com/api/1.0';
+
+/**
+ * Client for communicating with the Asana API.
+ * Uses direct REST API calls instead of MCP for better reliability.
+ */
+export class AsanaMcpClient {
+  private config: Config;
+  private _connected = false;
+
+  constructor(config: Config) {
+    this.config = config;
+  }
+
+  /** Check if Asana PAT is configured */
+  isConfigured(): boolean {
+    return !!this.config.asanaPat;
+  }
+
+  /** Check if client is connected to Asana API */
+  isConnected(): boolean {
+    return this._connected;
+  }
+
+  /** Test connection to Asana API */
+  async connect(): Promise<void> {
+    if (!this.config.asanaPat) {
+      throw new Error('ASANA_PAT not configured. Please set the ASANA_PAT environment variable.');
+    }
+
+    logger.info('Testing Asana API connection...');
+
+    try {
+      // Test by fetching user info
+      const response = await fetch(`${ASANA_API_BASE}/users/me`, {
+        headers: {
+          'Authorization': `Bearer ${this.config.asanaPat}`,
+          'Accept': 'application/json',
+        },
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(`Asana API error: ${response.status} ${JSON.stringify(errorData)}`);
+      }
+
+      this._connected = true;
+      const userData = await response.json();
+      logger.info({ user: userData.data?.name }, 'Connected to Asana API');
+    } catch (error) {
+      logger.error({ error }, 'Failed to connect to Asana API');
+      this._connected = false;
+      throw error;
+    }
+  }
+
+  /** Disconnect (no-op for REST API) */
+  async disconnect(): Promise<void> {
+    this._connected = false;
+    logger.info('Disconnected from Asana API');
+  }
+
+  /** Check connection status */
+  async checkConnection(): Promise<AsanaConnectionStatus> {
+    const status: AsanaConnectionStatus = {
+      connected: false,
+      configured: this.isConfigured(),
+      lastChecked: new Date().toISOString(),
+      error: null,
+    };
+
+    if (!this.isConfigured()) {
+      status.error = 'ASANA_PAT environment variable not set';
+      return status;
+    }
+
+    try {
+      await this.connect();
+      status.connected = true;
+    } catch (error) {
+      status.error = (error as Error).message;
+      status.connected = false;
+    }
+
+    return status;
+  }
+
+  /** Fetch tasks assigned to the current user */
+  async getMyTasks(options?: AsanaFetchTasksOptions): Promise<AsanaTask[]> {
+    if (!this.config.asanaPat) {
+      throw new Error('ASANA_PAT not configured');
+    }
+
+    logger.info({ options }, 'Fetching Asana tasks...');
+
+    try {
+      // First get user info to get workspace
+      const userResponse = await fetch(`${ASANA_API_BASE}/users/me`, {
+        headers: {
+          'Authorization': `Bearer ${this.config.asanaPat}`,
+          'Accept': 'application/json',
+        },
+      });
+
+      if (!userResponse.ok) {
+        throw new Error(`Failed to get user info: ${userResponse.status}`);
+      }
+
+      const userData = await userResponse.json();
+      const userGid = userData.data?.gid;
+      const workspaces = userData.data?.workspaces || [];
+
+      if (!userGid) {
+        throw new Error('Could not get user GID');
+      }
+
+      // Use provided workspace or first available
+      const workspaceGid = options?.workspace || this.config.asanaWorkspace || workspaces[0]?.gid;
+
+      if (!workspaceGid) {
+        throw new Error('No workspace found');
+      }
+
+      // Fetch tasks assigned to user in workspace
+      const limit = options?.limit || 50;
+      const completedSince = options?.includeCompleted ? '' : '&completed_since=now';
+
+      const tasksUrl = `${ASANA_API_BASE}/tasks?assignee=${userGid}&workspace=${workspaceGid}&limit=${limit}${completedSince}&opt_fields=name,notes,due_on,completed,permalink_url,projects.name,projects.gid,tags.name`;
+
+      const tasksResponse = await fetch(tasksUrl, {
+        headers: {
+          'Authorization': `Bearer ${this.config.asanaPat}`,
+          'Accept': 'application/json',
+        },
+      });
+
+      if (!tasksResponse.ok) {
+        const errorText = await tasksResponse.text();
+        throw new Error(`Failed to fetch tasks: ${tasksResponse.status} ${errorText}`);
+      }
+
+      const tasksData = await tasksResponse.json();
+      const tasks = (tasksData.data || []).map((task: Record<string, unknown>) => this.mapToAsanaTask(task));
+
+      logger.info({ count: tasks.length }, 'Fetched Asana tasks');
+      this._connected = true;
+      return tasks;
+    } catch (error) {
+      logger.error({ error }, 'Failed to fetch Asana tasks');
+      throw error;
+    }
+  }
+
+  /** Map raw Asana API response to AsanaTask interface */
+  private mapToAsanaTask(raw: Record<string, unknown>): AsanaTask {
+    // Extract project info
+    let projectName = 'No Project';
+    let projectGid = '';
+
+    const projects = raw['projects'] as Array<{ gid: string; name: string }> | undefined;
+    if (projects && projects.length > 0) {
+      projectName = projects[0]!.name;
+      projectGid = projects[0]!.gid;
+    }
+
+    // Extract tags
+    const tags = (raw['tags'] as Array<{ name: string }> | undefined)?.map(t => t.name) || [];
+
+    return {
+      gid: String(raw['gid'] || ''),
+      name: String(raw['name'] || ''),
+      notes: String(raw['notes'] || ''),
+      projectName,
+      projectGid,
+      dueOn: raw['due_on'] as string | null,
+      completed: Boolean(raw['completed']),
+      permalink_url: String(raw['permalink_url'] || ''),
+      tags,
+    };
+  }
+}

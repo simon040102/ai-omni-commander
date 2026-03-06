@@ -2,6 +2,13 @@ export type ProjectMode = 'spec' | 'creative' | 'quick';
 
 export type QuickTaskType = 'bug' | 'change' | 'refactor' | 'other';
 
+export type SuperpowersFeature = 'brainstorm' | 'tdd' | 'debugging';
+
+export interface SuperpowersConfig {
+  enabled: boolean;
+  features: SuperpowersFeature[];
+}
+
 export type ProjectStatus =
   | 'setup'
   | 'interviewing'
@@ -33,6 +40,8 @@ export interface ProjectConfig {
   defaultModel?: string;
   autoReview?: boolean;
   autoTest?: boolean;
+  // Superpowers methodology
+  superpowers?: SuperpowersConfig;
   // Quick Mode specific
   quickTask?: {
     type: QuickTaskType;

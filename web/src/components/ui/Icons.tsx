@@ -244,3 +244,24 @@ export function IconLightning({ className = 'w-4 h-4' }: IconProps) {
     </svg>
   );
 }
+
+export function IconAsana({ className = 'w-4 h-4' }: IconProps) {
+  // Asana logo - three overlapping circles
+  return (
+    <svg className={className} viewBox="0 0 16 16" fill="currentColor">
+      <circle cx="8" cy="4" r="2.5" />
+      <circle cx="4.5" cy="11" r="2.5" />
+      <circle cx="11.5" cy="11" r="2.5" />
+    </svg>
+  );
+}
+
+export function IconExternalLink({ className = 'w-4 h-4' }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 9v4a1 1 0 01-1 1H3a1 1 0 01-1-1V5a1 1 0 011-1h4" />
+      <path d="M9 2h5v5" />
+      <path d="M14 2L7 9" />
+    </svg>
+  );
+}
