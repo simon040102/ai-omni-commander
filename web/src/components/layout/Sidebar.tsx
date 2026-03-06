@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { useProjectStore } from '../../stores/projectStore';
 import { useWsStore } from '../../stores/wsStore';
 import { useToastStore } from '../../stores/toastStore';
@@ -34,8 +34,17 @@ const NAV_ITEMS: { view: View; label: string; Icon: React.FC<{ className?: strin
 ];
 
 export function Sidebar({ currentView, onViewChange, collapsed, onToggleCollapse }: SidebarProps) {
-  const projects = useProjectStore(s => s.projects);
+  const rawProjects = useProjectStore(s => s.projects);
   const currentProjectId = useProjectStore(s => s.currentProjectId);
+
+  // Sort projects by createdAt descending (newest first)
+  const projects = useMemo(() => {
+    return [...rawProjects].sort((a, b) => {
+      const dateA = new Date(a.createdAt.endsWith('Z') ? a.createdAt : a.createdAt + 'Z').getTime();
+      const dateB = new Date(b.createdAt.endsWith('Z') ? b.createdAt : b.createdAt + 'Z').getTime();
+      return dateB - dateA;
+    });
+  }, [rawProjects]);
   const setCurrentProject = useProjectStore(s => s.setCurrentProject);
   const projectsWithActivity = useProjectStore(s => s.projectsWithActivity);
   const allAgents = useProjectStore(s => s.agents);
