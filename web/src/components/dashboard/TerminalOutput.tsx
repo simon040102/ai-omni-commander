@@ -2,7 +2,6 @@ import { useEffect, useRef, useState, useMemo, useCallback, memo } from 'react';
 import type { AgentOutput } from '../../stores/agentStore';
 import { useAgentStore } from '../../stores/agentStore';
 import { IconSearch, IconStop, IconRefresh, IconSend, IconChevronDown, IconChevronRight, IconX } from '../ui/Icons';
-import { getModelInfo } from '@omni/shared';
 
 /** Collapsible thinking block component - memoized for performance */
 const ThinkingBlock = memo(function ThinkingBlock({ content, defaultExpanded = false }: { content: string; defaultExpanded?: boolean }) {
@@ -307,22 +306,12 @@ export function TerminalOutput({ outputs, title, role, status, agentId, model, t
               {model.replace('claude-', '').replace(/-\d{8}$/, '')}
             </span>
           )}
-          {/* Token usage display with context % */}
-          {(totalInputTokens !== undefined && totalInputTokens > 0) && (() => {
-            const modelInfo = model ? getModelInfo(model) : undefined;
-            const contextWindow = modelInfo?.contextWindow || 200000;
-            const contextPercent = Math.round((totalInputTokens / contextWindow) * 100);
-            const totalTokens = totalInputTokens + (totalOutputTokens || 0);
-            return (
-              <span className={`text-[10px] px-1.5 py-0.5 rounded ${
-                contextPercent > 80 ? 'bg-red-500/10 text-red-600 dark:text-red-400' :
-                contextPercent > 50 ? 'bg-yellow-500/10 text-yellow-600 dark:text-yellow-400' :
-                'bg-blue-500/10 text-blue-600 dark:text-blue-400'
-              }`}>
-                {contextPercent}% ({(totalTokens / 1000).toFixed(1)}k)
-              </span>
-            );
-          })()}
+          {/* Token usage display */}
+          {(totalInputTokens !== undefined && totalInputTokens > 0) && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-600 dark:text-blue-400">
+              {((totalInputTokens + (totalOutputTokens || 0)) / 1000).toFixed(1)}k tokens
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-1">
           {/* Search toggle */}
