@@ -54,6 +54,47 @@ const ThinkingBlock = memo(function ThinkingBlock({ content, defaultExpanded = f
   );
 });
 
+/** Collapsible streaming thinking block - for real-time thinking display */
+const StreamingThinkingBlock = memo(function StreamingThinkingBlock({ content }: { content: string }) {
+  const [isExpanded, setIsExpanded] = useState(false);
+
+  const preview = useMemo(() => {
+    return content.slice(0, 50) + (content.length > 50 ? '...' : '');
+  }, [content]);
+
+  const handleToggle = useCallback(() => {
+    setIsExpanded(prev => !prev);
+  }, []);
+
+  return (
+    <div className="my-1">
+      <button
+        onClick={handleToggle}
+        className="flex items-center gap-1 text-yellow-600 dark:text-yellow-400 hover:text-yellow-500 dark:hover:text-yellow-300 transition-colors"
+      >
+        {isExpanded ? (
+          <IconChevronDown className="w-3 h-3 shrink-0" />
+        ) : (
+          <IconChevronRight className="w-3 h-3 shrink-0" />
+        )}
+        <span className="text-[10px] px-1.5 py-0.5 rounded bg-yellow-500/10 font-medium flex items-center gap-1">
+          thinking
+          <span className="animate-pulse">●</span>
+        </span>
+        {!isExpanded && (
+          <span className="opacity-50 text-[10px] truncate max-w-[300px]">{preview}</span>
+        )}
+      </button>
+      {isExpanded && (
+        <div className="ml-4 mt-1 pl-2 border-l-2 border-yellow-500/30 text-yellow-600 dark:text-yellow-400 opacity-80 whitespace-pre-wrap break-all max-h-[400px] overflow-y-auto">
+          {content}
+          <span className="animate-pulse">▌</span>
+        </div>
+      )}
+    </div>
+  );
+});
+
 interface PastedFile {
   id: string;
   name: string;
@@ -373,12 +414,10 @@ export function TerminalOutput({ outputs, title, role, status, agentId, model, t
               const stableKey = `${output.timestamp}-${i}`;
               const isLastItem = i === filteredOutputs.length - 1;
 
-              // Check if this is a thinking block
+              // Check if this is a thinking block - always collapsed by default
               const isThinking = output.streamType === 'system' && output.content.startsWith('[thinking]');
               if (isThinking) {
-                // Keep expanded if agent is running and this is the last (active) thinking block
-                const isActiveThinking = isLastItem && status === 'running';
-                return <ThinkingBlock key={stableKey} content={output.content} defaultExpanded={isActiveThinking} />;
+                return <ThinkingBlock key={stableKey} content={output.content} defaultExpanded={false} />;
               }
 
               return (
@@ -408,12 +447,7 @@ export function TerminalOutput({ outputs, title, role, status, agentId, model, t
           )}
           {/* Real-time streaming content */}
           {streamingBuffer?.thinking && (
-            <div className="text-yellow-600 dark:text-yellow-400 leading-5 whitespace-pre-wrap break-all opacity-70">
-              <span className="opacity-50">SYS </span>
-              <span className="text-yellow-700 dark:text-yellow-500">[thinking] </span>
-              {streamingBuffer.thinking}
-              <span className="animate-pulse">▌</span>
-            </div>
+            <StreamingThinkingBlock content={streamingBuffer.thinking} />
           )}
           {streamingBuffer?.text && (
             <div className="text-foreground leading-5 whitespace-pre-wrap break-all">
@@ -421,8 +455,8 @@ export function TerminalOutput({ outputs, title, role, status, agentId, model, t
               <span className="animate-pulse text-primary">▌</span>
             </div>
           )}
-          {/* Working indicator when running but no streaming content */}
-          {(status === 'running' || status === 'starting') && !streamingBuffer?.text && !streamingBuffer?.thinking && (
+          {/* Working indicator when running but no visible streaming text */}
+          {(status === 'running' || status === 'starting') && !streamingBuffer?.text && (
             <div className="flex items-center gap-2 text-muted-foreground text-xs py-2">
               <span className="flex gap-1">
                 <span className="w-1.5 h-1.5 rounded-full bg-primary animate-bounce" style={{ animationDelay: '0ms' }} />
