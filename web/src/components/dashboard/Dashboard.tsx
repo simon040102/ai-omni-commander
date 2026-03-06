@@ -5,7 +5,7 @@ import { useWsStore } from '../../stores/wsStore';
 import { useToastStore } from '../../stores/toastStore';
 import { DualTerminal } from './DualTerminal';
 import { DocumentUpload } from '../project/DocumentUpload';
-import { IconStop, IconPlay, IconPlus, IconX, IconGrid, IconClock } from '../ui/Icons';
+import { IconStop, IconPlay, IconPlus, IconX, IconGrid } from '../ui/Icons';
 import type { View } from '../layout/AppShell';
 
 /* ─── Role accent colors for left bar ─── */
@@ -45,7 +45,6 @@ export function Dashboard({ onViewChange }: DashboardProps) {
     : allAgents;
   const client = useWsStore(s => s.client);
   const addToast = useToastStore(s => s.addToast);
-  const [elapsed, setElapsed] = useState('00:00');
   const [focusAgentId, setFocusAgentId] = useState<string | null>(null);
   const [showNewExecution, setShowNewExecution] = useState(false);
   const [newRequirement, setNewRequirement] = useState('');
@@ -57,20 +56,6 @@ export function Dashboard({ onViewChange }: DashboardProps) {
   const [selectedModel, setSelectedModel] = useState('sonnet');
 
   const project = projects.find(p => p.id === currentProjectId);
-
-  // Elapsed time counter
-  useEffect(() => {
-    if (!project) return;
-    const dateStr = project.createdAt.endsWith('Z') ? project.createdAt : project.createdAt + 'Z';
-    const start = new Date(dateStr).getTime();
-    const interval = setInterval(() => {
-      const diff = Date.now() - start;
-      const mins = Math.floor(diff / 60000);
-      const secs = Math.floor((diff % 60000) / 1000);
-      setElapsed(`${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`);
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [project]);
 
   const handleStopAll = useCallback(() => {
     if (!currentProjectId) return;
@@ -184,7 +169,6 @@ export function Dashboard({ onViewChange }: DashboardProps) {
           <div className="flex items-center gap-3">
             {/* Stat cards */}
             <div className="flex items-center gap-2">
-              <StatCard icon={<IconClock className="w-3.5 h-3.5" />} label="Elapsed" value={elapsed} />
               <StatCard
                 icon={<span className="text-xs">A</span>}
                 label="Agents"
