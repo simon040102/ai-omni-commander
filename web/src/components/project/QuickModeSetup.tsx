@@ -1,8 +1,14 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import type { QuickTaskType } from '@omni/shared';
-import { IconPlay } from '../ui/Icons';
+import { IconPlay, IconAsana } from '../ui/Icons';
 
 type QuickRole = 'backend' | 'frontend' | 'devops' | 'testing';
+
+interface ImportedTask {
+  name: string;
+  notes: string;
+  asanaGid: string;
+}
 
 interface QuickModeSetupProps {
   projectId: string;
@@ -15,6 +21,7 @@ interface QuickModeSetupProps {
     relatedFiles?: string[];
     role?: QuickRole;
   }) => void;
+  importedTask?: ImportedTask;
 }
 
 const TASK_TYPES: { value: QuickTaskType; label: string; emoji: string; desc: string }[] = [
@@ -35,6 +42,7 @@ export function QuickModeSetup({
   selectedModel,
   onModelChange,
   onStartExecution,
+  importedTask,
 }: QuickModeSetupProps) {
   const [taskType, setTaskType] = useState<QuickTaskType>('bug');
   const [role, setRole] = useState<QuickRole>('backend');
@@ -42,6 +50,21 @@ export function QuickModeSetup({
   const [errorLog, setErrorLog] = useState('');
   const [relatedFiles, setRelatedFiles] = useState('');
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const hasAppliedImport = useRef(false);
+
+  // Pre-fill from imported Asana task
+  useEffect(() => {
+    if (importedTask && !hasAppliedImport.current) {
+      hasAppliedImport.current = true;
+      // Use notes if available, otherwise use name
+      const taskDescription = importedTask.notes?.trim()
+        ? `${importedTask.name}\n\n${importedTask.notes}`
+        : importedTask.name;
+      setDescription(taskDescription);
+      // Default to 'other' type for imported tasks
+      setTaskType('other');
+    }
+  }, [importedTask]);
 
   const handleStart = () => {
     if (!description.trim()) return;
@@ -59,6 +82,15 @@ export function QuickModeSetup({
 
   return (
     <div className="space-y-5">
+      {/* Asana Import Banner */}
+      {importedTask && (
+        <div className="flex items-center gap-2 px-3 py-2 bg-pink-500/10 border border-pink-500/30 rounded-lg">
+          <IconAsana className="w-4 h-4 text-pink-500" />
+          <span className="text-sm text-pink-400">Imported from Asana</span>
+          <span className="text-xs text-muted-foreground ml-auto">GID: {importedTask.asanaGid}</span>
+        </div>
+      )}
+
       {/* Task Type */}
       <div>
         <label className="block text-sm font-medium mb-2">Task Type</label>

@@ -1,4 +1,4 @@
-import { useState, useCallback, Fragment } from 'react';
+import { useState, useCallback, Fragment, useEffect, useRef } from 'react';
 import { useWsStore } from '../../stores/wsStore';
 import { useToastStore } from '../../stores/toastStore';
 import { ModeSelector } from './ModeSelector';
@@ -8,7 +8,7 @@ import { QuickModeSetup } from './QuickModeSetup';
 import { FolderPicker } from './FolderPicker';
 import { IconCheck, IconPlay, IconArrowRight, IconChevronLeft, IconPlus, IconX, IconRocket } from '../ui/Icons';
 import type { View } from '../layout/AppShell';
-import type { ProjectMode, QuickTaskType } from '@omni/shared';
+import type { ProjectMode, QuickTaskType, SuperpowersFeature } from '@omni/shared';
 
 interface WorkspaceEntry {
   label: string;
@@ -50,6 +50,48 @@ export function ProjectSetup({ onViewChange }: ProjectSetupProps) {
   // Model selection
   const [selectedModel, setSelectedModel] = useState<string>('sonnet');
 
+  // Superpowers methodology
+  const [superpowersEnabled, setSuperpowersEnabled] = useState(false);
+  const [superpowersFeatures, setSuperpowersFeatures] = useState<SuperpowersFeature[]>(['brainstorm', 'tdd', 'debugging']);
+
+  // Asana import
+  const [importedAsanaTask, setImportedAsanaTask] = useState<{
+    name: string;
+    notes: string;
+    gid: string;
+    mode: ProjectMode;
+  } | null>(null);
+  const hasCheckedAsanaImport = useRef(false);
+
+  // Check for Asana import on mount
+  useEffect(() => {
+    if (hasCheckedAsanaImport.current) return;
+    hasCheckedAsanaImport.current = true;
+
+    const stored = sessionStorage.getItem('asana_import_task');
+    if (stored) {
+      try {
+        const task = JSON.parse(stored);
+        setImportedAsanaTask(task);
+        // Pre-select the mode
+        if (task.mode) {
+          setMode(task.mode);
+        }
+        // Auto-set name from task name
+        if (task.name) {
+          setName(task.name.slice(0, 50));
+        }
+        // Clear after reading
+        sessionStorage.removeItem('asana_import_task');
+        addToast({
+          type: 'info',
+          title: 'Asana Task Imported',
+          message: `Task: ${task.name}`,
+        });
+      } catch { /* ignore */ }
+    }
+  }, [addToast]);
+
   const addWorkspace = () => {
     setWorkspaces([...workspaces, { label: '', path: '' }]);
   };
@@ -87,6 +129,10 @@ export function ProjectSetup({ onViewChange }: ProjectSetupProps) {
           enabled: reviewEnabled,
           skillSource: reviewSkillSource,
         },
+        superpowers: superpowersEnabled ? {
+          enabled: true,
+          features: superpowersFeatures,
+        } : undefined,
       },
     });
 
@@ -344,6 +390,71 @@ export function ProjectSetup({ onViewChange }: ProjectSetupProps) {
             </div>
           )}
 
+          {/* Superpowers Methodology */}
+          <div className="border border-border rounded-lg p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <h4 className="text-sm font-medium flex items-center gap-2">
+                  Superpowers Methodology
+                  <span className="text-[10px] px-1.5 py-0.5 bg-purple-500/20 text-purple-400 rounded">Beta</span>
+                </h4>
+                <p className="text-xs text-muted-foreground">Enforce structured development practices (TDD, planning, debugging)</p>
+              </div>
+              <button
+                onClick={() => setSuperpowersEnabled(!superpowersEnabled)}
+                className={`w-10 h-5 rounded-full transition-colors relative ${
+                  superpowersEnabled ? 'bg-purple-500' : 'bg-muted'
+                }`}
+              >
+                <span
+                  className={`block w-4 h-4 rounded-full bg-white absolute top-0.5 transition-all ${
+                    superpowersEnabled ? 'left-5' : 'left-0.5'
+                  }`}
+                />
+              </button>
+            </div>
+
+            {superpowersEnabled && (
+              <div className="space-y-2">
+                <label className="block text-xs text-muted-foreground">
+                  Select methodologies to enable:
+                </label>
+                <div className="flex flex-wrap gap-2">
+                  {([
+                    { id: 'brainstorm', label: 'Brainstorm', desc: 'Plan before coding' },
+                    { id: 'tdd', label: 'TDD', desc: 'Test-driven development' },
+                    { id: 'debugging', label: 'Debugging', desc: 'Systematic debugging' },
+                  ] as const).map(({ id, label, desc }) => {
+                    const isSelected = superpowersFeatures.includes(id);
+                    return (
+                      <button
+                        key={id}
+                        onClick={() => {
+                          if (isSelected) {
+                            setSuperpowersFeatures(superpowersFeatures.filter(f => f !== id));
+                          } else {
+                            setSuperpowersFeatures([...superpowersFeatures, id]);
+                          }
+                        }}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                          isSelected
+                            ? 'bg-purple-500/20 text-purple-400 border border-purple-500/50'
+                            : 'bg-muted text-muted-foreground border border-border hover:border-purple-500/30'
+                        }`}
+                        title={desc}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="text-[10px] text-muted-foreground">
+                  These rules apply on top of project-specific CLAUDE.md skills. Project rules take priority.
+                </p>
+              </div>
+            )}
+          </div>
+
           <div className="flex gap-3">
             <button
               onClick={() => setStep('mode')}
@@ -429,6 +540,11 @@ export function ProjectSetup({ onViewChange }: ProjectSetupProps) {
               selectedModel={selectedModel}
               onModelChange={setSelectedModel}
               onStartExecution={handleQuickStartExecution}
+              importedTask={importedAsanaTask ? {
+                name: importedAsanaTask.name,
+                notes: importedAsanaTask.notes,
+                asanaGid: importedAsanaTask.gid,
+              } : undefined}
             />
           )}
         </div>

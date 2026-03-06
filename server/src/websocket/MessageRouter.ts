@@ -4,11 +4,13 @@ import type {
   WsStartExecution, WsInterviewResponse, WsInterviewConfirm,
   WsAgentAction, WsAgentCommand, WsInterventionResolve, WsTaskOverride,
   WsDeleteProject, WsUpdateProject, WsDeleteAgent, WsAddAgent,
+  WsAsanaFetchTasks, WsAsanaCheckConnection,
   AgentRole,
 } from '@omni/shared';
 import type { MasterOrchestrator } from '../orchestrator/MasterOrchestrator.js';
 import type { AgentManager } from '../agent/AgentManager.js';
 import type { OmniWebSocketServer } from './WebSocketServer.js';
+import type { AsanaMcpClient } from '../asana/AsanaMcpClient.js';
 import { createProject, listProjects, getProject, deleteProject, updateProject } from '../db/queries/projects.js';
 import { getTasksByProject, getDependencies, updateTask } from '../db/queries/tasks.js';
 import { getAgentsByProject, deleteAgent } from '../db/queries/agents.js';
@@ -25,6 +27,7 @@ export function registerHandlers(
   wsServer: OmniWebSocketServer,
   orchestrator: MasterOrchestrator,
   agentManager: AgentManager,
+  asanaClient?: AsanaMcpClient,
 ): void {
   // PROJECT.CREATE
   wsServer.registerHandler('project.create', (msg: WsMessage, ws: WebSocket) => {
@@ -41,6 +44,7 @@ export function registerHandlers(
     const config: Record<string, unknown> = {};
     if (payload.workspaces?.length) config['workspaces'] = payload.workspaces;
     if (payload.reviewConfig) config['reviewConfig'] = payload.reviewConfig;
+    if (payload.superpowers) config['superpowers'] = payload.superpowers;
     const configJson = Object.keys(config).length > 0 ? JSON.stringify(config) : undefined;
     const project = createProject({
       id: payload.projectId,
@@ -322,6 +326,94 @@ export function registerHandlers(
       timestamp: new Date().toISOString(),
       payload: { projects },
     } as WsMessage);
+  });
+
+  // ============================================
+  // ASANA MCP Handlers
+  // ============================================
+
+  // ASANA.CHECK_CONNECTION
+  wsServer.registerHandler('asana.checkConnection', async (msg: WsMessage, ws: WebSocket) => {
+    if (!asanaClient) {
+      wsServer.send(ws, {
+        type: 'asana.connectionStatus',
+        id: genId(),
+        timestamp: new Date().toISOString(),
+        payload: {
+          connected: false,
+          configured: false,
+          lastChecked: new Date().toISOString(),
+          error: 'Asana MCP client not initialized',
+        },
+      } as WsMessage);
+      return;
+    }
+
+    try {
+      const status = await asanaClient.checkConnection();
+      wsServer.send(ws, {
+        type: 'asana.connectionStatus',
+        id: genId(),
+        timestamp: new Date().toISOString(),
+        payload: status,
+      } as WsMessage);
+    } catch (err) {
+      wsServer.send(ws, {
+        type: 'asana.connectionStatus',
+        id: genId(),
+        timestamp: new Date().toISOString(),
+        payload: {
+          connected: false,
+          configured: asanaClient.isConfigured(),
+          lastChecked: new Date().toISOString(),
+          error: (err as Error).message,
+        },
+      } as WsMessage);
+    }
+  });
+
+  // ASANA.FETCH_TASKS
+  wsServer.registerHandler('asana.fetchTasks', async (msg: WsMessage, ws: WebSocket) => {
+    const { payload } = msg as WsAsanaFetchTasks;
+
+    if (!asanaClient) {
+      wsServer.send(ws, {
+        type: 'asana.error',
+        id: genId(),
+        timestamp: new Date().toISOString(),
+        payload: { code: 'ASANA_NOT_CONFIGURED', message: 'Asana MCP client not initialized' },
+      } as WsMessage);
+      return;
+    }
+
+    if (!asanaClient.isConfigured()) {
+      wsServer.send(ws, {
+        type: 'asana.error',
+        id: genId(),
+        timestamp: new Date().toISOString(),
+        payload: { code: 'ASANA_NOT_CONFIGURED', message: 'ASANA_PAT environment variable not set' },
+      } as WsMessage);
+      return;
+    }
+
+    try {
+      const tasks = await asanaClient.getMyTasks(payload);
+      logger.info({ count: tasks.length }, 'Fetched Asana tasks');
+      wsServer.send(ws, {
+        type: 'asana.tasks',
+        id: genId(),
+        timestamp: new Date().toISOString(),
+        payload: { tasks },
+      } as WsMessage);
+    } catch (err) {
+      logger.error({ err }, 'Failed to fetch Asana tasks');
+      wsServer.send(ws, {
+        type: 'asana.error',
+        id: genId(),
+        timestamp: new Date().toISOString(),
+        payload: { code: 'ASANA_FETCH_ERROR', message: (err as Error).message },
+      } as WsMessage);
+    }
   });
 
   // On new client connection: send project list + full state for active projects

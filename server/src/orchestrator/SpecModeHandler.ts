@@ -1,4 +1,4 @@
-import type { DocType, Workspace, AgentRole } from '@omni/shared';
+import type { DocType, Workspace, AgentRole, SuperpowersConfig, SuperpowersFeature } from '@omni/shared';
 import type { AgentManager } from '../agent/AgentManager.js';
 import type { TaskDispatcher } from './TaskDispatcher.js';
 import type { ContextSync } from '../eventbus/ContextSync.js';
@@ -8,6 +8,7 @@ import { updateProject, getProject } from '../db/queries/projects.js';
 import { getAgentsByRole } from '../db/queries/agents.js';
 import { getConfig } from '../config.js';
 import { createChildLogger } from '../utils/logger.js';
+import { loadSuperpowersPrompt } from '../skills/superpowers/index.js';
 import path from 'node:path';
 
 const logger = createChildLogger('SpecModeHandler');
@@ -62,13 +63,20 @@ export class SpecModeHandler {
       throw new Error('No documents uploaded for this project');
     }
 
-    // Parse workspaces from project config
+    // Parse workspaces and superpowers from project config
     let workspaces: Workspace[] = [];
+    let superpowers: SuperpowersConfig | undefined;
     if (project.configJson) {
       try {
-        const cfg = JSON.parse(project.configJson) as { workspaces?: Workspace[] };
+        const cfg = JSON.parse(project.configJson) as { workspaces?: Workspace[]; superpowers?: SuperpowersConfig };
         workspaces = cfg.workspaces || [];
+        superpowers = cfg.superpowers;
       } catch { /* ignore */ }
+    }
+
+    // Log Superpowers status
+    if (superpowers?.enabled && superpowers.features.length > 0) {
+      logger.info({ features: superpowers.features }, 'Superpowers methodology enabled');
     }
 
     if (workspaces.length === 0) {
@@ -97,7 +105,7 @@ export class SpecModeHandler {
         continue;
       }
 
-      const prompt = this.buildWorkspacePrompt(ws, finalDocs, role, requirement);
+      const prompt = this.buildWorkspacePrompt(ws, finalDocs, role, requirement, superpowers);
 
       // Reuse existing agent for this role if available, otherwise create new
       const existingAgents = getAgentsByRole(projectId, resolvedRole);
@@ -126,7 +134,7 @@ export class SpecModeHandler {
   }
 
   /** Build the prompt for a workspace agent */
-  private buildWorkspacePrompt(workspace: Workspace, docs: ParsedDocument[], role: string, requirement?: string): string {
+  private buildWorkspacePrompt(workspace: Workspace, docs: ParsedDocument[], role: string, requirement?: string, superpowers?: SuperpowersConfig): string {
     const docLines = docs.map(d => {
       const typeTag = d.docType !== 'other' ? `[${d.docType}] ` : '';
       const isPdf = d.filename.toLowerCase().endsWith('.pdf');
@@ -140,7 +148,13 @@ export class SpecModeHandler {
       ? `\n## 本次需求說明\n\n${requirement.trim()}\n`
       : '';
 
-    return `你的工作目錄是 "${workspace.path}"（${workspace.label}）。
+    // Build Superpowers methodology prefix if enabled
+    let superpowersPrefix = '';
+    if (superpowers?.enabled && superpowers.features.length > 0) {
+      superpowersPrefix = loadSuperpowersPrompt(superpowers.features as SuperpowersFeature[]) + '\n\n---\n\n';
+    }
+
+    return `${superpowersPrefix}你的工作目錄是 "${workspace.path}"（${workspace.label}）。
 ${requirementSection}
 ## 第一步：讀取專案技能設定
 

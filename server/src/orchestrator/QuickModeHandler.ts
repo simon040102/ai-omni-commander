@@ -1,8 +1,9 @@
-import type { Workspace, QuickTaskType, AgentRole } from '@omni/shared';
+import type { Workspace, QuickTaskType, AgentRole, SuperpowersConfig, SuperpowersFeature } from '@omni/shared';
 import type { AgentManager } from '../agent/AgentManager.js';
 import type { EventBus } from '../eventbus/EventBus.js';
 import { updateProject, getProject } from '../db/queries/projects.js';
 import { createChildLogger } from '../utils/logger.js';
+import { loadSuperpowersPrompt } from '../skills/superpowers/index.js';
 
 const logger = createChildLogger('QuickModeHandler');
 
@@ -40,12 +41,14 @@ export class QuickModeHandler {
     const project = getProject(projectId);
     if (!project) throw new Error(`Project ${projectId} not found`);
 
-    // Parse workspace from project config
+    // Parse workspace and superpowers from project config
     let workspace: Workspace | undefined;
+    let superpowers: SuperpowersConfig | undefined;
     if (project.configJson) {
       try {
-        const cfg = JSON.parse(project.configJson) as { workspaces?: Workspace[] };
+        const cfg = JSON.parse(project.configJson) as { workspaces?: Workspace[]; superpowers?: SuperpowersConfig };
         workspace = cfg.workspaces?.[0];
+        superpowers = cfg.superpowers;
       } catch { /* ignore */ }
     }
 
@@ -55,7 +58,14 @@ export class QuickModeHandler {
 
     updateProject(projectId, { status: 'executing' });
 
-    const prompt = this.buildQuickPrompt(workspace, quickTask);
+    // Build prompt with optional Superpowers methodology
+    let prompt = '';
+    if (superpowers?.enabled && superpowers.features.length > 0) {
+      const superpowersPrompt = loadSuperpowersPrompt(superpowers.features as SuperpowersFeature[]);
+      prompt = superpowersPrompt + '\n\n---\n\n';
+      logger.info({ features: superpowers.features }, 'Superpowers methodology enabled');
+    }
+    prompt += this.buildQuickPrompt(workspace, quickTask);
     const agentRole: AgentRole = quickTask.role || 'backend';
 
     logger.info(

@@ -6,7 +6,7 @@ import { useWebSocket } from '../../hooks/useWebSocket';
 import { useProjectStore } from '../../stores/projectStore';
 import { initTabNotification } from '../../lib/tabNotification';
 
-export type View = 'dashboard' | 'tasks' | 'setup' | 'events';
+export type View = 'dashboard' | 'tasks' | 'setup' | 'events' | 'asana';
 
 interface AppShellProps {
   children: (view: View, onViewChange: (v: View) => void) => React.ReactNode;

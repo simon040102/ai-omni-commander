@@ -4,7 +4,7 @@ import { useWsStore } from '../../stores/wsStore';
 import { useToastStore } from '../../stores/toastStore';
 import {
   IconPlus, IconGrid, IconChecklist, IconClock,
-  IconEdit, IconTrash, IconMoreVertical, IconPanelLeft,
+  IconEdit, IconTrash, IconMoreVertical, IconPanelLeft, IconAsana,
 } from '../ui/Icons';
 import type { View } from './AppShell';
 
@@ -29,6 +29,7 @@ const NAV_ITEMS: { view: View; label: string; Icon: React.FC<{ className?: strin
   { view: 'setup', label: 'New Project', Icon: IconPlus },
   { view: 'dashboard', label: 'Dashboard', Icon: IconGrid },
   { view: 'tasks', label: 'Tasks', Icon: IconChecklist },
+  { view: 'asana', label: 'Asana', Icon: IconAsana },
   { view: 'events', label: 'Events', Icon: IconClock },
 ];
 
