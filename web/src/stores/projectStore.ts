@@ -50,6 +50,22 @@ export interface Intervention {
   status: 'pending' | 'resolved';
 }
 
+export interface DocumentInfo {
+  id: string;
+  filename: string;
+  docType: 'SA' | 'SD';
+}
+
+export interface AgentPlan {
+  id: string;
+  agentId: string;
+  projectId: string;
+  content: string;
+  status: 'pending' | 'approved' | 'rejected';
+  createdAt: string;
+  approvedAt?: string;
+}
+
 interface ProjectState {
   projects: Project[];
   currentProjectId: string | null;
@@ -57,6 +73,8 @@ interface ProjectState {
   agents: Agent[];
   dependencies: DependencyEdge[];
   interventions: Intervention[];
+  documents: DocumentInfo[];
+  plans: AgentPlan[];
   /** Projects that have new activity since last viewed */
   projectsWithActivity: Set<string>;
 
@@ -68,6 +86,9 @@ interface ProjectState {
     agents: Agent[];
     dependencies: DependencyEdge[];
   }, switchTo?: boolean) => void;
+  setDocuments: (projectId: string, documents: DocumentInfo[]) => void;
+  setPlans: (projectId: string, plans: AgentPlan[]) => void;
+  addPlan: (plan: AgentPlan) => void;
   updateTaskStatus: (taskId: string, status: string, agentId?: string) => void;
   updateAgentStatus: (agentId: string, status: string) => void;
   addOrUpdateAgent: (agent: Agent) => void;
@@ -84,6 +105,8 @@ export const useProjectStore = create<ProjectState>((set) => ({
   agents: [],
   dependencies: [],
   interventions: [],
+  documents: [],
+  plans: [],
   projectsWithActivity: new Set<string>(),
 
   setProjects: (projects) => set((state) => {
@@ -117,6 +140,8 @@ export const useProjectStore = create<ProjectState>((set) => ({
         agents: data.agents,
         dependencies: data.dependencies,
         interventions: [],
+        documents: [], // Clear documents, will be populated by project.documents message
+        plans: [], // Clear plans, will be populated by agent.plans message
       };
     }
 
@@ -127,6 +152,35 @@ export const useProjectStore = create<ProjectState>((set) => ({
         data.project,
       ],
     };
+  }),
+
+  setDocuments: (projectId, documents) => set((state) => {
+    // Only update if this is for the current project
+    if (state.currentProjectId === projectId) {
+      return { documents };
+    }
+    return {};
+  }),
+
+  setPlans: (projectId, plans) => set((state) => {
+    // Only update if this is for the current project
+    if (state.currentProjectId === projectId) {
+      return { plans };
+    }
+    return {};
+  }),
+
+  addPlan: (plan) => set((state) => {
+    // Only add if this is for the current project
+    if (state.currentProjectId === plan.projectId) {
+      // Replace existing plan for this agent if any, or add new
+      const existing = state.plans.find(p => p.agentId === plan.agentId);
+      if (existing) {
+        return { plans: state.plans.map(p => p.agentId === plan.agentId ? plan : p) };
+      }
+      return { plans: [...state.plans, plan] };
+    }
+    return {};
   }),
 
   updateTaskStatus: (taskId, status, agentId) => set((state) => ({

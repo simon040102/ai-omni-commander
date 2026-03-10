@@ -1,6 +1,6 @@
 import type { Agent, AgentStatus, AgentOutputEvent } from './agent-types.js';
 import type { Task, TaskStatus, DependencyEdge, TaskSummary } from './task-types.js';
-import type { Project, Workspace, DocType, SuperpowersConfig } from './project-types.js';
+import type { Project, Workspace, DocType, SuperpowersConfig, PlanConfig, AgentPlan } from './project-types.js';
 import type { AsanaTask, AsanaConnectionStatus, AsanaFetchTasksOptions } from './asana-types.js';
 
 // Base envelope for all WebSocket messages
@@ -29,6 +29,7 @@ export interface WsCreateProject extends WsMessage {
     workspaces: Workspace[];
     reviewConfig?: ReviewConfig;
     superpowers?: SuperpowersConfig;
+    planConfig?: PlanConfig;
   };
 }
 
@@ -156,6 +157,24 @@ export interface WsAddAgent extends WsMessage {
   };
 }
 
+export interface WsDeleteDocument extends WsMessage {
+  type: 'project.deleteDocument';
+  payload: {
+    projectId: string;
+    documentId: string;
+  };
+}
+
+export interface WsPlanAction extends WsMessage {
+  type: 'agent.planAction';
+  payload: {
+    agentId: string;
+    planId: string;
+    action: 'approve' | 'reject';
+    feedback?: string;  // Optional feedback if rejected
+  };
+}
+
 // ============================================
 // ASANA MCP messages (CLIENT -> SERVER)
 // ============================================
@@ -186,6 +205,8 @@ export type ClientMessage =
   | WsUpdateProject
   | WsDeleteAgent
   | WsAddAgent
+  | WsDeleteDocument
+  | WsPlanAction
   | WsAsanaFetchTasks
   | WsAsanaCheckConnection;
 
@@ -287,6 +308,34 @@ export interface WsError extends WsMessage {
   };
 }
 
+export interface WsDocumentsList extends WsMessage {
+  type: 'project.documents';
+  payload: {
+    projectId: string;
+    documents: Array<{
+      id: string;
+      filename: string;
+      docType: 'SA' | 'SD';
+    }>;
+  };
+}
+
+export interface WsAgentPlanReady extends WsMessage {
+  type: 'agent.planReady';
+  payload: {
+    plan: AgentPlan;
+    agentRole: string;
+  };
+}
+
+export interface WsAgentPlansList extends WsMessage {
+  type: 'agent.plans';
+  payload: {
+    projectId: string;
+    plans: AgentPlan[];
+  };
+}
+
 // ============================================
 // ASANA MCP messages (SERVER -> CLIENT)
 // ============================================
@@ -314,6 +363,7 @@ export interface WsAsanaError extends WsMessage {
 export type ServerMessage =
   | WsProjectState
   | WsProjectsList
+  | WsDocumentsList
   | WsAgentOutput
   | WsAgentStatusChange
   | WsTaskStatusChange
@@ -321,6 +371,8 @@ export type ServerMessage =
   | WsInterventionRequest
   | WsInterviewQuestion
   | WsSpecDraft
+  | WsAgentPlanReady
+  | WsAgentPlansList
   | WsError
   | WsAsanaTasks
   | WsAsanaConnectionStatus

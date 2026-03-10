@@ -9,7 +9,8 @@ import { getAgentRoleConfig } from './AgentRoles.js';
 import { createAgent, updateAgent, getAgent, getAgentsByRole, getAgentsByProject } from '../db/queries/agents.js';
 import { getProject, updateProject } from '../db/queries/projects.js';
 import { updateTask, getTask } from '../db/queries/tasks.js';
-import { logAgentOutput, createIntervention, clearAgentOutputs } from '../db/queries/events.js';
+import { logAgentOutput, createIntervention, clearAgentOutputs, getAgentOutputs } from '../db/queries/events.js';
+import { createPlan } from '../db/queries/plans.js';
 import type { EventBus } from '../eventbus/EventBus.js';
 import type { ContextSync } from '../eventbus/ContextSync.js';
 import { getConfig } from '../config.js';
@@ -491,6 +492,75 @@ export class AgentManager {
           timestamp: new Date().toISOString(),
         });
       }
+    }
+
+    // Check for [PLAN_READY] marker — extract plan content from recent outputs
+    if (/(?:^|\n)\s*\[PLAN_READY\]/.test(content)) {
+      this.extractAndSavePlan(agentId, projectId);
+    }
+  }
+
+  /** Extract plan content from recent agent outputs and save to DB */
+  private async extractAndSavePlan(agentId: string, projectId: string): Promise<void> {
+    const agent = getAgent(agentId);
+    if (!agent) return;
+
+    // Get recent text outputs for this agent
+    const outputs = getAgentOutputs(agentId, 100);
+
+    // Concatenate text outputs to reconstruct the plan
+    const textContent = outputs
+      .filter(o => o.streamType === 'text')
+      .reverse()  // getAgentOutputs returns DESC, we want chronological
+      .map(o => o.content)
+      .join('\n');
+
+    // Extract content before [PLAN_READY] marker
+    const planMatch = textContent.match(/([\s\S]*?)\s*\[PLAN_READY\]/);
+    if (!planMatch) {
+      logger.warn({ agentId }, 'PLAN_READY marker found but no plan content extracted');
+      return;
+    }
+
+    const planContent = planMatch[1].trim();
+    if (!planContent) {
+      logger.warn({ agentId }, 'Empty plan content');
+      return;
+    }
+
+    // Save plan to DB
+    const plan = createPlan({
+      agentId,
+      projectId,
+      content: planContent,
+    });
+
+    logger.info({ agentId, projectId, planId: plan.id }, 'Plan extracted and saved');
+
+    // Emit event for frontend
+    await this.eventBus.emit({
+      type: EventTypes.AGENT_PLAN_READY,
+      source: agentId,
+      payload: {
+        plan,
+        agentRole: agent.role,
+      },
+      timestamp: new Date().toISOString(),
+    });
+
+    // Check if plan approval is required
+    const project = getProject(projectId);
+    if (project?.configJson) {
+      try {
+        const cfg = JSON.parse(project.configJson) as { planConfig?: { requireApproval: boolean } };
+        if (cfg.planConfig?.requireApproval) {
+          // Pause the agent — it will wait for approval
+          logger.info({ agentId, projectId }, 'Plan approval required, agent will wait');
+          // Note: The agent process continues running but won't proceed past the plan
+          // until explicitly resumed after approval. The frontend will show the plan
+          // and provide approve/reject buttons.
+        }
+      } catch { /* ignore parse errors */ }
     }
   }
 
