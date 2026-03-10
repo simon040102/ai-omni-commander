@@ -34,6 +34,10 @@ export interface Workspace {
   path: string;        // absolute path to this workspace folder
 }
 
+export interface PlanConfig {
+  requireApproval: boolean;  // If true, agent pauses after [PLAN_READY] and waits for approval
+}
+
 export interface ProjectConfig {
   workspaces?: Workspace[];
   maxConcurrentAgents?: number;
@@ -42,6 +46,8 @@ export interface ProjectConfig {
   autoTest?: boolean;
   // Superpowers methodology
   superpowers?: SuperpowersConfig;
+  // Plan approval workflow
+  planConfig?: PlanConfig;
   // Quick Mode specific
   quickTask?: {
     type: QuickTaskType;
@@ -51,7 +57,18 @@ export interface ProjectConfig {
   };
 }
 
-export type DocType = 'SA' | 'SD' | 'other';
+/** Stored plan for an agent */
+export interface AgentPlan {
+  id: string;
+  agentId: string;
+  projectId: string;
+  content: string;        // Markdown content
+  status: 'pending' | 'approved' | 'rejected';
+  createdAt: string;
+  approvedAt?: string;
+}
+
+export type DocType = 'SA' | 'SD';
 
 export interface Document {
   id: string;

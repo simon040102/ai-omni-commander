@@ -1,6 +1,7 @@
 import { useState, useCallback } from 'react';
 import { useWsStore } from '../../stores/wsStore';
 import { useToastStore } from '../../stores/toastStore';
+import { useProjectStore } from '../../stores/projectStore';
 import type { DocType } from '@omni/shared';
 
 interface DocumentUploadProps {
@@ -13,27 +14,25 @@ interface UploadedFile {
   uploaded: boolean;
 }
 
-/** Try to auto-detect doc type from filename */
+/** Auto-detect doc type from filename (SA or SD) */
 function detectDocType(filename: string): DocType {
-  const lower = filename.toLowerCase();
-  // Common patterns: SA_xxx, SD_xxx, SPEC_SA_xxx, xxx_SA.pdf etc.
-  if (/\bsa\b/i.test(lower) || /system.?analysis/i.test(lower)) return 'SA';
-  if (/\bsd\b/i.test(lower) || /system.?design/i.test(lower)) return 'SD';
-  // If filename contains "spec" but no SA/SD indicator, default to SD
-  if (/\bspec\b/i.test(lower)) return 'SD';
-  return 'other';
+  const upper = filename.toUpperCase();
+  // Look for SA patterns
+  if (upper.includes('SA') || upper.includes('系統分析') || upper.includes('需求')) return 'SA';
+  // Default to SD for everything else
+  return 'SD';
 }
 
 const DOC_TYPE_STYLES: Record<DocType, { bg: string; text: string; label: string }> = {
-  SA: { bg: 'bg-blue-500/20', text: 'text-blue-400', label: 'SA' },
+  SA: { bg: 'bg-green-500/20', text: 'text-green-400', label: 'SA' },
   SD: { bg: 'bg-purple-500/20', text: 'text-purple-400', label: 'SD' },
-  other: { bg: 'bg-zinc-500/20', text: 'text-zinc-400', label: 'Other' },
 };
 
 export function DocumentUpload({ projectId }: DocumentUploadProps) {
   const client = useWsStore(s => s.client);
   const addToast = useToastStore(s => s.addToast);
-  const [files, setFiles] = useState<UploadedFile[]>([]);
+  const documents = useProjectStore(s => s.documents);
+  const [pendingFiles, setPendingFiles] = useState<UploadedFile[]>([]);
   const [pasteContent, setPasteContent] = useState('');
   const [pasteDocType, setPasteDocType] = useState<DocType>('SD');
   const [isDragging, setIsDragging] = useState(false);
@@ -54,10 +53,25 @@ export function DocumentUpload({ projectId }: DocumentUploadProps) {
           docType,
         },
       });
-      setFiles(prev => [...prev, { name: file.name, docType, uploaded: true }]);
+      // Add to pending while waiting for server confirmation
+      setPendingFiles(prev => [...prev, { name: file.name, docType, uploaded: true }]);
       addToast({ type: 'success', title: 'File uploaded', message: `${file.name} (${docType})` });
+      // Clear pending after a short delay (server will update documents list)
+      setTimeout(() => {
+        setPendingFiles(prev => prev.filter(f => f.name !== file.name));
+      }, 1000);
     };
     reader.readAsDataURL(file);
+  }, [projectId, client, addToast]);
+
+  const handleDeleteDocument = useCallback((docId: string, filename: string) => {
+    client?.send({
+      type: 'project.deleteDocument',
+      id: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+      payload: { projectId, documentId: docId },
+    });
+    addToast({ type: 'success', title: 'Document removed', message: filename });
   }, [projectId, client, addToast]);
 
   const handleFileUpload = useCallback((fileList: FileList | null) => {
@@ -83,27 +97,20 @@ export function DocumentUpload({ projectId }: DocumentUploadProps) {
         docType: pasteDocType,
       },
     });
-    setFiles(prev => [...prev, { name: 'pasted-document.md', docType: pasteDocType, uploaded: true }]);
     addToast({ type: 'success', title: 'Content uploaded', message: `pasted-document.md (${pasteDocType})` });
     setPasteContent('');
   }, [projectId, pasteContent, pasteDocType, client, addToast]);
 
-  /** Change doc type for an already-uploaded file (re-uploads with new type) */
-  const handleChangeDocType = useCallback((index: number, newDocType: DocType) => {
-    setFiles(prev => prev.map((f, i) => i === index ? { ...f, docType: newDocType } : f));
-    // Note: The file is already on the server. In a real scenario we'd need an update API.
-    // For now we just update the local display.
-    addToast({ type: 'info', title: 'Type updated', message: `Updated to ${newDocType}` });
-  }, [addToast]);
-
-  const saCount = files.filter(f => f.docType === 'SA').length;
-  const sdCount = files.filter(f => f.docType === 'SD').length;
+  // Combine server documents with pending uploads
+  const saCount = documents.filter(d => d.docType === 'SA').length + pendingFiles.filter(f => f.docType === 'SA').length;
+  const sdCount = documents.filter(d => d.docType === 'SD').length + pendingFiles.filter(f => f.docType === 'SD').length;
+  const totalCount = documents.length + pendingFiles.length;
 
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h3 className="text-lg font-medium">Upload Spec Documents</h3>
-        {files.length > 0 && (
+        {totalCount > 0 && (
           <div className="flex items-center gap-2 text-xs">
             <span className={`px-2 py-0.5 rounded ${DOC_TYPE_STYLES.SA.bg} ${DOC_TYPE_STYLES.SA.text}`}>
               SA: {saCount}
@@ -155,7 +162,7 @@ export function DocumentUpload({ projectId }: DocumentUploadProps) {
         <div className="flex items-center gap-2 mb-1">
           <label className="block text-sm font-medium">Or paste document content</label>
           <div className="flex items-center gap-1">
-            {(['SA', 'SD', 'other'] as DocType[]).map(dt => (
+            {(['SA', 'SD'] as DocType[]).map(dt => (
               <button
                 key={dt}
                 onClick={() => setPasteDocType(dt)}
@@ -186,30 +193,36 @@ export function DocumentUpload({ projectId }: DocumentUploadProps) {
       </div>
 
       {/* Uploaded files list */}
-      {files.length > 0 && (
+      {(documents.length > 0 || pendingFiles.length > 0) && (
         <div>
-          <h4 className="text-sm font-medium mb-2">Uploaded Files ({files.length})</h4>
+          <h4 className="text-sm font-medium mb-2">Uploaded Files ({totalCount})</h4>
           <div className="space-y-1.5">
-            {files.map((f, i) => (
-              <div key={i} className="flex items-center gap-2 text-sm bg-muted/30 rounded-md px-3 py-1.5">
-                <span className="text-green-400 text-xs">&#10003;</span>
+            {/* Show documents from server (with delete button) */}
+            {documents.map((doc) => (
+              <div key={doc.id} className="flex items-center gap-2 text-sm bg-muted/30 rounded-md px-3 py-1.5 group">
+                <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${DOC_TYPE_STYLES[doc.docType].bg} ${DOC_TYPE_STYLES[doc.docType].text}`}>
+                  {doc.docType}
+                </span>
+                <span className="flex-1 truncate text-muted-foreground">{doc.filename}</span>
+                <button
+                  onClick={() => handleDeleteDocument(doc.id, doc.filename)}
+                  className="p-1 rounded text-muted-foreground/40 hover:text-red-400 hover:bg-red-500/10 opacity-0 group-hover:opacity-100 transition-all"
+                  title="Remove document"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+            ))}
+            {/* Show pending uploads (uploading indicator) */}
+            {pendingFiles.map((f, i) => (
+              <div key={`pending-${i}`} className="flex items-center gap-2 text-sm bg-muted/30 rounded-md px-3 py-1.5 opacity-60">
+                <span className="text-yellow-400 text-xs animate-pulse">⏳</span>
                 <span className="flex-1 truncate text-muted-foreground">{f.name}</span>
-                {/* Doc type toggle */}
-                <div className="flex items-center gap-1">
-                  {(['SA', 'SD', 'other'] as DocType[]).map(dt => (
-                    <button
-                      key={dt}
-                      onClick={() => handleChangeDocType(i, dt)}
-                      className={`px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors ${
-                        f.docType === dt
-                          ? `${DOC_TYPE_STYLES[dt].bg} ${DOC_TYPE_STYLES[dt].text}`
-                          : 'text-muted-foreground/50 hover:text-muted-foreground'
-                      }`}
-                    >
-                      {DOC_TYPE_STYLES[dt].label}
-                    </button>
-                  ))}
-                </div>
+                <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${DOC_TYPE_STYLES[f.docType].bg} ${DOC_TYPE_STYLES[f.docType].text}`}>
+                  {f.docType}
+                </span>
               </div>
             ))}
           </div>

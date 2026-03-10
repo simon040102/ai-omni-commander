@@ -13,6 +13,7 @@ export const EventTypes = {
   AGENT_OUTPUT: 'agent.output',
   AGENT_STOPPED: 'agent.stopped',
   AGENT_PAUSED: 'agent.paused',
+  AGENT_PLAN_READY: 'agent.planReady',
 
   TASK_STATUS_CHANGED: 'task.statusChanged',
   TASK_DISPATCHED: 'task.dispatched',

@@ -16,6 +16,9 @@ export function useWebSocket() {
   const setClient = useWsStore(s => s.setClient);
   const setProjects = useProjectStore(s => s.setProjects);
   const setProjectState = useProjectStore(s => s.setProjectState);
+  const setDocuments = useProjectStore(s => s.setDocuments);
+  const setPlans = useProjectStore(s => s.setPlans);
+  const addPlan = useProjectStore(s => s.addPlan);
   const updateTaskStatus = useProjectStore(s => s.updateTaskStatus);
   const updateAgentStatus = useProjectStore(s => s.updateAgentStatus);
   const addOrUpdateAgent = useProjectStore(s => s.addOrUpdateAgent);
@@ -55,6 +58,52 @@ export function useWebSocket() {
             setProjectState(payload as Parameters<typeof setProjectState>[0]);
             addToast({ type: 'success', title: 'Project loaded', message: `Project state received` });
             break;
+
+          case 'project.documents': {
+            const docProjectId = payload['projectId'] as string;
+            const documents = payload['documents'] as Array<{
+              id: string;
+              filename: string;
+              docType: 'SA' | 'SD';
+            }>;
+            setDocuments(docProjectId, documents);
+            break;
+          }
+
+          case 'agent.plans': {
+            const plansProjectId = payload['projectId'] as string;
+            const plans = payload['plans'] as Array<{
+              id: string;
+              agentId: string;
+              projectId: string;
+              content: string;
+              status: 'pending' | 'approved' | 'rejected';
+              createdAt: string;
+              approvedAt?: string;
+            }>;
+            setPlans(plansProjectId, plans);
+            break;
+          }
+
+          case 'agent.planReady': {
+            const plan = payload['plan'] as {
+              id: string;
+              agentId: string;
+              projectId: string;
+              content: string;
+              status: 'pending' | 'approved' | 'rejected';
+              createdAt: string;
+            };
+            const agentRole = payload['agentRole'] as string;
+            addPlan(plan);
+            addToast({
+              type: 'info',
+              title: '計劃書已準備完成',
+              message: `${agentRole} Agent 已產出實作計劃，等待審核`,
+              duration: 0, // persistent
+            });
+            break;
+          }
 
           case 'project.agentOutputs': {
             // Bulk load historical outputs for an agent (from DB)

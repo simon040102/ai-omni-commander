@@ -1,11 +1,13 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { useProjectStore } from '../../stores/projectStore';
 import { useAgentStore } from '../../stores/agentStore';
 import { useWsStore } from '../../stores/wsStore';
 import { useToastStore } from '../../stores/toastStore';
 import { DualTerminal } from './DualTerminal';
 import { DocumentUpload } from '../project/DocumentUpload';
+import { PlanPanel } from './PlanPanel';
 import { IconStop, IconPlay, IconPlus, IconX, IconGrid } from '../ui/Icons';
+import type { DocType } from '@omni/shared';
 import type { View } from '../layout/AppShell';
 
 /* ─── Role accent colors for left bar ─── */
@@ -37,6 +39,8 @@ export function Dashboard({ onViewChange }: DashboardProps) {
   const currentProjectId = useProjectStore(s => s.currentProjectId);
   const projects = useProjectStore(s => s.projects);
   const allAgents = useProjectStore(s => s.agents);
+  const documents = useProjectStore(s => s.documents);
+  const plans = useProjectStore(s => s.plans);
   const outputs = useAgentStore(s => s.outputs);
 
   // Only show agents for the current project
@@ -54,6 +58,79 @@ export function Dashboard({ onViewChange }: DashboardProps) {
   const [addAgentModel, setAddAgentModel] = useState('sonnet');
   const [confirmDeleteAgentId, setConfirmDeleteAgentId] = useState<string | null>(null);
   const [selectedModel, setSelectedModel] = useState('sonnet');
+  const [showPlanPanel, setShowPlanPanel] = useState(true);
+
+  // Document upload state
+  const [showUploadDialog, setShowUploadDialog] = useState(false);
+  const [showDocDropdown, setShowDocDropdown] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const docDropdownRef = useRef<HTMLDivElement>(null);
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (docDropdownRef.current && !docDropdownRef.current.contains(e.target as Node)) {
+        setShowDocDropdown(false);
+      }
+    }
+    if (showDocDropdown) document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showDocDropdown]);
+
+  // Auto-detect docType from filename (looks for SA or SD in filename)
+  const detectDocType = (filename: string): DocType => {
+    const upper = filename.toUpperCase();
+    if (upper.includes('SA') || upper.includes('系統分析') || upper.includes('需求')) return 'SA';
+    return 'SD'; // Default to SD
+  };
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !currentProjectId || !client) return;
+
+    setIsUploading(true);
+    try {
+      const reader = new FileReader();
+      const base64 = await new Promise<string>((resolve, reject) => {
+        reader.onload = () => {
+          const result = reader.result as string;
+          resolve(result.split(',')[1]);
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+
+      const detectedType = detectDocType(file.name);
+      client.send({
+        type: 'project.uploadDocument',
+        payload: {
+          projectId: currentProjectId,
+          filename: file.name,
+          content: base64,
+          fileType: 'base64',
+          docType: detectedType,
+        },
+      });
+
+      // Refresh project state to get updated documents
+      setTimeout(() => {
+        client.send({
+          type: 'project.getState',
+          payload: { projectId: currentProjectId },
+        });
+      }, 500);
+
+      setShowUploadDialog(false);
+      addToast({ type: 'success', title: 'Document uploaded', message: file.name });
+    } catch (err) {
+      console.error('Failed to upload file:', err);
+      addToast({ type: 'error', title: 'Upload failed' });
+    } finally {
+      setIsUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
 
   const project = projects.find(p => p.id === currentProjectId);
 
@@ -164,7 +241,80 @@ export function Dashboard({ onViewChange }: DashboardProps) {
                 <span className="text-[10px] text-muted-foreground">{project.mode} mode</span>
               </div>
             </div>
-          </div>
+
+            {/* Documents dropdown */}
+            <div className="relative" ref={docDropdownRef}>
+              <button
+                onClick={() => setShowDocDropdown(!showDocDropdown)}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                  documents.length > 0
+                    ? 'bg-cyan-500/15 text-cyan-400 hover:bg-cyan-500/25'
+                    : 'bg-muted text-muted-foreground hover:bg-muted/80'
+                }`}
+              >
+                <span>{documents.length > 0 ? `${documents.length} Specs` : 'No Specs'}</span>
+                <svg className={`w-4 h-4 transition-transform ${showDocDropdown ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                </svg>
+              </button>
+
+              {showDocDropdown && (
+                <div className="absolute top-full mt-1 left-0 z-50 w-[420px] bg-card border border-border rounded-lg shadow-xl p-3">
+                  <div className="flex items-center justify-between mb-3">
+                    <span className="text-sm font-semibold text-foreground">Reference Documents</span>
+                    <button
+                      onClick={() => { setShowDocDropdown(false); setShowUploadDialog(true); }}
+                      className="flex items-center gap-1 px-2 py-1 rounded text-xs font-medium bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
+                    >
+                      <IconPlus className="w-3 h-3" />
+                      Add
+                    </button>
+                  </div>
+
+                  {documents.length === 0 ? (
+                    <div className="text-sm text-muted-foreground py-4 text-center">
+                      No documents imported yet
+                    </div>
+                  ) : (
+                    <div className="max-h-64 overflow-y-auto space-y-1.5">
+                      {documents.map(doc => (
+                        <div
+                          key={doc.id}
+                          title={doc.filename}
+                          className="flex items-center gap-2.5 px-3 py-2 hover:bg-muted rounded-md group"
+                        >
+                          <span className={`text-sm px-2 py-0.5 rounded font-bold flex-shrink-0 ${
+                            doc.docType === 'SA' ? 'bg-green-500/20 text-green-400' : 'bg-purple-500/20 text-purple-400'
+                          }`}>
+                            {doc.docType}
+                          </span>
+                          <span className="text-sm text-foreground truncate flex-1">{doc.filename}</span>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (currentProjectId && client) {
+                                client.send({
+                                  type: 'project.deleteDocument',
+                                  id: crypto.randomUUID(),
+                                  timestamp: new Date().toISOString(),
+                                  payload: { projectId: currentProjectId, documentId: doc.id },
+                                });
+                                addToast({ type: 'success', title: 'Document removed', message: doc.filename });
+                              }
+                            }}
+                            className="p-1 rounded text-muted-foreground/40 hover:text-red-400 hover:bg-red-500/10 opacity-0 group-hover:opacity-100 transition-all"
+                            title="Remove document"
+                          >
+                            <IconX className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+            </div>
 
           <div className="flex items-center gap-3">
             {/* Stat cards */}
@@ -278,6 +428,27 @@ export function Dashboard({ onViewChange }: DashboardProps) {
             </div>
           )}
         </div>
+      )}
+
+      {/* ─── Plan approval panel ─── */}
+      {plans.length > 0 && showPlanPanel && (
+        <PlanPanel onClose={() => setShowPlanPanel(false)} />
+      )}
+
+      {/* ─── Plan panel toggle (when hidden but plans exist) ─── */}
+      {plans.length > 0 && !showPlanPanel && (
+        <button
+          onClick={() => setShowPlanPanel(true)}
+          className="flex items-center gap-2 px-3 py-1.5 bg-muted/50 hover:bg-muted border border-border rounded-lg text-sm transition-colors"
+        >
+          <span>📋</span>
+          <span className="font-medium">Show Plans</span>
+          {plans.filter(p => p.status === 'pending').length > 0 && (
+            <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-yellow-500/20 text-yellow-400 animate-pulse">
+              {plans.filter(p => p.status === 'pending').length}
+            </span>
+          )}
+        </button>
       )}
 
       {/* ─── Agent summary cards ─── */}
@@ -418,6 +589,45 @@ export function Dashboard({ onViewChange }: DashboardProps) {
       <div className="flex-1 min-h-0">
         <DualTerminal focusAgentId={focusAgentId} />
       </div>
+
+      {/* Upload dialog modal */}
+      {showUploadDialog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="bg-card border border-border rounded-lg shadow-xl p-4 w-80">
+            <h3 className="text-sm font-semibold mb-2">Add Spec Document</h3>
+            <p className="text-xs text-muted-foreground mb-3">
+              檔名包含 SA 會標記為系統分析，否則標記為 SD
+            </p>
+
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".pdf,.md,.txt"
+              onChange={handleFileUpload}
+              className="hidden"
+            />
+
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={isUploading}
+              className="w-full py-3 border-2 border-dashed border-border rounded-lg
+                         text-sm text-muted-foreground hover:border-primary hover:text-primary
+                         transition-colors disabled:opacity-50"
+            >
+              {isUploading ? 'Uploading...' : 'Click to select file'}
+            </button>
+
+            <div className="flex justify-end mt-3">
+              <button
+                onClick={() => setShowUploadDialog(false)}
+                className="px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

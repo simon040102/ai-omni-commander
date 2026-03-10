@@ -10,6 +10,7 @@ import { getConfig } from '../config.js';
 import { createChildLogger } from '../utils/logger.js';
 import { loadSuperpowersPrompt } from '../skills/superpowers/index.js';
 import path from 'node:path';
+import fs from 'node:fs/promises';
 
 const logger = createChildLogger('SpecModeHandler');
 
@@ -48,8 +49,8 @@ export class SpecModeHandler {
     fileType: string,
     docType?: DocType,
   ): Promise<void> {
-    await this.documentParser.saveAndParse(projectId, filename, content, fileType, docType || 'other');
-    logger.info({ projectId, filename, docType: docType || 'other' }, 'Document uploaded');
+    await this.documentParser.saveAndParse(projectId, filename, content, fileType, docType || 'SD');
+    logger.info({ projectId, filename, docType: docType || 'SD' }, 'Document uploaded');
   }
 
   /** Start execution: spawn one agent per workspace with appropriate documents */
@@ -92,18 +93,21 @@ export class SpecModeHandler {
     for (const ws of workspaces) {
       const role = ws.label.toLowerCase() as AgentRole;
       const resolvedRole = this.resolveRole(role);
-      const allowedDocTypes = DOC_ROUTING[role] || ['SA', 'SD', 'other'];
+      const allowedDocTypes = DOC_ROUTING[role] || ['SA', 'SD'];
 
       // Filter documents for this workspace
       const wsDocs = docs.filter(d => allowedDocTypes.includes(d.docType));
 
-      // If no matching docs and there are untyped docs, include 'other' docs as fallback
-      const finalDocs = wsDocs.length > 0 ? wsDocs : docs.filter(d => d.docType === 'other');
+      // Use all docs if no role-specific match
+      const finalDocs = wsDocs.length > 0 ? wsDocs : docs;
 
       if (finalDocs.length === 0) {
         logger.warn({ projectId, workspace: ws.label }, 'No matching documents for workspace, skipping');
         continue;
       }
+
+      // Inject specs to workspace before starting agent (long-term memory)
+      await this.injectSpecsToWorkspace(ws, finalDocs);
 
       const prompt = this.buildWorkspacePrompt(ws, finalDocs, role, requirement, superpowers);
 
@@ -136,7 +140,7 @@ export class SpecModeHandler {
   /** Build the prompt for a workspace agent */
   private buildWorkspacePrompt(workspace: Workspace, docs: ParsedDocument[], role: string, requirement?: string, superpowers?: SuperpowersConfig): string {
     const docLines = docs.map(d => {
-      const typeTag = d.docType !== 'other' ? `[${d.docType}] ` : '';
+      const typeTag = `[${d.docType}] `;
       const isPdf = d.filename.toLowerCase().endsWith('.pdf');
       if (isPdf) {
         return `- ${typeTag}${d.filename}: 請用 Read tool 讀取 "${d.filePath}"（PDF 包含文字與圖片）`;
@@ -233,7 +237,223 @@ ${this.getCompletionCriteria(role)}
     return this.documentParser.deleteByProject(projectId);
   }
 
+  /** Copy spec documents to workspace .ai_specs/ directory */
+  private async copySpecsToWorkspace(workspace: Workspace, docs: ParsedDocument[]): Promise<string[]> {
+    const specsDir = path.join(workspace.path, '.ai_specs');
+    await fs.mkdir(specsDir, { recursive: true });
+
+    const copiedFiles: string[] = [];
+
+    for (const doc of docs) {
+      const destFilename = `${doc.docType}_${doc.filename}`;
+      const destPath = path.join(specsDir, destFilename);
+
+      try {
+        await fs.copyFile(doc.filePath, destPath);
+        copiedFiles.push(destFilename);
+        logger.info({ workspace: workspace.label, file: destFilename }, 'Spec file copied to workspace');
+      } catch (err) {
+        logger.error({ workspace: workspace.label, file: destFilename, err }, 'Failed to copy spec file');
+      }
+    }
+
+    return copiedFiles;
+  }
+
+  /** Append spec index to workspace CLAUDE.md (safely, without overwriting) */
+  private async appendSpecIndexToClaudeMd(workspace: Workspace, copiedFiles: string[]): Promise<void> {
+    const claudeMdPath = path.join(workspace.path, 'CLAUDE.md');
+    const marker = '<!-- AI_SPECS_INDEX -->';
+    const endMarker = '<!-- END_AI_SPECS_INDEX -->';
+
+    // Build the spec index section
+    const fileList = copiedFiles.map(f => `- \`.ai_specs/${f}\``).join('\n');
+    const indexSection = `
+${marker}
+## Imported Spec Documents
+
+The following specification documents have been imported for this project:
+
+${fileList}
+
+**Important:** When making implementation decisions, always read these spec files first.
+If unsure about requirements, re-read the specs - do not guess.
+${endMarker}
+`;
+
+    try {
+      // Check if CLAUDE.md exists
+      let existingContent = '';
+      try {
+        existingContent = await fs.readFile(claudeMdPath, 'utf-8');
+      } catch {
+        // File doesn't exist, will create new
+      }
+
+      // Check if marker already exists (from previous execution)
+      if (existingContent.includes(marker)) {
+        // Replace old spec index with new one
+        const regex = new RegExp(`${marker}[\\s\\S]*?${endMarker}`, 'g');
+        const updatedContent = existingContent.replace(regex, indexSection.trim());
+        await fs.writeFile(claudeMdPath, updatedContent, 'utf-8');
+        logger.info({ workspace: workspace.label }, 'Spec index updated in CLAUDE.md');
+      } else {
+        // Append to existing file (or create new)
+        const newContent = existingContent + '\n' + indexSection;
+        await fs.writeFile(claudeMdPath, newContent, 'utf-8');
+        logger.info({ workspace: workspace.label }, 'Spec index appended to CLAUDE.md');
+      }
+    } catch (err) {
+      logger.error({ workspace: workspace.label, err }, 'Failed to update CLAUDE.md');
+      // Don't throw - spec injection failure shouldn't block agent execution
+    }
+  }
+
+  /** Inject specs into workspace before starting agent */
+  private async injectSpecsToWorkspace(workspace: Workspace, docs: ParsedDocument[]): Promise<void> {
+    if (docs.length === 0) return;
+
+    // Step 1: Copy files to .ai_specs/
+    const copiedFiles = await this.copySpecsToWorkspace(workspace, docs);
+
+    // Step 2: Append index to CLAUDE.md
+    if (copiedFiles.length > 0) {
+      await this.appendSpecIndexToClaudeMd(workspace, copiedFiles);
+    }
+  }
+
   getDocumentParser(): DocumentParser {
     return this.documentParser;
+  }
+
+  /** Remove a deleted document from all workspaces (.ai_specs/ + CLAUDE.md index) */
+  async removeDocumentFromWorkspaces(projectId: string, filename: string, docType: DocType): Promise<void> {
+    const project = getProject(projectId);
+    if (!project) {
+      logger.warn({ projectId }, 'Cannot remove document from workspaces: project not found');
+      return;
+    }
+
+    // Parse workspaces from project config
+    let workspaces: Workspace[] = [];
+    if (project.configJson) {
+      try {
+        const cfg = JSON.parse(project.configJson) as { workspaces?: Workspace[] };
+        workspaces = cfg.workspaces || [];
+      } catch { /* ignore */ }
+    }
+
+    if (workspaces.length === 0) {
+      return;
+    }
+
+    const destFilename = `${docType}_${filename}`;
+
+    for (const ws of workspaces) {
+      const role = ws.label.toLowerCase();
+      const allowedDocTypes = DOC_ROUTING[role] || ['SA', 'SD'];
+
+      // Only process if this doc type was applicable to this workspace
+      if (!allowedDocTypes.includes(docType)) {
+        continue;
+      }
+
+      // Delete the file from .ai_specs/
+      const specsDir = path.join(ws.path, '.ai_specs');
+      const destPath = path.join(specsDir, destFilename);
+
+      try {
+        await fs.unlink(destPath);
+        logger.info({ workspace: ws.label, file: destFilename }, 'Spec file removed from workspace');
+      } catch {
+        // File may not exist — ignore
+      }
+
+      // Update CLAUDE.md with remaining docs
+      const remainingDocs = this.documentParser.getDocuments(projectId);
+      const wsDocs = remainingDocs.filter(d => allowedDocTypes.includes(d.docType));
+      const remainingFiles = wsDocs.map(d => `${d.docType}_${d.filename}`);
+
+      if (remainingFiles.length > 0) {
+        await this.appendSpecIndexToClaudeMd(ws, remainingFiles);
+      } else {
+        // No docs left — remove the index section from CLAUDE.md
+        await this.removeSpecIndexFromClaudeMd(ws);
+      }
+    }
+  }
+
+  /** Remove the spec index section from CLAUDE.md when no docs remain */
+  private async removeSpecIndexFromClaudeMd(workspace: Workspace): Promise<void> {
+    const claudeMdPath = path.join(workspace.path, 'CLAUDE.md');
+    const marker = '<!-- AI_SPECS_INDEX -->';
+    const endMarker = '<!-- END_AI_SPECS_INDEX -->';
+
+    try {
+      const content = await fs.readFile(claudeMdPath, 'utf-8');
+      if (content.includes(marker)) {
+        const regex = new RegExp(`\\n?${marker}[\\s\\S]*?${endMarker}\\n?`, 'g');
+        const updatedContent = content.replace(regex, '');
+        await fs.writeFile(claudeMdPath, updatedContent, 'utf-8');
+        logger.info({ workspace: workspace.label }, 'Spec index removed from CLAUDE.md');
+      }
+    } catch {
+      // File doesn't exist or other error — ignore
+    }
+  }
+
+  /** Inject a newly uploaded document to all workspaces (for adding docs to existing project) */
+  async injectNewDocument(projectId: string, doc: ParsedDocument): Promise<void> {
+    const project = getProject(projectId);
+    if (!project) {
+      logger.warn({ projectId }, 'Cannot inject document: project not found');
+      return;
+    }
+
+    // Parse workspaces from project config
+    let workspaces: Workspace[] = [];
+    if (project.configJson) {
+      try {
+        const cfg = JSON.parse(project.configJson) as { workspaces?: Workspace[] };
+        workspaces = cfg.workspaces || [];
+      } catch { /* ignore */ }
+    }
+
+    if (workspaces.length === 0) {
+      logger.warn({ projectId }, 'No workspaces configured, skipping document injection');
+      return;
+    }
+
+    // Inject to each workspace based on doc routing rules
+    for (const ws of workspaces) {
+      const role = ws.label.toLowerCase();
+      const allowedDocTypes = DOC_ROUTING[role] || ['SA', 'SD'];
+
+      // Check if this doc type is allowed for this workspace
+      if (!allowedDocTypes.includes(doc.docType)) {
+        logger.info({ workspace: ws.label, docType: doc.docType }, 'Skipping doc injection (not in routing rules)');
+        continue;
+      }
+
+      // Copy single file to workspace
+      const specsDir = path.join(ws.path, '.ai_specs');
+      await fs.mkdir(specsDir, { recursive: true });
+
+      const destFilename = `${doc.docType}_${doc.filename}`;
+      const destPath = path.join(specsDir, destFilename);
+
+      try {
+        await fs.copyFile(doc.filePath, destPath);
+        logger.info({ workspace: ws.label, file: destFilename }, 'New spec file injected to workspace');
+
+        // Update CLAUDE.md with all current docs
+        const allDocs = this.documentParser.getDocuments(projectId);
+        const wsDocs = allDocs.filter(d => allowedDocTypes.includes(d.docType));
+        const allCopiedFiles = wsDocs.map(d => `${d.docType}_${d.filename}`);
+        await this.appendSpecIndexToClaudeMd(ws, allCopiedFiles);
+      } catch (err) {
+        logger.error({ workspace: ws.label, file: destFilename, err }, 'Failed to inject new spec file');
+      }
+    }
   }
 }

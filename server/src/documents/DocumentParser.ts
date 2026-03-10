@@ -30,7 +30,7 @@ export class DocumentParser {
     filename: string,
     content: string,
     fileType: string,
-    docType: DocType = 'other',
+    docType: DocType = 'SD',
   ): Promise<ParsedDocument> {
     const id = genId();
 
@@ -83,7 +83,7 @@ export class DocumentParser {
       filePath: r.file_path,
       content: r.parsed_text,
       fileType: r.file_type,
-      docType: (r.doc_type as DocType) || 'other',
+      docType: (r.doc_type as DocType) || 'SD',
     }));
   }
 
@@ -115,5 +115,35 @@ export class DocumentParser {
   getDocumentsByType(projectId: string, docTypes: DocType[]): ParsedDocument[] {
     const docs = this.getDocuments(projectId);
     return docs.filter(d => docTypes.includes(d.docType));
+  }
+
+  /** Delete a single document by ID (DB row + physical file) */
+  async deleteDocument(documentId: string): Promise<{ filename: string; docType: DocType } | null> {
+    const db = getDb();
+    // Get document info before deleting
+    const row = db.prepare(
+      'SELECT file_path, filename, doc_type FROM documents WHERE id = ?'
+    ).get(documentId) as { file_path: string; filename: string; doc_type: string | null } | undefined;
+
+    if (!row) {
+      logger.warn({ documentId }, 'Document not found for deletion');
+      return null;
+    }
+
+    // Delete DB row
+    db.prepare('DELETE FROM documents WHERE id = ?').run(documentId);
+
+    // Delete physical file (best-effort)
+    try {
+      await fs.unlink(row.file_path);
+    } catch {
+      // File may already be gone — ignore
+    }
+
+    logger.info({ documentId }, 'Document deleted');
+    return {
+      filename: row.filename,
+      docType: (row.doc_type as DocType) || 'SD',
+    };
   }
 }

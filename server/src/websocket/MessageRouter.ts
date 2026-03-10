@@ -4,7 +4,7 @@ import type {
   WsStartExecution, WsInterviewResponse, WsInterviewConfirm,
   WsAgentAction, WsAgentCommand, WsInterventionResolve, WsTaskOverride,
   WsDeleteProject, WsUpdateProject, WsDeleteAgent, WsAddAgent,
-  WsAsanaFetchTasks, WsAsanaCheckConnection,
+  WsDeleteDocument, WsPlanAction, WsAsanaFetchTasks, WsAsanaCheckConnection,
   AgentRole,
 } from '@omni/shared';
 import type { MasterOrchestrator } from '../orchestrator/MasterOrchestrator.js';
@@ -15,6 +15,8 @@ import { createProject, listProjects, getProject, deleteProject, updateProject }
 import { getTasksByProject, getDependencies, updateTask } from '../db/queries/tasks.js';
 import { getAgentsByProject, deleteAgent } from '../db/queries/agents.js';
 import { resolveIntervention, getAgentOutputs, logAgentOutput } from '../db/queries/events.js';
+import { getPlan, getPlansByProject, updatePlanStatus } from '../db/queries/plans.js';
+import { getAgent } from '../db/queries/agents.js';
 import { genId } from '../utils/uuid.js';
 import { createChildLogger } from '../utils/logger.js';
 
@@ -65,7 +67,7 @@ export function registerHandlers(
     } as WsMessage);
 
     // Send full project state to the requesting client
-    sendProjectState(wsServer, ws, project.id);
+    sendProjectState(wsServer, ws, project.id, orchestrator);
   });
 
   // PROJECT.CLEAR_DOCUMENTS — remove all old documents before a new execution round
@@ -83,6 +85,36 @@ export function registerHandlers(
     } as WsMessage);
   });
 
+  // PROJECT.DELETE_DOCUMENT — delete a single document
+  wsServer.registerHandler('project.deleteDocument', async (msg: WsMessage) => {
+    const { payload } = msg as WsDeleteDocument;
+    const specHandler = orchestrator.getSpecHandler();
+    const deletedDoc = await specHandler.getDocumentParser().deleteDocument(payload.documentId);
+
+    if (deletedDoc) {
+      logger.info({ projectId: payload.projectId, documentId: payload.documentId, filename: deletedDoc.filename }, 'Document deleted');
+
+      // Clean up the deleted document from all workspaces
+      await specHandler.removeDocumentFromWorkspaces(payload.projectId, deletedDoc.filename, deletedDoc.docType);
+
+      // Broadcast updated document list to all clients
+      const docs = specHandler.getDocumentParser().getDocuments(payload.projectId);
+      wsServer.broadcast({
+        type: 'project.documents',
+        id: genId(),
+        timestamp: new Date().toISOString(),
+        payload: {
+          projectId: payload.projectId,
+          documents: docs.map(d => ({
+            id: d.id,
+            filename: d.filename,
+            docType: d.docType,
+          })),
+        },
+      } as WsMessage);
+    }
+  });
+
   // PROJECT.UPLOAD_DOCUMENT
   wsServer.registerHandler('project.uploadDocument', async (msg: WsMessage) => {
     const { payload } = msg as WsUploadDocument;
@@ -91,6 +123,28 @@ export function registerHandlers(
       payload.projectId, payload.filename, payload.content, payload.fileType,
       payload.docType,
     );
+
+    // Get the newly uploaded document and inject to workspaces
+    const docs = specHandler.getDocumentParser().getDocuments(payload.projectId);
+    const newDoc = docs.find(d => d.filename === payload.filename);
+    if (newDoc) {
+      await specHandler.injectNewDocument(payload.projectId, newDoc);
+    }
+
+    // Broadcast updated document list to all clients
+    wsServer.broadcast({
+      type: 'project.documents',
+      id: genId(),
+      timestamp: new Date().toISOString(),
+      payload: {
+        projectId: payload.projectId,
+        documents: docs.map(d => ({
+          id: d.id,
+          filename: d.filename,
+          docType: d.docType,
+        })),
+      },
+    } as WsMessage);
   });
 
   // PROJECT.START_EXECUTION
@@ -220,7 +274,7 @@ export function registerHandlers(
       logger.info({ agentId, projectId: payload.projectId, role: payload.role }, 'Agent manually added');
 
       // Send updated project state
-      sendProjectState(wsServer, ws, payload.projectId);
+      sendProjectState(wsServer, ws, payload.projectId, orchestrator);
     } catch (err) {
       logger.error({ err, projectId: payload.projectId }, 'Failed to add agent');
       wsServer.send(ws, {
@@ -230,6 +284,49 @@ export function registerHandlers(
         payload: { code: 'agent.add_failed', message: (err as Error).message },
       } as WsMessage);
     }
+  });
+
+  // AGENT.PLAN_ACTION — approve or reject a plan
+  wsServer.registerHandler('agent.planAction', async (msg: WsMessage, ws: WebSocket) => {
+    const { payload } = msg as WsPlanAction;
+    const plan = getPlan(payload.planId);
+    if (!plan) {
+      wsServer.send(ws, {
+        type: 'error',
+        id: genId(),
+        timestamp: new Date().toISOString(),
+        payload: { code: 'plan.not_found', message: 'Plan not found' },
+      } as WsMessage);
+      return;
+    }
+
+    updatePlanStatus(payload.planId, payload.action === 'approve' ? 'approved' : 'rejected');
+    logger.info({ planId: payload.planId, action: payload.action }, 'Plan action taken');
+
+    if (payload.action === 'approve') {
+      // Resume the agent to continue execution
+      const agent = getAgent(plan.agentId);
+      if (agent) {
+        await agentManager.resumeAgent(plan.agentId, '計劃書已核准，請繼續執行。');
+        logger.info({ agentId: plan.agentId }, 'Agent resumed after plan approval');
+      }
+    } else if (payload.action === 'reject' && payload.feedback) {
+      // Resume the agent with feedback for revision
+      const agent = getAgent(plan.agentId);
+      if (agent) {
+        await agentManager.resumeAgent(plan.agentId, `計劃書需要修改：\n${payload.feedback}\n\n請重新擬定計劃書。`);
+        logger.info({ agentId: plan.agentId }, 'Agent resumed with plan rejection feedback');
+      }
+    }
+
+    // Broadcast updated plan list to all clients
+    const plans = getPlansByProject(plan.projectId);
+    wsServer.broadcast({
+      type: 'agent.plans',
+      id: genId(),
+      timestamp: new Date().toISOString(),
+      payload: { projectId: plan.projectId, plans },
+    } as WsMessage);
   });
 
   // INTERVENTION.RESOLVE
@@ -308,13 +405,13 @@ export function registerHandlers(
     } as WsMessage);
 
     // Send updated project state to the requesting client
-    sendProjectState(wsServer, ws, payload.projectId);
+    sendProjectState(wsServer, ws, payload.projectId, orchestrator);
   });
 
   // PROJECT.GET_STATE — client requests full state for a specific project
   wsServer.registerHandler('project.getState', (msg: WsMessage, ws: WebSocket) => {
     const { payload } = msg as unknown as { payload: { projectId: string } };
-    sendProjectState(wsServer, ws, payload.projectId);
+    sendProjectState(wsServer, ws, payload.projectId, orchestrator);
   });
 
   // PROJECTS.LIST (when client asks for all projects)
@@ -432,7 +529,7 @@ export function registerHandlers(
     const projects = listProjects();
     for (const p of projects) {
       if (['executing', 'planning'].includes(p.status)) {
-        sendProjectState(wsServer, ws, p.id);
+        sendProjectState(wsServer, ws, p.id, orchestrator);
       }
     }
   });
@@ -442,6 +539,7 @@ function sendProjectState(
   wsServer: OmniWebSocketServer,
   ws: WebSocket,
   projectId: string,
+  orchestrator?: MasterOrchestrator,
 ): void {
   const project = getProject(projectId);
   if (!project) return;
@@ -456,6 +554,37 @@ function sendProjectState(
     timestamp: new Date().toISOString(),
     payload: { project, tasks, agents, dependencies },
   } as WsMessage);
+
+  // Send document list for this project
+  if (orchestrator) {
+    const docs = orchestrator.getSpecHandler().getDocumentParser().getDocuments(projectId);
+    if (docs.length > 0) {
+      wsServer.send(ws, {
+        type: 'project.documents',
+        id: genId(),
+        timestamp: new Date().toISOString(),
+        payload: {
+          projectId,
+          documents: docs.map(d => ({
+            id: d.id,
+            filename: d.filename,
+            docType: d.docType,
+          })),
+        },
+      } as WsMessage);
+    }
+  }
+
+  // Send plan list for this project
+  const plans = getPlansByProject(projectId);
+  if (plans.length > 0) {
+    wsServer.send(ws, {
+      type: 'agent.plans',
+      id: genId(),
+      timestamp: new Date().toISOString(),
+      payload: { projectId, plans },
+    } as WsMessage);
+  }
 
   // Also send recent outputs for each agent so the terminal is populated
   for (const agent of agents) {

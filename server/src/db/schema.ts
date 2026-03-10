@@ -110,6 +110,17 @@ export function runMigrations(db: Database.Database): void {
       resolved_at     TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS agent_plans (
+      id              TEXT PRIMARY KEY,
+      agent_id        TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+      project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      content         TEXT NOT NULL,
+      status          TEXT NOT NULL DEFAULT 'pending'
+                        CHECK(status IN ('pending', 'approved', 'rejected')),
+      created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+      approved_at     TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS recent_paths (
       id            INTEGER PRIMARY KEY AUTOINCREMENT,
       path          TEXT NOT NULL UNIQUE,
