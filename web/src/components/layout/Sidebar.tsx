@@ -4,7 +4,7 @@ import { useWsStore } from '../../stores/wsStore';
 import { useToastStore } from '../../stores/toastStore';
 import {
   IconPlus, IconGrid, IconClock, IconLightning,
-  IconEdit, IconTrash, IconMoreVertical, IconPanelLeft, IconAsana,
+  IconEdit, IconTrash, IconMoreVertical, IconPanelLeft, IconAsana, IconChevronDown,
 } from '../ui/Icons';
 import type { View } from './AppShell';
 
@@ -59,6 +59,7 @@ export function Sidebar({ currentView, onViewChange, collapsed, onToggleCollapse
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
   const [menuDropUp, setMenuDropUp] = useState(false);
+  const [projectsCollapsed, setProjectsCollapsed] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const kebabRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
 
@@ -162,13 +163,17 @@ export function Sidebar({ currentView, onViewChange, collapsed, onToggleCollapse
         })}
       </nav>
 
-      {/* Project list - hidden when collapsed, takes remaining space */}
+      {/* Project list - hidden when sidebar collapsed, takes remaining space */}
       {!collapsed && projects.length > 0 && (
         <div className="flex-1 min-h-0 px-2 py-2 border-t border-border overflow-y-auto">
-          <div className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider mb-1.5 px-1">
-            Projects
-          </div>
-          {projects.map(p => (
+          <button
+            onClick={() => setProjectsCollapsed(!projectsCollapsed)}
+            className="w-full flex items-center justify-between text-[10px] font-medium text-muted-foreground uppercase tracking-wider mb-1.5 px-1 hover:text-foreground transition-colors"
+          >
+            <span>Projects ({projects.length})</span>
+            <IconChevronDown className={`w-3 h-3 transition-transform duration-200 ${projectsCollapsed ? '-rotate-90' : ''}`} />
+          </button>
+          {!projectsCollapsed && projects.map(p => (
             <div key={p.id} className="mb-0.5">
               {/* Inline rename */}
               {editingId === p.id ? (

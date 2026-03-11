@@ -150,7 +150,7 @@ export function registerHandlers(
   // PROJECT.START_EXECUTION
   wsServer.registerHandler('project.startExecution', async (msg: WsMessage) => {
     const { payload } = msg as WsStartExecution;
-    await orchestrator.start(payload.projectId, payload.requirement, payload.model, payload.quickTask);
+    await orchestrator.start(payload.projectId, payload.requirement, payload.model, payload.quickTask, payload.debugMode);
   });
 
   // PROJECT.PAUSE

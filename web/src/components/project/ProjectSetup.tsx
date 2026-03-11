@@ -50,6 +50,9 @@ export function ProjectSetup({ onViewChange }: ProjectSetupProps) {
   // Model selection
   const [selectedModel, setSelectedModel] = useState<string>('sonnet');
 
+  // Debug mode for spec (work with existing code)
+  const [debugMode, setDebugMode] = useState(false);
+
   // Superpowers methodology
   const [superpowersEnabled, setSuperpowersEnabled] = useState(false);
   const [superpowersFeatures, setSuperpowersFeatures] = useState<SuperpowersFeature[]>(['brainstorm', 'tdd', 'debugging']);
@@ -161,11 +164,12 @@ export function ProjectSetup({ onViewChange }: ProjectSetupProps) {
         projectId,
         requirement: requirement.trim() || undefined,
         model: selectedModel,
+        debugMode: mode === 'spec' ? debugMode : undefined,
       },
     });
     addToast({ type: 'info', title: 'Execution started', message: `Using ${selectedModel} model...` });
     setStep('execute');
-  }, [projectId, client, addToast, requirement, selectedModel]);
+  }, [projectId, client, addToast, requirement, selectedModel, mode, debugMode]);
 
   const handleQuickStartExecution = useCallback((quickTask: {
     type: QuickTaskType;
@@ -522,6 +526,26 @@ export function ProjectSetup({ onViewChange }: ProjectSetupProps) {
                     </button>
                   ))}
                 </div>
+              </div>
+
+              {/* Debug Mode Toggle */}
+              <div className="flex items-center justify-between px-4 py-3 bg-muted/30 rounded-lg border border-border">
+                <div className="flex-1">
+                  <label className="text-sm font-medium block mb-0.5">Debug Mode</label>
+                  <p className="text-xs text-muted-foreground">
+                    Work with existing code instead of new build (agent will explore existing codebase first)
+                  </p>
+                </div>
+                <button
+                  onClick={() => setDebugMode(!debugMode)}
+                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                    debugMode ? 'bg-primary' : 'bg-muted'
+                  }`}
+                >
+                  <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                    debugMode ? 'translate-x-6' : 'translate-x-1'
+                  }`} />
+                </button>
               </div>
 
               <button
