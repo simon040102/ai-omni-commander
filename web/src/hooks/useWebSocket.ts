@@ -37,6 +37,7 @@ export function useWebSocket() {
   const setAsanaLoading = useAsanaStore(s => s.setLoading);
   const setAsanaError = useAsanaStore(s => s.setError);
   const setAsanaConnectionStatus = useAsanaStore(s => s.setConnectionStatus);
+  const setAsanaTaskStories = useAsanaStore(s => s.setTaskStories);
 
   useEffect(() => {
     const wsUrl = `ws://${window.location.host}/omni-ws`;
@@ -310,6 +311,13 @@ export function useWebSocket() {
 
           case 'asana.connectionStatus':
             setAsanaConnectionStatus(payload as unknown as AsanaConnectionStatus);
+            break;
+
+          case 'asana.taskStories':
+            setAsanaTaskStories(
+              payload['taskGid'] as string,
+              payload['stories'] as Array<{ author: string; text: string; createdAt: string }>,
+            );
             break;
 
           case 'asana.error':

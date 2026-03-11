@@ -1,6 +1,12 @@
 import { create } from 'zustand';
 import type { AsanaTask, AsanaConnectionStatus } from '@omni/shared';
 
+export interface AsanaStory {
+  author: string;
+  text: string;
+  createdAt: string;
+}
+
 interface AsanaState {
   /** List of tasks fetched from Asana */
   tasks: AsanaTask[];
@@ -12,6 +18,8 @@ interface AsanaState {
   connectionStatus: AsanaConnectionStatus;
   /** Currently selected task GID */
   selectedTaskGid: string | null;
+  /** Task stories/comments keyed by task GID */
+  taskStories: Record<string, AsanaStory[]>;
 
   // Actions
   setTasks: (tasks: AsanaTask[]) => void;
@@ -20,6 +28,7 @@ interface AsanaState {
   setConnectionStatus: (status: AsanaConnectionStatus) => void;
   selectTask: (gid: string | null) => void;
   getSelectedTask: () => AsanaTask | null;
+  setTaskStories: (taskGid: string, stories: AsanaStory[]) => void;
   clearTasks: () => void;
 }
 
@@ -34,6 +43,7 @@ export const useAsanaStore = create<AsanaState>((set, get) => ({
     error: null,
   },
   selectedTaskGid: null,
+  taskStories: {},
 
   setTasks: (tasks) => set({ tasks, loading: false, error: null }),
 
@@ -50,5 +60,9 @@ export const useAsanaStore = create<AsanaState>((set, get) => ({
     return tasks.find((t) => t.gid === selectedTaskGid) || null;
   },
 
-  clearTasks: () => set({ tasks: [], selectedTaskGid: null }),
+  setTaskStories: (taskGid, stories) => set((state) => ({
+    taskStories: { ...state.taskStories, [taskGid]: stories },
+  })),
+
+  clearTasks: () => set({ tasks: [], selectedTaskGid: null, taskStories: {} }),
 }));

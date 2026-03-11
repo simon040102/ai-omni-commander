@@ -59,6 +59,7 @@ export interface AgentStartConfig {
   taskId?: string;
   prompt: string;
   model?: string;
+  workingDir?: string; // Override working directory (default: auto-detect from project config)
   useWorkspaceSkills?: boolean; // Whether to load CLAUDE.md/.claude/ from workspace (default: true)
 }
 

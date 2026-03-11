@@ -1,6 +1,8 @@
 import { useState, useCallback, Fragment, useEffect, useRef } from 'react';
 import { useWsStore } from '../../stores/wsStore';
 import { useToastStore } from '../../stores/toastStore';
+import { useAsanaStore } from '../../stores/asanaStore';
+import { useProjectStore } from '../../stores/projectStore';
 import { ModeSelector } from './ModeSelector';
 import { DocumentUpload } from './DocumentUpload';
 import { InterviewChat } from './InterviewChat';
@@ -31,6 +33,7 @@ interface ProjectSetupProps {
 export function ProjectSetup({ onViewChange }: ProjectSetupProps) {
   const client = useWsStore(s => s.client);
   const addToast = useToastStore(s => s.addToast);
+  const setCurrentProject = useProjectStore(s => s.setCurrentProject);
   const [step, setStep] = useState<Step>('mode');
   const [mode, setMode] = useState<ProjectMode>('spec');
   const [name, setName] = useState('');
@@ -63,8 +66,11 @@ export function ProjectSetup({ onViewChange }: ProjectSetupProps) {
     notes: string;
     gid: string;
     mode: ProjectMode;
+    parentNotes?: string;
   } | null>(null);
   const hasCheckedAsanaImport = useRef(false);
+  const importedAsanaGid = useRef<string | null>(null);
+  const taskStories = useAsanaStore(s => s.taskStories);
 
   // Check for Asana import on mount
   useEffect(() => {
@@ -84,6 +90,27 @@ export function ProjectSetup({ onViewChange }: ProjectSetupProps) {
         if (task.name) {
           setName(task.name.slice(0, 50));
         }
+        // Build requirement from notes + parent notes
+        const parts: string[] = [];
+        if (task.notes) {
+          parts.push(task.notes);
+        }
+        if (task.parentNotes) {
+          parts.push(`--- Parent Task Notes ---\n${task.parentNotes}`);
+        }
+        if (parts.length > 0) {
+          setRequirement(parts.join('\n\n'));
+        }
+        // Fetch task comments/stories from Asana
+        if (task.gid && client) {
+          importedAsanaGid.current = task.gid;
+          client.send({
+            type: 'asana.fetchTaskStories',
+            id: crypto.randomUUID(),
+            timestamp: new Date().toISOString(),
+            payload: { taskGid: task.gid },
+          });
+        }
         // Clear after reading
         sessionStorage.removeItem('asana_import_task');
         addToast({
@@ -93,7 +120,27 @@ export function ProjectSetup({ onViewChange }: ProjectSetupProps) {
         });
       } catch { /* ignore */ }
     }
-  }, [addToast]);
+  }, [addToast, client]);
+
+  // Append stories/comments when they arrive from Asana
+  useEffect(() => {
+    const gid = importedAsanaGid.current;
+    if (!gid) return;
+    const stories = taskStories[gid];
+    if (!stories || stories.length === 0) return;
+
+    // Only append once
+    importedAsanaGid.current = null;
+
+    const commentsText = stories
+      .map(s => `[${s.author}] ${s.text}`)
+      .join('\n\n');
+
+    setRequirement(prev => {
+      const separator = prev ? '\n\n--- Comments ---\n' : '';
+      return prev + separator + commentsText;
+    });
+  }, [taskStories]);
 
   const addWorkspace = () => {
     setWorkspaces([...workspaces, { label: '', path: '' }]);
@@ -117,6 +164,7 @@ export function ProjectSetup({ onViewChange }: ProjectSetupProps) {
 
     const id = crypto.randomUUID();
     setProjectId(id);
+    setCurrentProject(id);
 
     client?.send({
       type: 'project.create',
@@ -495,7 +543,7 @@ export function ProjectSetup({ onViewChange }: ProjectSetupProps) {
                   value={requirement}
                   onChange={(e) => setRequirement(e.target.value)}
                   placeholder="e.g. Implement the user authentication module based on the SD spec, including login, registration, and JWT token management..."
-                  className="w-full bg-muted border border-border rounded-md px-3 py-2 text-sm min-h-[100px] resize-y outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
+                  className="w-full bg-muted border border-border rounded-md px-3 py-2 text-sm min-h-[200px] resize-y outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
                 />
               </div>
 

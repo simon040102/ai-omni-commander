@@ -53,6 +53,31 @@ export class SpecModeHandler {
     logger.info({ projectId, filename, docType: docType || 'SD' }, 'Document uploaded');
   }
 
+  /**
+   * Build a document context string for a given project and role.
+   * Used by the agent.add handler to prepend document info to manually added agents.
+   */
+  getDocumentContext(projectId: string, role?: string): string {
+    const docs = this.documentParser.getDocuments(projectId);
+    if (docs.length === 0) return '';
+
+    // Filter by role if applicable
+    const allowedDocTypes = role ? (DOC_ROUTING[role.toLowerCase()] || ['SA', 'SD']) : ['SA', 'SD'];
+    const filtered = docs.filter(d => allowedDocTypes.includes(d.docType));
+    const finalDocs = filtered.length > 0 ? filtered : docs;
+
+    const docLines = finalDocs.map(d => {
+      const typeTag = `[${d.docType}] `;
+      const isPdf = d.filename.toLowerCase().endsWith('.pdf');
+      if (isPdf) {
+        return `- ${typeTag}${d.filename}: 請用 Read tool 讀取 "${d.filePath}"（PDF 包含文字與圖片）`;
+      }
+      return `- ${typeTag}${d.filename}:\n${d.content}`;
+    });
+
+    return `\n## Project Documents\n\n${docLines.join('\n\n')}\n`;
+  }
+
   /** Start execution: spawn one agent per workspace with appropriate documents */
   async execute(projectId: string, requirement?: string, model?: string, debugMode?: boolean): Promise<void> {
     const project = getProject(projectId);

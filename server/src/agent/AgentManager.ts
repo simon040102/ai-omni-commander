@@ -60,7 +60,7 @@ export class AgentManager {
 
     // Create AgentProcess
     const proc = new AgentProcess(agent.id, config.role, {
-      workingDir: this.getWorkingDir(config.projectId, config.role),
+      workingDir: config.workingDir || this.getWorkingDir(config.projectId, config.role),
       systemPrompt,
       model: config.model || roleConfig.model,
       allowedTools: roleConfig.allowedTools,
