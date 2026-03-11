@@ -15,6 +15,7 @@ export interface QuickTask {
   errorLog?: string;
   relatedFiles?: string[];
   role?: QuickAgentRole;
+  useWorkspaceSkills?: boolean; // Whether to load CLAUDE.md/.claude/ from workspace (default: true)
 }
 
 const TASK_TYPE_LABELS: Record<QuickTaskType, string> = {
@@ -78,6 +79,7 @@ export class QuickModeHandler {
       role: agentRole,
       prompt,
       model: model || 'sonnet',
+      useWorkspaceSkills: quickTask.useWorkspaceSkills !== false, // default to true
     });
 
     logger.info({ projectId }, 'Quick task agent started');

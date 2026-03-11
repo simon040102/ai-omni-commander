@@ -50,6 +50,7 @@ export interface AgentSpawnConfig {
   model?: string;
   allowedTools?: string[];
   sessionId?: string;
+  useWorkspaceSkills?: boolean; // Whether to load CLAUDE.md/.claude/ from workspace (default: true)
 }
 
 export interface AgentStartConfig {
@@ -58,6 +59,7 @@ export interface AgentStartConfig {
   taskId?: string;
   prompt: string;
   model?: string;
+  useWorkspaceSkills?: boolean; // Whether to load CLAUDE.md/.claude/ from workspace (default: true)
 }
 
 export interface AgentRoleConfig {
