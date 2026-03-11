@@ -110,7 +110,7 @@ Completion criteria:
 - Run ALL tests (e.g. npm test / pnpm test) and ensure they pass with zero failures
 - Your task is NOT complete until tests pass — fix any failing tests before marking done
 - When all tests pass, end with [TASK_COMPLETE]`,
-    allowedTools: ['Read', 'Edit', 'Write', 'Bash', 'Glob', 'Grep'],
+    allowedTools: ['Read', 'Edit', 'Write', 'Bash', 'Glob', 'Grep', 'Agent'],
   },
 
   frontend: {
@@ -134,7 +134,7 @@ Completion criteria:
 - You do NOT need to write or run tests — focus on development and successful build only
 - Before marking complete, run the project's build command (e.g. npm run build / pnpm build) and ensure it passes with zero errors
 - When the build succeeds, end with [TASK_COMPLETE]`,
-    allowedTools: ['Read', 'Edit', 'Write', 'Bash', 'Glob', 'Grep'],
+    allowedTools: ['Read', 'Edit', 'Write', 'Bash', 'Glob', 'Grep', 'Agent'],
   },
 
   devops: {
@@ -150,7 +150,7 @@ ${contextManagementInjection()}
 - Manage environment configurations
 - Set up monitoring and logging
 - When your task is complete, end with [TASK_COMPLETE]`,
-    allowedTools: ['Read', 'Edit', 'Write', 'Bash', 'Glob', 'Grep'],
+    allowedTools: ['Read', 'Edit', 'Write', 'Bash', 'Glob', 'Grep', 'Agent'],
   },
 
   testing: {
@@ -166,7 +166,7 @@ ${contextManagementInjection()}
 - Report results in structured format
 - If tests fail, provide clear diagnostic information
 - When your task is complete, end with [TASK_COMPLETE]`,
-    allowedTools: ['Read', 'Edit', 'Write', 'Bash', 'Glob', 'Grep'],
+    allowedTools: ['Read', 'Edit', 'Write', 'Bash', 'Glob', 'Grep', 'Agent'],
   },
 
   review: {
@@ -206,7 +206,7 @@ Completion:
 - When the task is complete and verified, end with [TASK_COMPLETE]
 - If the project has tests, run them to ensure nothing is broken
 - If it's a frontend project, run the build to verify it succeeds`,
-    allowedTools: ['Read', 'Edit', 'Write', 'Bash', 'Glob', 'Grep'],
+    allowedTools: ['Read', 'Edit', 'Write', 'Bash', 'Glob', 'Grep', 'Agent'],
   },
 };
 
