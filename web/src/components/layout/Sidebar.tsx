@@ -3,7 +3,7 @@ import { useProjectStore } from '../../stores/projectStore';
 import { useWsStore } from '../../stores/wsStore';
 import { useToastStore } from '../../stores/toastStore';
 import {
-  IconPlus, IconGrid, IconClock,
+  IconPlus, IconGrid, IconClock, IconLightning,
   IconEdit, IconTrash, IconMoreVertical, IconPanelLeft, IconAsana,
 } from '../ui/Icons';
 import type { View } from './AppShell';
@@ -28,7 +28,7 @@ const STATUS_COLORS: Record<string, string> = {
 const NAV_ITEMS: { view: View; label: string; Icon: React.FC<{ className?: string }> }[] = [
   { view: 'setup', label: 'New Project', Icon: IconPlus },
   { view: 'dashboard', label: 'Dashboard', Icon: IconGrid },
-  { view: 'agents', label: 'Active Agents', Icon: IconGrid },
+  { view: 'agents', label: 'Active Agents', Icon: IconLightning },
   { view: 'asana', label: 'Asana', Icon: IconAsana },
   { view: 'events', label: 'Events', Icon: IconClock },
 ];
