@@ -17,6 +17,13 @@ export function AppShell({ children }: AppShellProps) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const agents = useProjectStore(s => s.agents);
   const hasAutoSwitched = useRef(false);
+  const userHasNavigated = useRef(false);
+
+  // Wrap setCurrentView to track user-initiated navigation
+  const handleViewChange = (view: View) => {
+    userHasNavigated.current = true;
+    setCurrentView(view);
+  };
 
   // Initialize WebSocket connection
   useWebSocket();
@@ -26,9 +33,9 @@ export function AppShell({ children }: AppShellProps) {
     initTabNotification();
   }, []);
 
-  // Auto-switch to dashboard when agents appear
+  // Auto-switch to dashboard when agents appear (only on initial load, not after user navigation)
   useEffect(() => {
-    if (agents.length > 0 && !hasAutoSwitched.current && currentView === 'setup') {
+    if (agents.length > 0 && !hasAutoSwitched.current && !userHasNavigated.current && currentView === 'setup') {
       hasAutoSwitched.current = true;
       setCurrentView('dashboard');
     }
@@ -38,17 +45,17 @@ export function AppShell({ children }: AppShellProps) {
     <div className="h-screen flex flex-col bg-background">
       <Header
         currentView={currentView}
-        onViewChange={setCurrentView}
+        onViewChange={handleViewChange}
       />
       <div className="flex-1 flex overflow-hidden">
         <Sidebar
           currentView={currentView}
-          onViewChange={setCurrentView}
+          onViewChange={handleViewChange}
           collapsed={sidebarCollapsed}
           onToggleCollapse={() => setSidebarCollapsed(c => !c)}
         />
         <main className="flex-1 overflow-auto p-4">
-          {children(currentView, setCurrentView)}
+          {children(currentView, handleViewChange)}
         </main>
       </div>
       <ToastContainer />
