@@ -310,6 +310,17 @@ function TaskCard({ task, expanded, onToggle, onUseTask }: TaskCardProps) {
       {/* Expanded content */}
       {expanded && (
         <div className="px-3 pb-3 pt-0 border-t border-border mt-2">
+          {/* Parent task */}
+          {task.parent && (
+            <div className="mt-3 p-2 bg-background rounded-lg border border-border">
+              <p className="text-xs text-muted-foreground mb-1">Parent Task</p>
+              <p className="text-sm font-medium text-blue-400">{task.parent.name}</p>
+              {task.parent.notes && (
+                <p className="text-xs text-muted-foreground mt-1 line-clamp-2">{task.parent.notes}</p>
+              )}
+            </div>
+          )}
+
           {/* Notes */}
           {task.notes && (
             <div className="mt-3">

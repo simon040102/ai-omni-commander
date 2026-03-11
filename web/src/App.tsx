@@ -6,6 +6,7 @@ import { ProjectSetup } from './components/project/ProjectSetup';
 import { TaskBoard } from './components/tasks/TaskBoard';
 import { EventLog } from './components/events/EventLog';
 import { AsanaTaskPanel } from './components/asana/AsanaTaskPanel';
+import { ActiveAgents } from './components/agents/ActiveAgents';
 import { useThemeStore } from './stores/themeStore';
 import type { AsanaTask, ProjectMode } from '@omni/shared';
 
@@ -41,6 +42,8 @@ export function App() {
             return <ProjectSetup onViewChange={onViewChange} />;
           case 'tasks':
             return <TaskBoard onViewChange={onViewChange} />;
+          case 'agents':
+            return <ActiveAgents onViewChange={onViewChange} />;
           case 'events':
             return <EventLog />;
           case 'asana':

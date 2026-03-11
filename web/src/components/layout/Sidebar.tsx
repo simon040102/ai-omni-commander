@@ -3,7 +3,7 @@ import { useProjectStore } from '../../stores/projectStore';
 import { useWsStore } from '../../stores/wsStore';
 import { useToastStore } from '../../stores/toastStore';
 import {
-  IconPlus, IconGrid, IconChecklist, IconClock,
+  IconPlus, IconGrid, IconClock,
   IconEdit, IconTrash, IconMoreVertical, IconPanelLeft, IconAsana,
 } from '../ui/Icons';
 import type { View } from './AppShell';
@@ -28,7 +28,7 @@ const STATUS_COLORS: Record<string, string> = {
 const NAV_ITEMS: { view: View; label: string; Icon: React.FC<{ className?: string }> }[] = [
   { view: 'setup', label: 'New Project', Icon: IconPlus },
   { view: 'dashboard', label: 'Dashboard', Icon: IconGrid },
-  { view: 'tasks', label: 'Tasks', Icon: IconChecklist },
+  { view: 'agents', label: 'Active Agents', Icon: IconGrid },
   { view: 'asana', label: 'Asana', Icon: IconAsana },
   { view: 'events', label: 'Events', Icon: IconClock },
 ];
@@ -142,7 +142,6 @@ export function Sidebar({ currentView, onViewChange, collapsed, onToggleCollapse
       <nav className={`${collapsed ? 'p-1' : 'p-2'}`}>
         {NAV_ITEMS.map(item => {
           const isActive = currentView === item.view;
-          const badge = item.view === 'tasks' ? failedTasks || undefined : undefined;
           return (
             <button
               key={item.view}
@@ -157,16 +156,7 @@ export function Sidebar({ currentView, onViewChange, collapsed, onToggleCollapse
               title={collapsed ? item.label : undefined}
             >
               <item.Icon className="w-4 h-4 flex-shrink-0" />
-              {!collapsed && (
-                <>
-                  <span>{item.label}</span>
-                  {badge ? (
-                    <span className="ml-auto text-[10px] bg-red-500 text-white w-4 h-4 rounded-full flex items-center justify-center">
-                      {badge}
-                    </span>
-                  ) : null}
-                </>
-              )}
+              {!collapsed && <span>{item.label}</span>}
             </button>
           );
         })}

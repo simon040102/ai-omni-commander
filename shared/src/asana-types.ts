@@ -24,6 +24,12 @@ export interface AsanaTask {
   permalink_url: string;
   /** Tag names attached to this task */
   tags: string[];
+  /** Parent task (if this is a subtask) */
+  parent?: {
+    gid: string;
+    name: string;
+    notes?: string;
+  } | null;
 }
 
 /** Asana MCP connection status */
