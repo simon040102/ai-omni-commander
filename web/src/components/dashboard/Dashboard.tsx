@@ -67,6 +67,15 @@ export function Dashboard({ onViewChange }: DashboardProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const docDropdownRef = useRef<HTMLDivElement>(null);
 
+  // Check for focusAgentId from sessionStorage (set by Sidebar when clicking active agent)
+  useEffect(() => {
+    const storedAgentId = sessionStorage.getItem('focusAgentId');
+    if (storedAgentId) {
+      setFocusAgentId(storedAgentId);
+      sessionStorage.removeItem('focusAgentId'); // Clear after reading
+    }
+  }, []);
+
   // Close dropdown on outside click
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {

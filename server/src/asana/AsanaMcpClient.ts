@@ -131,7 +131,7 @@ export class AsanaMcpClient {
       const limit = options?.limit || 50;
       const completedSince = options?.includeCompleted ? '' : '&completed_since=now';
 
-      const tasksUrl = `${ASANA_API_BASE}/tasks?assignee=${userGid}&workspace=${workspaceGid}&limit=${limit}${completedSince}&opt_fields=name,notes,due_on,completed,permalink_url,projects.name,projects.gid,tags.name`;
+      const tasksUrl = `${ASANA_API_BASE}/tasks?assignee=${userGid}&workspace=${workspaceGid}&limit=${limit}${completedSince}&opt_fields=name,notes,due_on,completed,permalink_url,projects.name,projects.gid,tags.name,parent.gid,parent.name,parent.notes`;
 
       const tasksResponse = await fetch(tasksUrl, {
         headers: {
@@ -172,6 +172,14 @@ export class AsanaMcpClient {
     // Extract tags
     const tags = (raw['tags'] as Array<{ name: string }> | undefined)?.map(t => t.name) || [];
 
+    // Extract parent task info
+    const parentRaw = raw['parent'] as { gid?: string; name?: string; notes?: string } | null | undefined;
+    const parent = parentRaw?.gid ? {
+      gid: String(parentRaw.gid),
+      name: String(parentRaw.name || ''),
+      notes: parentRaw.notes ? String(parentRaw.notes) : undefined,
+    } : undefined;
+
     return {
       gid: String(raw['gid'] || ''),
       name: String(raw['name'] || ''),
@@ -182,6 +190,7 @@ export class AsanaMcpClient {
       completed: Boolean(raw['completed']),
       permalink_url: String(raw['permalink_url'] || ''),
       tags,
+      parent,
     };
   }
 }
