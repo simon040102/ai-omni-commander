@@ -157,6 +157,45 @@ export class AsanaMcpClient {
     }
   }
 
+  /** Fetch stories (comments) for a specific task */
+  async getTaskStories(taskGid: string): Promise<Array<{ author: string; text: string; createdAt: string }>> {
+    if (!this.config.asanaPat) {
+      throw new Error('ASANA_PAT not configured');
+    }
+
+    logger.info({ taskGid }, 'Fetching Asana task stories...');
+
+    try {
+      const url = `${ASANA_API_BASE}/tasks/${taskGid}/stories?opt_fields=type,text,created_by.name,created_at`;
+      const response = await fetch(url, {
+        headers: {
+          'Authorization': `Bearer ${this.config.asanaPat}`,
+          'Accept': 'application/json',
+        },
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Failed to fetch task stories: ${response.status} ${errorText}`);
+      }
+
+      const data = await response.json();
+      const stories = (data.data || [])
+        .filter((s: Record<string, unknown>) => s['type'] === 'comment' && s['text'])
+        .map((s: Record<string, unknown>) => ({
+          author: (s['created_by'] as { name?: string })?.name || 'Unknown',
+          text: String(s['text'] || ''),
+          createdAt: String(s['created_at'] || ''),
+        }));
+
+      logger.info({ taskGid, count: stories.length }, 'Fetched Asana task stories');
+      return stories;
+    } catch (error) {
+      logger.error({ error, taskGid }, 'Failed to fetch Asana task stories');
+      throw error;
+    }
+  }
+
   /** Map raw Asana API response to AsanaTask interface */
   private mapToAsanaTask(raw: Record<string, unknown>): AsanaTask {
     // Extract project info

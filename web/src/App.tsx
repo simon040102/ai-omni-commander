@@ -31,6 +31,7 @@ export function App() {
             notes: task.notes,
             gid: task.gid,
             mode,
+            parentNotes: task.parent?.notes || '',
           }));
           onViewChange('setup');
         };

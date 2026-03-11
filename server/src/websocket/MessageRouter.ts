@@ -4,7 +4,7 @@ import type {
   WsStartExecution, WsInterviewResponse, WsInterviewConfirm,
   WsAgentAction, WsAgentCommand, WsInterventionResolve, WsTaskOverride,
   WsDeleteProject, WsUpdateProject, WsDeleteAgent, WsAddAgent,
-  WsDeleteDocument, WsPlanAction, WsAsanaFetchTasks, WsAsanaCheckConnection,
+  WsDeleteDocument, WsPlanAction, WsAsanaFetchTasks, WsAsanaCheckConnection, WsAsanaFetchTaskStories,
   AgentRole,
 } from '@omni/shared';
 import type { MasterOrchestrator } from '../orchestrator/MasterOrchestrator.js';
@@ -19,6 +19,8 @@ import { getPlan, getPlansByProject, updatePlanStatus } from '../db/queries/plan
 import { getAgent } from '../db/queries/agents.js';
 import { genId } from '../utils/uuid.js';
 import { createChildLogger } from '../utils/logger.js';
+import { loadSuperpowersPrompt } from '../skills/superpowers/index.js';
+import type { SuperpowersFeature } from '@omni/shared';
 
 const logger = createChildLogger('MessageRouter');
 
@@ -265,11 +267,29 @@ export function registerHandlers(
   wsServer.registerHandler('agent.add', async (msg: WsMessage, ws: WebSocket) => {
     const { payload } = msg as WsAddAgent;
     try {
+      // Build prompt prefix: superpowers + documents
+      const parts: string[] = [];
+
+      // Superpowers methodology
+      if (payload.superpowersFeatures && payload.superpowersFeatures.length > 0) {
+        const spPrompt = loadSuperpowersPrompt(payload.superpowersFeatures as SuperpowersFeature[]);
+        if (spPrompt) parts.push(spPrompt);
+      }
+
+      // Project documents
+      const docContext = orchestrator.getSpecHandler().getDocumentContext(payload.projectId, payload.role);
+      if (docContext) parts.push(docContext);
+
+      const prefix = parts.length > 0 ? parts.join('\n\n---\n\n') + '\n\n---\n\n' : '';
+      const fullPrompt = prefix + payload.prompt;
+
       const agentId = await agentManager.startAgent({
         projectId: payload.projectId,
         role: payload.role as AgentRole,
-        prompt: payload.prompt,
+        prompt: fullPrompt,
         model: payload.model,
+        workingDir: payload.workingDir,
+        useWorkspaceSkills: payload.useWorkspaceSkills,
       });
       logger.info({ agentId, projectId: payload.projectId, role: payload.role }, 'Agent manually added');
 
@@ -509,6 +529,39 @@ export function registerHandlers(
         id: genId(),
         timestamp: new Date().toISOString(),
         payload: { code: 'ASANA_FETCH_ERROR', message: (err as Error).message },
+      } as WsMessage);
+    }
+  });
+
+  // ASANA.FETCH_TASK_STORIES
+  wsServer.registerHandler('asana.fetchTaskStories', async (msg: WsMessage, ws: WebSocket) => {
+    const { payload } = msg as WsAsanaFetchTaskStories;
+
+    if (!asanaClient || !asanaClient.isConfigured()) {
+      wsServer.send(ws, {
+        type: 'asana.error',
+        id: genId(),
+        timestamp: new Date().toISOString(),
+        payload: { code: 'ASANA_NOT_CONFIGURED', message: 'Asana not configured' },
+      } as WsMessage);
+      return;
+    }
+
+    try {
+      const stories = await asanaClient.getTaskStories(payload.taskGid);
+      wsServer.send(ws, {
+        type: 'asana.taskStories',
+        id: genId(),
+        timestamp: new Date().toISOString(),
+        payload: { taskGid: payload.taskGid, stories },
+      } as WsMessage);
+    } catch (err) {
+      logger.error({ err }, 'Failed to fetch Asana task stories');
+      wsServer.send(ws, {
+        type: 'asana.error',
+        id: genId(),
+        timestamp: new Date().toISOString(),
+        payload: { code: 'ASANA_STORIES_ERROR', message: (err as Error).message },
       } as WsMessage);
     }
   });

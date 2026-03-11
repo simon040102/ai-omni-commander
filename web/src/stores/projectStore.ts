@@ -6,6 +6,7 @@ export interface Project {
   mode: 'spec' | 'creative';
   status: string;
   workingDir: string;
+  configJson: string | null;
   createdAt: string;
 }
 
@@ -121,7 +122,8 @@ export const useProjectStore = create<ProjectState>((set) => ({
     // Clear activity indicator when switching to a project
     const newActivity = new Set(state.projectsWithActivity);
     if (id) newActivity.delete(id);
-    return { currentProjectId: id, projectsWithActivity: newActivity };
+    // Clear project-scoped state when switching projects
+    return { currentProjectId: id, projectsWithActivity: newActivity, documents: [], plans: [] };
   }),
 
   setProjectState: (data, switchTo = false) => set((state) => {

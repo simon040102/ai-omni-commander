@@ -156,6 +156,9 @@ export interface WsAddAgent extends WsMessage {
     role: string;
     prompt: string;
     model?: string;
+    workingDir?: string;
+    useWorkspaceSkills?: boolean;
+    superpowersFeatures?: string[];
   };
 }
 
@@ -191,6 +194,13 @@ export interface WsAsanaCheckConnection extends WsMessage {
   payload: Record<string, never>;
 }
 
+export interface WsAsanaFetchTaskStories extends WsMessage {
+  type: 'asana.fetchTaskStories';
+  payload: {
+    taskGid: string;
+  };
+}
+
 export type ClientMessage =
   | WsCreateProject
   | WsUploadDocument
@@ -210,7 +220,8 @@ export type ClientMessage =
   | WsDeleteDocument
   | WsPlanAction
   | WsAsanaFetchTasks
-  | WsAsanaCheckConnection;
+  | WsAsanaCheckConnection
+  | WsAsanaFetchTaskStories;
 
 // ============================================
 // SERVER -> CLIENT messages
@@ -363,6 +374,18 @@ export interface WsAsanaConnectionStatus extends WsMessage {
   payload: AsanaConnectionStatus;
 }
 
+export interface WsAsanaTaskStories extends WsMessage {
+  type: 'asana.taskStories';
+  payload: {
+    taskGid: string;
+    stories: Array<{
+      author: string;
+      text: string;
+      createdAt: string;
+    }>;
+  };
+}
+
 export interface WsAsanaError extends WsMessage {
   type: 'asana.error';
   payload: {
@@ -388,4 +411,5 @@ export type ServerMessage =
   | WsError
   | WsAsanaTasks
   | WsAsanaConnectionStatus
+  | WsAsanaTaskStories
   | WsAsanaError;

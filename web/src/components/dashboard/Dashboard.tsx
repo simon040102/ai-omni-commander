@@ -6,8 +6,9 @@ import { useToastStore } from '../../stores/toastStore';
 import { DualTerminal } from './DualTerminal';
 import { DocumentUpload } from '../project/DocumentUpload';
 import { PlanPanel } from './PlanPanel';
+import { FolderPicker } from '../project/FolderPicker';
 import { IconStop, IconPlay, IconPlus, IconX, IconGrid } from '../ui/Icons';
-import type { DocType } from '@omni/shared';
+import type { DocType, Workspace, SuperpowersFeature } from '@omni/shared';
 import type { View } from '../layout/AppShell';
 
 /* ─── Role accent colors for left bar ─── */
@@ -56,6 +57,10 @@ export function Dashboard({ onViewChange }: DashboardProps) {
   const [addAgentRole, setAddAgentRole] = useState('backend');
   const [addAgentPrompt, setAddAgentPrompt] = useState('');
   const [addAgentModel, setAddAgentModel] = useState('sonnet');
+  const [addAgentWorkDir, setAddAgentWorkDir] = useState('');
+  const [addAgentUseSkills, setAddAgentUseSkills] = useState(true);
+  const [addAgentSuperpowers, setAddAgentSuperpowers] = useState(false);
+  const [addAgentSpFeatures, setAddAgentSpFeatures] = useState<SuperpowersFeature[]>(['brainstorm', 'tdd', 'debugging']);
   const [confirmDeleteAgentId, setConfirmDeleteAgentId] = useState<string | null>(null);
   const [selectedModel, setSelectedModel] = useState('sonnet');
   const [showPlanPanel, setShowPlanPanel] = useState(true);
@@ -143,6 +148,16 @@ export function Dashboard({ onViewChange }: DashboardProps) {
 
   const project = projects.find(p => p.id === currentProjectId);
 
+  // Extract workspaces from project config
+  const projectWorkspaces: Workspace[] = (() => {
+    if (!project?.configJson) return [];
+    try {
+      const cfg = JSON.parse(project.configJson) as { workspaces?: Workspace[] };
+      return cfg.workspaces || [];
+    } catch { return []; }
+  })();
+
+
   const handleStopAll = useCallback(() => {
     if (!currentProjectId) return;
     for (const agent of agents) {
@@ -197,12 +212,16 @@ export function Dashboard({ onViewChange }: DashboardProps) {
         role: addAgentRole,
         prompt: addAgentPrompt.trim(),
         model: addAgentModel,
+        workingDir: addAgentWorkDir || undefined,
+        useWorkspaceSkills: addAgentUseSkills,
+        superpowersFeatures: addAgentSuperpowers ? addAgentSpFeatures : undefined,
       },
     });
     addToast({ type: 'info', title: 'Agent added', message: `Starting ${addAgentRole} agent (${addAgentModel})...` });
     setShowAddAgent(false);
     setAddAgentPrompt('');
-  }, [currentProjectId, client, addToast, addAgentRole, addAgentPrompt, addAgentModel]);
+    setAddAgentWorkDir('');
+  }, [currentProjectId, client, addToast, addAgentRole, addAgentPrompt, addAgentModel, addAgentWorkDir, addAgentUseSkills, addAgentSuperpowers, addAgentSpFeatures]);
 
   /* ─── Empty state ─── */
   if (!currentProjectId || !project) {
@@ -554,6 +573,7 @@ export function Dashboard({ onViewChange }: DashboardProps) {
                 <IconX className="w-3 h-3" />
               </button>
             </div>
+            {/* Role & Model */}
             <div className="flex gap-2">
               <select
                 value={addAgentRole}
@@ -565,6 +585,7 @@ export function Dashboard({ onViewChange }: DashboardProps) {
                 <option value="devops">DevOps</option>
                 <option value="testing">Testing</option>
                 <option value="review">Review</option>
+                <option value="quick">Quick Task</option>
               </select>
               <select
                 value={addAgentModel}
@@ -576,12 +597,96 @@ export function Dashboard({ onViewChange }: DashboardProps) {
                 <option value="haiku">Haiku</option>
               </select>
             </div>
+            {/* Working Directory */}
+            <div>
+              <label className="block text-[10px] text-muted-foreground mb-1">Working Directory</label>
+              {projectWorkspaces.length > 0 && (
+                <div className="flex flex-wrap gap-1 mb-1.5">
+                  <button
+                    onClick={() => setAddAgentWorkDir('')}
+                    className={`px-2 py-0.5 rounded text-[10px] transition-colors ${
+                      addAgentWorkDir === '' ? 'bg-primary/20 text-primary ring-1 ring-primary/40' : 'bg-muted text-muted-foreground hover:bg-muted/80'
+                    }`}
+                  >
+                    Auto
+                  </button>
+                  {projectWorkspaces.map((ws, i) => (
+                    <button
+                      key={i}
+                      onClick={() => setAddAgentWorkDir(ws.path)}
+                      className={`px-2 py-0.5 rounded text-[10px] transition-colors ${
+                        addAgentWorkDir === ws.path ? 'bg-primary/20 text-primary ring-1 ring-primary/40' : 'bg-muted text-muted-foreground hover:bg-muted/80'
+                      }`}
+                      title={ws.path}
+                    >
+                      {ws.label || ws.path}
+                    </button>
+                  ))}
+                </div>
+              )}
+              <FolderPicker
+                value={addAgentWorkDir}
+                onChange={setAddAgentWorkDir}
+              />
+            </div>
+            {/* Prompt */}
             <textarea
               value={addAgentPrompt}
               onChange={(e) => setAddAgentPrompt(e.target.value)}
               placeholder="Prompt / instructions for this agent..."
               className="w-full bg-muted border border-border rounded-md px-2 py-1.5 text-xs min-h-[60px] resize-y focus:ring-1 focus:ring-primary/50 focus:border-primary outline-none"
             />
+            {/* Options */}
+            <div className="space-y-1.5">
+              <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={addAgentUseSkills}
+                  onChange={(e) => setAddAgentUseSkills(e.target.checked)}
+                  className="rounded border-border accent-primary w-3 h-3"
+                />
+                Workspace Skills (CLAUDE.md)
+              </label>
+              <div>
+                <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={addAgentSuperpowers}
+                    onChange={(e) => setAddAgentSuperpowers(e.target.checked)}
+                    className="rounded border-border accent-primary w-3 h-3"
+                  />
+                  Superpowers Methodology
+                </label>
+                {addAgentSuperpowers && (
+                  <div className="flex gap-1 mt-1 ml-5">
+                    {([
+                      { id: 'brainstorm' as const, label: 'Brainstorm' },
+                      { id: 'tdd' as const, label: 'TDD' },
+                      { id: 'debugging' as const, label: 'Debugging' },
+                    ]).map(({ id, label }) => {
+                      const isOn = addAgentSpFeatures.includes(id);
+                      return (
+                        <button
+                          key={id}
+                          onClick={() => {
+                            if (isOn) {
+                              setAddAgentSpFeatures(addAgentSpFeatures.filter(f => f !== id));
+                            } else {
+                              setAddAgentSpFeatures([...addAgentSpFeatures, id]);
+                            }
+                          }}
+                          className={`px-2 py-0.5 rounded text-[10px] transition-colors ${
+                            isOn ? 'bg-purple-500/20 text-purple-400 ring-1 ring-purple-500/40' : 'bg-muted text-muted-foreground hover:bg-muted/80'
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
             <button
               onClick={handleAddAgent}
               disabled={!addAgentPrompt.trim()}
