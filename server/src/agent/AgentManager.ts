@@ -74,6 +74,18 @@ export class AgentManager {
     // Spawn the process
     await proc.spawn(config.prompt);
 
+    // Emit initial prompt event so frontend can display it
+    await this.eventBus.emit({
+      type: EventTypes.AGENT_INITIAL_PROMPT,
+      source: agent.id,
+      payload: {
+        agentId: agent.id,
+        prompt: config.prompt,
+        role: config.role,
+      },
+      timestamp: new Date().toISOString(),
+    });
+
     logger.info({ agentId: agent.id, role: config.role }, 'Agent started');
     return agent.id;
   }
