@@ -105,6 +105,21 @@ export function useWebSocket() {
             break;
           }
 
+          case 'agent.initialPrompt': {
+            // Display initial prompt as the first output in terminal
+            const promptAgentId = payload['agentId'] as string;
+            const promptContent = payload['prompt'] as string;
+            const promptRole = payload['role'] as string;
+            if (promptAgentId && promptContent) {
+              appendOutput(promptAgentId, {
+                streamType: 'system',
+                content: `[初始 Prompt]\n\n${promptContent}`,
+                timestamp: new Date().toISOString(),
+              });
+            }
+            break;
+          }
+
           case 'project.agentOutputs': {
             // Bulk load historical outputs for an agent (from DB)
             const bulkAgentId = payload['agentId'] as string;

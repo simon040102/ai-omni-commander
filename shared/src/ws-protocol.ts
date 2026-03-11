@@ -336,6 +336,15 @@ export interface WsAgentPlansList extends WsMessage {
   };
 }
 
+export interface WsAgentInitialPrompt extends WsMessage {
+  type: 'agent.initialPrompt';
+  payload: {
+    agentId: string;
+    prompt: string;
+    role: string;
+  };
+}
+
 // ============================================
 // ASANA MCP messages (SERVER -> CLIENT)
 // ============================================
@@ -373,6 +382,7 @@ export type ServerMessage =
   | WsSpecDraft
   | WsAgentPlanReady
   | WsAgentPlansList
+  | WsAgentInitialPrompt
   | WsError
   | WsAsanaTasks
   | WsAsanaConnectionStatus
