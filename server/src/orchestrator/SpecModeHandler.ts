@@ -54,7 +54,7 @@ export class SpecModeHandler {
   }
 
   /** Start execution: spawn one agent per workspace with appropriate documents */
-  async execute(projectId: string, requirement?: string, model?: string): Promise<void> {
+  async execute(projectId: string, requirement?: string, model?: string, debugMode?: boolean): Promise<void> {
     const project = getProject(projectId);
     if (!project) throw new Error(`Project ${projectId} not found`);
 
@@ -109,7 +109,7 @@ export class SpecModeHandler {
       // Inject specs to workspace before starting agent (long-term memory)
       await this.injectSpecsToWorkspace(ws, finalDocs);
 
-      const prompt = this.buildWorkspacePrompt(ws, finalDocs, role, requirement, superpowers);
+      const prompt = this.buildWorkspacePrompt(ws, finalDocs, role, requirement, superpowers, debugMode);
 
       // Reuse existing agent for this role if available, otherwise create new
       const existingAgents = getAgentsByRole(projectId, resolvedRole);
@@ -138,7 +138,7 @@ export class SpecModeHandler {
   }
 
   /** Build the prompt for a workspace agent */
-  private buildWorkspacePrompt(workspace: Workspace, docs: ParsedDocument[], role: string, requirement?: string, superpowers?: SuperpowersConfig): string {
+  private buildWorkspacePrompt(workspace: Workspace, docs: ParsedDocument[], role: string, requirement?: string, superpowers?: SuperpowersConfig, debugMode?: boolean): string {
     const docLines = docs.map(d => {
       const typeTag = `[${d.docType}] `;
       const isPdf = d.filename.toLowerCase().endsWith('.pdf');
@@ -158,6 +158,57 @@ export class SpecModeHandler {
       superpowersPrefix = loadSuperpowersPrompt(superpowers.features as SuperpowersFeature[]) + '\n\n---\n\n';
     }
 
+    // Debug mode: work with existing codebase
+    if (debugMode) {
+      return `${superpowersPrefix}你的工作目錄是 "${workspace.path}"（${workspace.label}）。
+${requirementSection}
+## 模式：Debug / 修改現有程式碼
+
+這是一個**現有的程式碼專案**，你的任務是根據需求修改或擴充現有功能，而不是從零開始建立。
+
+## 第一步：探索現有程式碼庫
+
+先使用 Glob、Grep、Read 等工具瀏覽專案結構，了解：
+- 專案架構和檔案組織
+- 主要程式碼模組和元件
+- 相關的現有實作
+
+## 第二步：讀取專案技能設定
+
+檢查工作目錄中是否有 CLAUDE.md 或 .claude/ 設定，如果有請讀取並遵循其中的指示。
+這些設定定義了此專案的技術規範、程式碼風格和框架慣例，你必須完整遵守。
+
+## 第三步：讀取規格文件
+
+以下是本次需求相關的規格文件：
+${docLines.join('\n')}
+
+重要提示：
+- PDF 檔案請使用 Read tool 來讀取，它們可能包含重要的圖片、表格和流程圖
+- 如果 PDF 頁數過多，Read tool 會要求你分批讀取，請依照指示分頁讀取
+
+## 第四步：產出修改計劃書（必須先完成才能動手修改程式碼）
+
+在理解現有程式碼和規格文件後，你必須先產出一份詳細的修改計劃書，包含：
+
+1. **現況分析**：說明相關的現有實作和程式碼位置
+2. **需求摘要**：根據規格文件${requirement?.trim() ? '和上方的需求說明' : ''}歸納出需要修改或新增的功能
+3. **任務拆解**：將修改需求拆解為具體的實作任務（每個任務要明確、可執行）
+4. **影響範圍**：列出需要修改的檔案和可能受影響的模組
+5. **技術方案**：每個任務的修改方案，需符合現有專案的架構和 CLAUDE.md / skills 中定義的規範
+
+請將計劃書以 Markdown 格式輸出，並在計劃書末尾加上 **[PLAN_READY]** 標記。
+
+## 第五步：執行修改計劃
+
+計劃書產出後，按照計劃逐步修改程式碼。嚴格遵循現有專案的架構風格和技能設定中的規範。
+
+${this.getCompletionCriteria(role)}
+
+- 如需人工協助請加上 [NEEDS_HUMAN]`;
+    }
+
+    // New build mode (default)
     return `${superpowersPrefix}你的工作目錄是 "${workspace.path}"（${workspace.label}）。
 ${requirementSection}
 ## 第一步：讀取專案技能設定

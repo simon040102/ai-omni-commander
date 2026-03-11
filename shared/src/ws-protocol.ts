@@ -51,6 +51,8 @@ export interface WsStartExecution extends WsMessage {
     requirement?: string;
     /** Model to use for agents (e.g., 'sonnet', 'opus', 'haiku') */
     model?: string;
+    /** Debug mode for spec: work with existing codebase instead of new build */
+    debugMode?: boolean;
     /** Quick mode task details */
     quickTask?: {
       type: 'bug' | 'change' | 'refactor' | 'other';
