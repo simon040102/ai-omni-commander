@@ -4,6 +4,32 @@ import { useWsStore } from '../../stores/wsStore';
 import type { AsanaTask, ProjectMode } from '@omni/shared';
 import { IconRefresh, IconSearch, IconExternalLink, IconAsana, IconChevronDown } from '../ui/Icons';
 
+/** Render text with clickable URLs */
+function Linkify({ children }: { children: string }) {
+  const urlRegex = /(https?:\/\/[^\s<>"')\]]+)/g;
+  const parts = children.split(urlRegex);
+  return (
+    <>
+      {parts.map((part, i) =>
+        urlRegex.test(part) ? (
+          <a
+            key={i}
+            href={part}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-blue-400 hover:text-blue-300 underline break-all"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {part}
+          </a>
+        ) : (
+          <span key={i}>{part}</span>
+        ),
+      )}
+    </>
+  );
+}
+
 interface AsanaTaskPanelProps {
   onUseTask?: (task: AsanaTask, mode: ProjectMode) => void;
 }
@@ -316,7 +342,7 @@ function TaskCard({ task, expanded, onToggle, onUseTask }: TaskCardProps) {
               <p className="text-xs text-muted-foreground mb-1">Parent Task</p>
               <p className="text-sm font-medium text-blue-400">{task.parent.name}</p>
               {task.parent.notes && (
-                <p className="text-xs text-muted-foreground mt-1 line-clamp-2">{task.parent.notes}</p>
+                <p className="text-xs text-muted-foreground mt-1 line-clamp-2"><Linkify>{task.parent.notes}</Linkify></p>
               )}
             </div>
           )}
@@ -325,7 +351,7 @@ function TaskCard({ task, expanded, onToggle, onUseTask }: TaskCardProps) {
           {task.notes && (
             <div className="mt-3">
               <p className="text-xs text-muted-foreground mb-1">Notes</p>
-              <p className="text-sm whitespace-pre-wrap">{task.notes}</p>
+              <p className="text-sm whitespace-pre-wrap"><Linkify>{task.notes}</Linkify></p>
             </div>
           )}
 
