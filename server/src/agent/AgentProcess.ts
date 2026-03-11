@@ -72,8 +72,8 @@ export class AgentProcess extends EventEmitter {
         ...(allowDangerouslySkipPermissions && { allowDangerouslySkipPermissions }),
         resume: this.config.sessionId || undefined,
         sessionId: (!this.config.sessionId && this._sessionId) ? this._sessionId : undefined,
-        // Load project-level CLAUDE.md and .claude/settings.json
-        settingSources: ['project'],
+        // Load project-level CLAUDE.md and .claude/settings.json (if enabled)
+        ...(this.config.useWorkspaceSkills !== false && { settingSources: ['project'] }),
         // Enable streaming partial messages for real-time output
         includePartialMessages: true,
         // Avoid nested session detection

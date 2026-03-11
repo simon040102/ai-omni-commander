@@ -64,6 +64,7 @@ export class AgentManager {
       systemPrompt,
       model: config.model || roleConfig.model,
       allowedTools: roleConfig.allowedTools,
+      useWorkspaceSkills: config.useWorkspaceSkills !== false, // default to true
     });
 
     // Wire up event handlers

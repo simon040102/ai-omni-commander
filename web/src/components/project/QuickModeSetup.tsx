@@ -20,6 +20,7 @@ interface QuickModeSetupProps {
     errorLog?: string;
     relatedFiles?: string[];
     role?: QuickRole;
+    useWorkspaceSkills?: boolean;
   }) => void;
   importedTask?: ImportedTask;
 }
@@ -50,6 +51,7 @@ export function QuickModeSetup({
   const [errorLog, setErrorLog] = useState('');
   const [relatedFiles, setRelatedFiles] = useState('');
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [useWorkspaceSkills, setUseWorkspaceSkills] = useState(true);
   const hasAppliedImport = useRef(false);
 
   // Pre-fill from imported Asana task
@@ -77,6 +79,7 @@ export function QuickModeSetup({
         ? relatedFiles.split('\n').map(f => f.trim()).filter(Boolean)
         : undefined,
       role,
+      useWorkspaceSkills,
     });
   };
 
@@ -226,6 +229,28 @@ export function QuickModeSetup({
             </button>
           ))}
         </div>
+      </div>
+
+      {/* Workspace Skills Toggle */}
+      <div className="flex items-center justify-between px-4 py-3 bg-muted/30 rounded-lg border border-border">
+        <div className="flex-1">
+          <label className="text-sm font-medium block mb-0.5">Use Project Skills</label>
+          <p className="text-xs text-muted-foreground">
+            Load CLAUDE.md and .claude/ settings from workspace
+          </p>
+        </div>
+        <button
+          onClick={() => setUseWorkspaceSkills(!useWorkspaceSkills)}
+          className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+            useWorkspaceSkills ? 'bg-primary' : 'bg-muted'
+          }`}
+        >
+          <span
+            className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+              useWorkspaceSkills ? 'translate-x-6' : 'translate-x-1'
+            }`}
+          />
+        </button>
       </div>
 
       {/* Start Button */}
