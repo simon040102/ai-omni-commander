@@ -1,7 +1,40 @@
 import { useEffect, useRef, useState, useMemo, useCallback, memo } from 'react';
+import { marked } from 'marked';
 import type { AgentOutput } from '../../stores/agentStore';
 import { useAgentStore } from '../../stores/agentStore';
 import { IconSearch, IconStop, IconRefresh, IconSend, IconChevronDown, IconChevronRight, IconX } from '../ui/Icons';
+
+// Configure marked for terminal-friendly output
+marked.setOptions({
+  breaks: true,
+  gfm: true,
+});
+
+/** Check if content likely contains markdown formatting */
+function hasMarkdown(text: string): boolean {
+  // Check for common markdown patterns
+  return /(?:^#{1,6}\s|^\s*[-*+]\s|^\s*\d+\.\s|```|`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|\[.+?\]\(.+?\)|^\s*>\s|^\|.+\|)/m.test(text);
+}
+
+/** Render markdown content to HTML string */
+function renderMarkdown(content: string): string {
+  try {
+    return marked.parse(content, { async: false }) as string;
+  } catch {
+    return content;
+  }
+}
+
+/** Memoized markdown content component */
+const MarkdownContent = memo(function MarkdownContent({ content }: { content: string }) {
+  const html = useMemo(() => renderMarkdown(content), [content]);
+  return (
+    <span
+      className="terminal-markdown"
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
+});
 
 /** Collapsible thinking block component - memoized for performance */
 const ThinkingBlock = memo(function ThinkingBlock({ content, defaultExpanded = false }: { content: string; defaultExpanded?: boolean }) {
@@ -440,7 +473,11 @@ export function TerminalOutput({ outputs, title, role, status, agentId, model, t
                       )}
                     </>
                   )}
-                  {output.content}
+                  {output.streamType === 'text' && hasMarkdown(output.content) ? (
+                    <MarkdownContent content={output.content} />
+                  ) : (
+                    output.content
+                  )}
                 </div>
               );
             })
@@ -451,8 +488,11 @@ export function TerminalOutput({ outputs, title, role, status, agentId, model, t
           )}
           {streamingBuffer?.text && (
             <div className="text-foreground leading-5 whitespace-pre-wrap break-all">
-              {streamingBuffer.text}
-              <span className="animate-pulse text-primary">▌</span>
+              {hasMarkdown(streamingBuffer.text) ? (
+                <><MarkdownContent content={streamingBuffer.text} /><span className="animate-pulse text-primary">▌</span></>
+              ) : (
+                <>{streamingBuffer.text}<span className="animate-pulse text-primary">▌</span></>
+              )}
             </div>
           )}
           {/* Working indicator when running but no visible streaming text */}
