@@ -81,3 +81,88 @@
 .light ::-webkit-scrollbar-thumb:hover {
   background: hsl(var(--muted-foreground));
 }
+
+/* Terminal markdown rendering styles */
+.terminal-markdown {
+  display: inline;
+}
+.terminal-markdown > p {
+  display: inline;
+  margin: 0;
+}
+.terminal-markdown > p + p {
+  display: block;
+  margin-top: 0.5em;
+}
+.terminal-markdown h1,
+.terminal-markdown h2,
+.terminal-markdown h3,
+.terminal-markdown h4,
+.terminal-markdown h5,
+.terminal-markdown h6 {
+  font-weight: 700;
+  margin: 0.75em 0 0.25em;
+  color: hsl(var(--primary));
+}
+.terminal-markdown h1 { font-size: 1.15em; }
+.terminal-markdown h2 { font-size: 1.1em; }
+.terminal-markdown h3 { font-size: 1.05em; }
+.terminal-markdown ul,
+.terminal-markdown ol {
+  margin: 0.25em 0;
+  padding-left: 1.5em;
+}
+.terminal-markdown ul { list-style: disc; }
+.terminal-markdown ol { list-style: decimal; }
+.terminal-markdown li { margin: 0.1em 0; }
+.terminal-markdown code {
+  background: hsl(var(--muted));
+  padding: 0.1em 0.35em;
+  border-radius: 3px;
+  font-size: 0.92em;
+}
+.terminal-markdown pre {
+  background: hsl(var(--muted));
+  border: 1px solid hsl(var(--border));
+  border-radius: 4px;
+  padding: 0.5em 0.75em;
+  margin: 0.5em 0;
+  overflow-x: auto;
+  white-space: pre;
+}
+.terminal-markdown pre code {
+  background: none;
+  padding: 0;
+  border-radius: 0;
+}
+.terminal-markdown blockquote {
+  border-left: 3px solid hsl(var(--primary));
+  padding-left: 0.75em;
+  margin: 0.5em 0;
+  opacity: 0.85;
+}
+.terminal-markdown strong { font-weight: 700; }
+.terminal-markdown em { font-style: italic; }
+.terminal-markdown a {
+  color: hsl(var(--primary));
+  text-decoration: underline;
+}
+.terminal-markdown table {
+  border-collapse: collapse;
+  margin: 0.5em 0;
+}
+.terminal-markdown th,
+.terminal-markdown td {
+  border: 1px solid hsl(var(--border));
+  padding: 0.25em 0.5em;
+  text-align: left;
+}
+.terminal-markdown th {
+  background: hsl(var(--muted));
+  font-weight: 600;
+}
+.terminal-markdown hr {
+  border: none;
+  border-top: 1px solid hsl(var(--border));
+  margin: 0.5em 0;
+}
