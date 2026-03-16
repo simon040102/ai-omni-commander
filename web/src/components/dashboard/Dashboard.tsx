@@ -20,6 +20,7 @@ const ROLE_ACCENT: Record<string, string> = {
   devops: 'before:bg-green-500',
   testing: 'before:bg-teal-500',
   review: 'before:bg-gray-500',
+  quick: 'before:bg-amber-500',
 };
 
 const ROLE_BG: Record<string, string> = {
@@ -30,6 +31,7 @@ const ROLE_BG: Record<string, string> = {
   devops: 'bg-green-500/10 text-green-400',
   testing: 'bg-teal-500/10 text-teal-400',
   review: 'bg-gray-500/10 text-gray-400',
+  quick: 'bg-amber-500/10 text-amber-400',
 };
 
 interface DashboardProps {

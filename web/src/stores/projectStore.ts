@@ -207,7 +207,11 @@ export const useProjectStore = create<ProjectState>((set) => ({
   addOrUpdateAgent: (agent) => set((state) => {
     const exists = state.agents.some(a => a.id === agent.id);
     if (exists) {
-      return { agents: state.agents.map(a => a.id === agent.id ? { ...a, ...agent } : a) };
+      // Filter out undefined values to avoid overwriting existing fields (e.g. role, model on completion)
+      const filtered = Object.fromEntries(
+        Object.entries(agent).filter(([, v]) => v !== undefined)
+      );
+      return { agents: state.agents.map(a => a.id === agent.id ? { ...a, ...filtered } : a) };
     }
     return {
       agents: [...state.agents, agent],
