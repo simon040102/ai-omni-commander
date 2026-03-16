@@ -239,15 +239,13 @@ export function useWebSocket() {
             addOrUpdateAgent({
               id: payload['agentId'] as string,
               projectId: completedProjectId,
-              role: '',
               status: 'stopped',
               currentTaskId: null,
-              model: '',
               totalCostUsd: (payload['costUsd'] as number) || 0,
               totalTurns: (payload['turns'] as number) || 0,
               totalInputTokens: inputTokens,
               totalOutputTokens: outputTokens,
-            });
+            } as import('../../stores/projectStore').Agent);
             addToast({
               type: 'success',
               title: 'Agent completed',

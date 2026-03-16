@@ -54,6 +54,8 @@ export interface ProjectConfig {
     description: string;
     errorLog?: string;
     relatedFiles?: string[];
+    role?: 'backend' | 'frontend' | 'devops' | 'testing';
+    useWorkspaceSkills?: boolean;
   };
 }
 

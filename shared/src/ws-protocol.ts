@@ -61,6 +61,8 @@ export interface WsStartExecution extends WsMessage {
       relatedFiles?: string[];
       /** Role for the agent (backend, frontend, etc.) */
       role?: 'backend' | 'frontend' | 'devops' | 'testing';
+      /** Whether to load CLAUDE.md/.claude/ skills from workspace (default: true) */
+      useWorkspaceSkills?: boolean;
     };
   };
 }
