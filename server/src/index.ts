@@ -154,6 +154,35 @@ async function main() {
     res.json({ success: true });
   });
 
+  // List .claude/commands/ skill files from a workspace directory
+  app.get('/api/skills', (req, res) => {
+    const dir = req.query['path'] as string;
+    if (!dir) {
+      res.status(400).json({ error: 'path is required' });
+      return;
+    }
+    try {
+      const skills: { name: string; filename: string; path: string }[] = [];
+      const commandsDir = path.join(dir, '.claude', 'commands');
+      if (fs.existsSync(commandsDir)) {
+        const entries = fs.readdirSync(commandsDir, { withFileTypes: true });
+        for (const e of entries) {
+          if (e.isFile() && e.name.endsWith('.md')) {
+            skills.push({
+              name: e.name.replace(/\.md$/, ''),
+              filename: e.name,
+              path: path.join(commandsDir, e.name),
+            });
+          }
+        }
+      }
+      const hasClaudeMd = fs.existsSync(path.join(dir, 'CLAUDE.md'));
+      res.json({ skills, hasClaudeMd });
+    } catch (err) {
+      res.status(400).json({ error: `Cannot read skills: ${dir}` });
+    }
+  });
+
   // Upload file (for pasted images/files from clipboard)
   const uploadsDir = path.join(path.dirname(config.dbPath), 'uploads');
   if (!fs.existsSync(uploadsDir)) {

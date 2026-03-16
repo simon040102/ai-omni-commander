@@ -10,6 +10,7 @@ const ROLE_COLORS: Record<string, { bg: string; text: string; border: string }> 
   devops: { bg: 'bg-green-500/10', text: 'text-green-400', border: 'border-green-500/30' },
   testing: { bg: 'bg-teal-500/10', text: 'text-teal-400', border: 'border-teal-500/30' },
   review: { bg: 'bg-gray-500/10', text: 'text-gray-400', border: 'border-gray-500/30' },
+  quick: { bg: 'bg-amber-500/10', text: 'text-amber-400', border: 'border-amber-500/30' },
 };
 
 interface ActiveAgentsProps {
