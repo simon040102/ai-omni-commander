@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import type { QuickTaskType } from '@omni/shared';
 import { IconPlay, IconAsana } from '../ui/Icons';
 
@@ -10,8 +10,15 @@ interface ImportedTask {
   asanaGid: string;
 }
 
+interface SkillInfo {
+  name: string;
+  filename: string;
+  path: string;
+}
+
 interface QuickModeSetupProps {
   projectId: string;
+  workspacePath: string;
   selectedModel: string;
   onModelChange: (model: string) => void;
   onStartExecution: (quickTask: {
@@ -26,20 +33,21 @@ interface QuickModeSetupProps {
 }
 
 const TASK_TYPES: { value: QuickTaskType; label: string; emoji: string; desc: string }[] = [
-  { value: 'bug', label: 'Bug Fix', emoji: '🐛', desc: 'Fix an error or unexpected behavior' },
-  { value: 'change', label: 'Small Change', emoji: '✨', desc: 'Minor feature or UI update' },
-  { value: 'refactor', label: 'Refactor', emoji: '🔧', desc: 'Improve code structure' },
-  { value: 'other', label: 'Other', emoji: '📝', desc: 'General task' },
+  { value: 'bug', label: 'Bug Fix', emoji: '\u{1F41B}', desc: 'Fix an error or unexpected behavior' },
+  { value: 'change', label: 'Small Change', emoji: '\u2728', desc: 'Minor feature or UI update' },
+  { value: 'refactor', label: 'Refactor', emoji: '\u{1F527}', desc: 'Improve code structure' },
+  { value: 'other', label: 'Other', emoji: '\u{1F4DD}', desc: 'General task' },
 ];
 
 const ROLES: { value: QuickRole; label: string; emoji: string; desc: string }[] = [
-  { value: 'backend', label: 'Backend', emoji: '⚙️', desc: 'Server-side, API, database' },
-  { value: 'frontend', label: 'Frontend', emoji: '🎨', desc: 'UI, React, styling' },
-  { value: 'devops', label: 'DevOps', emoji: '🚀', desc: 'CI/CD, Docker, deployment' },
-  { value: 'testing', label: 'Testing', emoji: '🧪', desc: 'Tests, QA, automation' },
+  { value: 'backend', label: 'Backend', emoji: '\u2699\uFE0F', desc: 'Server-side, API, database' },
+  { value: 'frontend', label: 'Frontend', emoji: '\u{1F3A8}', desc: 'UI, React, styling' },
+  { value: 'devops', label: 'DevOps', emoji: '\u{1F680}', desc: 'CI/CD, Docker, deployment' },
+  { value: 'testing', label: 'Testing', emoji: '\u{1F9EA}', desc: 'Tests, QA, automation' },
 ];
 
 export function QuickModeSetup({
+  workspacePath,
   selectedModel,
   onModelChange,
   onStartExecution,
@@ -52,18 +60,42 @@ export function QuickModeSetup({
   const [relatedFiles, setRelatedFiles] = useState('');
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [useWorkspaceSkills, setUseWorkspaceSkills] = useState(true);
+  const [skills, setSkills] = useState<SkillInfo[]>([]);
+  const [hasClaudeMd, setHasClaudeMd] = useState(false);
+  const [skillsLoading, setSkillsLoading] = useState(false);
   const hasAppliedImport = useRef(false);
+
+  // Fetch available skills when workspace path changes
+  const fetchSkills = useCallback(async (dir: string) => {
+    if (!dir) {
+      setSkills([]);
+      setHasClaudeMd(false);
+      return;
+    }
+    setSkillsLoading(true);
+    try {
+      const res = await fetch(`/api/skills?path=${encodeURIComponent(dir)}`);
+      if (res.ok) {
+        const data = await res.json() as { skills: SkillInfo[]; hasClaudeMd: boolean };
+        setSkills(data.skills);
+        setHasClaudeMd(data.hasClaudeMd);
+      }
+    } catch { /* ignore */ }
+    setSkillsLoading(false);
+  }, []);
+
+  useEffect(() => {
+    fetchSkills(workspacePath);
+  }, [workspacePath, fetchSkills]);
 
   // Pre-fill from imported Asana task
   useEffect(() => {
     if (importedTask && !hasAppliedImport.current) {
       hasAppliedImport.current = true;
-      // Use notes if available, otherwise use name
       const taskDescription = importedTask.notes?.trim()
         ? `${importedTask.name}\n\n${importedTask.notes}`
         : importedTask.name;
       setDescription(taskDescription);
-      // Default to 'other' type for imported tasks
       setTaskType('other');
     }
   }, [importedTask]);
@@ -167,7 +199,7 @@ export function QuickModeSetup({
         onClick={() => setShowAdvanced(!showAdvanced)}
         className="text-xs text-muted-foreground hover:text-foreground transition-colors"
       >
-        {showAdvanced ? '▼' : '▶'} Advanced options (error log, related files)
+        {showAdvanced ? '\u25BC' : '\u25B6'} Advanced options (error log, related files)
       </button>
 
       {showAdvanced && (
@@ -231,26 +263,60 @@ export function QuickModeSetup({
         </div>
       </div>
 
-      {/* Workspace Skills Toggle */}
-      <div className="flex items-center justify-between px-4 py-3 bg-muted/30 rounded-lg border border-border">
-        <div className="flex-1">
-          <label className="text-sm font-medium block mb-0.5">Use Project Skills</label>
-          <p className="text-xs text-muted-foreground">
-            Load CLAUDE.md and .claude/ settings from workspace
-          </p>
-        </div>
-        <button
-          onClick={() => setUseWorkspaceSkills(!useWorkspaceSkills)}
-          className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-            useWorkspaceSkills ? 'bg-primary' : 'bg-muted'
-          }`}
-        >
-          <span
-            className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-              useWorkspaceSkills ? 'translate-x-6' : 'translate-x-1'
+      {/* Workspace Skills */}
+      <div className="rounded-lg border border-border overflow-hidden">
+        <div className="flex items-center justify-between px-4 py-3 bg-muted/30">
+          <div className="flex-1">
+            <label className="text-sm font-medium block mb-0.5">Project Skills</label>
+            <p className="text-xs text-muted-foreground">
+              {workspacePath
+                ? `Load CLAUDE.md and .claude/ skills from workspace`
+                : 'Select a workspace folder first'}
+            </p>
+          </div>
+          <button
+            onClick={() => setUseWorkspaceSkills(!useWorkspaceSkills)}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+              useWorkspaceSkills ? 'bg-primary' : 'bg-muted'
             }`}
-          />
-        </button>
+          >
+            <span
+              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                useWorkspaceSkills ? 'translate-x-6' : 'translate-x-1'
+              }`}
+            />
+          </button>
+        </div>
+
+        {/* Skills list */}
+        {useWorkspaceSkills && workspacePath && (
+          <div className="px-4 py-2.5 border-t border-border bg-card">
+            {skillsLoading ? (
+              <p className="text-xs text-muted-foreground">Loading...</p>
+            ) : !hasClaudeMd && skills.length === 0 ? (
+              <p className="text-xs text-muted-foreground">
+                No CLAUDE.md or .claude/commands/ found in this folder
+              </p>
+            ) : (
+              <div className="flex flex-wrap gap-1.5">
+                {hasClaudeMd && (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-cyan-500/15 text-cyan-400 border border-cyan-500/25">
+                    CLAUDE.md
+                  </span>
+                )}
+                {skills.map((skill) => (
+                  <span
+                    key={skill.filename}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-purple-500/15 text-purple-400 border border-purple-500/25"
+                    title={skill.path}
+                  >
+                    /{skill.name}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Start Button */}

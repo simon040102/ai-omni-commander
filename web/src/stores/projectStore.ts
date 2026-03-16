@@ -132,6 +132,12 @@ export const useProjectStore = create<ProjectState>((set) => ({
 
     // If this is for the current project or we should switch, update all state
     if (isCurrentProject || shouldSwitch) {
+      // Merge agents: use server data as base, but preserve any running agents
+      // already in the store that might not be in the server snapshot yet (race condition)
+      const serverAgentIds = new Set(data.agents.map(a => a.id));
+      const preservedAgents = state.agents.filter(
+        a => a.projectId === data.project.id && !serverAgentIds.has(a.id)
+      );
       return {
         currentProjectId: shouldSwitch ? data.project.id : state.currentProjectId,
         projects: [
@@ -139,7 +145,7 @@ export const useProjectStore = create<ProjectState>((set) => ({
           data.project,
         ],
         tasks: data.tasks,
-        agents: data.agents,
+        agents: [...data.agents, ...preservedAgents],
         dependencies: data.dependencies,
         interventions: [],
         documents: [], // Clear documents, will be populated by project.documents message

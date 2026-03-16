@@ -611,6 +611,7 @@ export function ProjectSetup({ onViewChange }: ProjectSetupProps) {
           ) : (
             <QuickModeSetup
               projectId={projectId}
+              workspacePath={workspaces[0]?.path || ''}
               selectedModel={selectedModel}
               onModelChange={setSelectedModel}
               onStartExecution={handleQuickStartExecution}
