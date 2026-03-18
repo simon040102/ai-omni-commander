@@ -56,9 +56,11 @@ export class SvnSpecService {
       return [];
     }
 
-    const rootCode = extractRootCode(parentName);
+    // Extract function code (e.g., "OV02") from full parentName (e.g., "OV02.需檢核有相同匯率...")
+    const functionCode = extractFunctionCode(parentName) || parentName;
+    const rootCode = extractRootCode(functionCode);
     if (!rootCode) {
-      logger.warn({ parentName }, 'Could not extract root code from parent name');
+      logger.warn({ parentName, functionCode }, 'Could not extract root code from parent name');
       return [];
     }
 
@@ -66,7 +68,7 @@ export class SvnSpecService {
     const allMatchedFileUrls: string[] = [];
 
     for (const svnRoot of svnRoots) {
-      logger.info({ projectId, taskId, parentName, rootCode, svnRoot, taskLabel }, 'Searching SVN root for specs');
+      logger.info({ projectId, taskId, parentName, functionCode, rootCode, svnRoot, taskLabel }, 'Searching SVN root for specs');
 
       try {
         // Step 1: Find the matching top-level folder
@@ -81,9 +83,9 @@ export class SvnSpecService {
         const folderUrl = `${svnRoot}/${matchedFolder}`;
         logger.info({ matchedFolder, folderUrl }, 'Found matching SVN folder');
 
-        // Step 2: Recursively list files and find matches for parentName
+        // Step 2: Recursively list files and find matches for function code
         const allFiles = this.svnList(folderUrl, svnConfig, true);
-        const matchedFiles = this.findMatchingFiles(allFiles, parentName);
+        const matchedFiles = this.findMatchingFiles(allFiles, functionCode);
 
         if (matchedFiles.length === 0) {
           logger.info({ parentName, folderUrl }, 'No matching files found, trying 0_共用/ fallback');
@@ -139,12 +141,16 @@ export class SvnSpecService {
    * Does NOT download anything — just lists matching files.
    */
   previewSpecsForCode(
-    functionCode: string,
+    rawFunctionCode: string,
     svnConfig: SvnConfig,
     taskLabel: string,
   ): Array<{ filename: string; svnUrl: string; svnRoot: 'frontend' | 'backend' }> {
+    // Extract clean function code from full parent name (e.g., "OV02.需檢核..." → "OV02")
+    const functionCode = extractFunctionCode(rawFunctionCode) || rawFunctionCode;
     const rootCode = extractRootCode(functionCode);
     if (!rootCode) return [];
+
+    logger.info({ rawFunctionCode, functionCode, rootCode }, 'Preview: extracted codes');
 
     const svnRoots = this.resolveSvnRoots(svnConfig, taskLabel);
     const results: Array<{ filename: string; svnUrl: string; svnRoot: 'frontend' | 'backend' }> = [];
