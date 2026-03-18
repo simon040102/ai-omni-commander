@@ -8,31 +8,31 @@ import { IconPlus, IconPlay, IconTrash, IconX, IconChevronDown, IconChevronRight
 import type { TaskType, Task } from '../../stores/projectStore';
 
 const TASK_TYPE_COLORS: Record<TaskType, string> = {
-  bug: 'bg-red-500/15 text-red-400',
-  feature: 'bg-blue-500/15 text-blue-400',
-  refactor: 'bg-purple-500/15 text-purple-400',
+  bug: 'bg-red-500/100/20 text-red-400',
+  feature: 'bg-blue-500/100/20 text-blue-400',
+  refactor: 'bg-purple-500/20 text-purple-400',
   other: 'bg-muted text-muted-foreground',
 };
 
 const LABEL_COLORS: Record<string, string> = {
-  frontend: 'bg-blue-500/10 text-blue-400',
-  backend: 'bg-purple-500/10 text-purple-400',
-  devops: 'bg-green-500/10 text-green-400',
-  testing: 'bg-teal-500/10 text-teal-400',
-  review: 'bg-gray-500/10 text-gray-400',
-  architect: 'bg-orange-500/10 text-orange-400',
+  frontend: 'bg-blue-500/100/15 text-blue-400',
+  backend: 'bg-purple-500/15 text-purple-400',
+  devops: 'bg-green-500/15 text-green-400',
+  testing: 'bg-teal-500/15 text-teal-400',
+  review: 'bg-gray-500/15 text-gray-400',
+  architect: 'bg-orange-500/100/15 text-orange-400',
 };
 
 const STATUS_STYLES: Record<string, string> = {
-  pending: 'bg-gray-500/10 text-gray-400 border-gray-500/20',
-  in_progress: 'bg-green-500/10 text-green-400 border-green-500/20',
-  completed: 'bg-blue-500/10 text-blue-400 border-blue-500/20',
-  failed: 'bg-red-500/10 text-red-400 border-red-500/20',
-  blocked: 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20',
-  queued: 'bg-gray-500/10 text-gray-400 border-gray-500/20',
-  assigned: 'bg-cyan-500/10 text-cyan-400 border-cyan-500/20',
-  needs_review: 'bg-orange-500/10 text-orange-400 border-orange-500/20',
-  needs_intervention: 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20',
+  pending: 'bg-gray-500/15 text-gray-400 border-gray-500/30',
+  in_progress: 'bg-green-500/15 text-green-400 border-green-500/30',
+  completed: 'bg-blue-500/100/15 text-blue-400 border-blue-500/30',
+  failed: 'bg-red-500/100/15 text-red-400 border-red-500/30',
+  blocked: 'bg-yellow-500/15 text-yellow-400 border-yellow-500/30',
+  queued: 'bg-gray-500/15 text-gray-400 border-gray-500/30',
+  assigned: 'bg-cyan-500/15 text-cyan-400 border-cyan-500/30',
+  needs_review: 'bg-orange-500/100/15 text-orange-400 border-orange-500/30',
+  needs_intervention: 'bg-yellow-500/15 text-yellow-400 border-yellow-500/30',
 };
 
 /** Auto-detect document type from filename */
@@ -321,7 +321,7 @@ export function TaskList({ selectedModel }: TaskListProps) {
                   <span className="text-[9px] text-muted-foreground">Clear {asanaTaskCount} Asana tasks?</span>
                   <button
                     onClick={handleClearAsanaTasks}
-                    className="text-[9px] text-red-400 hover:text-red-300 font-semibold px-1.5 py-0.5 bg-red-500/20 rounded"
+                    className="text-[9px] text-red-400 hover:text-red-300 font-semibold px-1.5 py-0.5 bg-red-500/100/20 rounded"
                   >
                     Yes
                   </button>
@@ -346,7 +346,7 @@ export function TaskList({ selectedModel }: TaskListProps) {
             {hasAsana && (
               <button
                 onClick={() => setShowImportDrawer(true)}
-                className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-medium bg-orange-500/15 text-orange-400 hover:bg-orange-500/25 transition-colors"
+                className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-medium bg-orange-500/100/15 text-orange-400 hover:bg-orange-500/100/25 transition-colors"
               >
                 <IconAsana className="w-3 h-3" />
                 Import from Asana
@@ -403,7 +403,7 @@ export function TaskList({ selectedModel }: TaskListProps) {
                       <div className="flex items-center gap-1.5 px-2 mb-1">
                         <IconAsana className="w-3.5 h-3.5 text-orange-400" />
                         <span className="text-xs font-semibold text-muted-foreground">Asana Tasks</span>
-                        <span className="text-[10px] text-muted-foreground/60">({asanaTasks.length})</span>
+                        <span className="text-[10px] text-muted-foreground">({asanaTasks.length})</span>
                       </div>
                       <div className="space-y-0.5">
                         {renderTaskRows(asanaTasks)}
@@ -414,7 +414,7 @@ export function TaskList({ selectedModel }: TaskListProps) {
                     <div>
                       <div className="flex items-center gap-1.5 px-2 mb-1">
                         <span className="text-xs font-semibold text-muted-foreground">Manual Tasks</span>
-                        <span className="text-[10px] text-muted-foreground/60">({manualTasks.length})</span>
+                        <span className="text-[10px] text-muted-foreground">({manualTasks.length})</span>
                       </div>
                       <div className="space-y-0.5">
                         {renderTaskRows(manualTasks)}
@@ -630,13 +630,13 @@ export function TaskList({ selectedModel }: TaskListProps) {
                           ));
                         }}
                         className={`px-1.5 py-0.5 rounded text-[9px] font-medium cursor-pointer hover:opacity-80 transition-opacity ${
-                          sf.docType === 'SA' ? 'bg-blue-500/15 text-blue-400' :
+                          sf.docType === 'SA' ? 'bg-blue-500/100/15 text-blue-400' :
                           sf.docType === 'SD' ? 'bg-purple-500/15 text-purple-400' :
                           'bg-green-500/15 text-green-400'
                         }`}
                         title="點擊切換類型"
                       >{sf.docType === 'image' ? 'IMG' : sf.docType}</button>
-                      <span className="text-foreground/70 truncate flex-1">{sf.file.name}</span>
+                      <span className="text-foreground/80 truncate flex-1">{sf.file.name}</span>
                       <button
                         onClick={() => setStagedFiles(prev => prev.filter((_, idx) => idx !== i))}
                         className="text-muted-foreground hover:text-red-400 transition-colors"
@@ -806,13 +806,13 @@ function TaskRow({ task, confirmDeleteId, expandedTaskId, onExecute, onDelete, o
   }, [onBrowseSvn, handleAddSvnFile]);
 
   return (
-    <div className={isExpanded ? 'rounded-lg border border-border/60 bg-muted/50 shadow-sm' : ''}>
+    <div className={isExpanded ? 'rounded-lg border border-border/60 bg-muted/40 shadow-sm' : ''}>
       <div
         className={`flex items-center gap-1.5 px-2 py-1.5 rounded-md hover:bg-muted/50 group transition-colors cursor-pointer ${isExpanded ? 'rounded-b-none border-b border-border/40' : ''}`}
         onClick={() => onToggleExpand(task.id)}
       >
         {/* Expand arrow */}
-        <button className="p-0 text-muted-foreground/50 flex-shrink-0">
+        <button className="p-0 text-muted-foreground/70 flex-shrink-0">
           {isExpanded
             ? <IconChevronDown className="w-3.5 h-3.5" />
             : <IconChevronRight className="w-3.5 h-3.5" />
@@ -842,7 +842,7 @@ function TaskRow({ task, confirmDeleteId, expandedTaskId, onExecute, onDelete, o
         </span>
 
         {/* Status — fixed width for alignment */}
-        <span className={`text-[11px] font-medium flex-shrink-0 w-[6.5rem] text-center px-2 py-0.5 rounded border ${STATUS_STYLES[task.status] || 'bg-gray-500/10 text-gray-400 border-gray-500/20'}`}>
+        <span className={`text-[11px] font-medium flex-shrink-0 w-[6.5rem] text-center px-2 py-0.5 rounded border ${STATUS_STYLES[task.status] || 'bg-gray-500/15 text-gray-400 border-gray-500/30'}`}>
           {task.status.replace(/_/g, ' ')}
         </span>
 
@@ -866,7 +866,7 @@ function TaskRow({ task, confirmDeleteId, expandedTaskId, onExecute, onDelete, o
             <div className="flex items-center gap-0.5 animate-fade-in">
               <button
                 onClick={() => onDelete(task.id)}
-                className="text-[10px] text-red-400 hover:text-red-300 font-semibold px-1.5 py-0.5 bg-red-500/20 rounded"
+                className="text-[10px] text-red-400 hover:text-red-300 font-semibold px-1.5 py-0.5 bg-red-500/100/20 rounded"
               >
                 Yes
               </button>
@@ -881,7 +881,7 @@ function TaskRow({ task, confirmDeleteId, expandedTaskId, onExecute, onDelete, o
             !isRunning && (
               <button
                 onClick={() => onConfirmDelete(task.id)}
-                className="p-1 rounded text-muted-foreground/40 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+                className="p-1 rounded text-muted-foreground/70 hover:text-red-400 hover:bg-red-500/10 transition-colors"
                 title="Delete task"
               >
                 <IconTrash className="w-3.5 h-3.5" />
@@ -1090,12 +1090,12 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
           <div className="flex items-center gap-2 mb-2">
             <span className="text-sm text-muted-foreground font-semibold">SVN Spec</span>
             {task.parentName && (
-              <span className="px-2 py-0.5 rounded text-xs font-mono bg-muted text-foreground/70">{task.parentName}</span>
+              <span className="px-2 py-0.5 rounded text-xs font-mono bg-muted text-foreground/80">{task.parentName}</span>
             )}
             {onReloadSvn && (
               <button
                 onClick={onReloadSvn}
-                className="p-1 rounded text-muted-foreground/50 hover:text-primary hover:bg-primary/10 transition-colors"
+                className="p-1 rounded text-muted-foreground/70 hover:text-primary hover:bg-primary/10 transition-colors"
                 title="重新搜尋"
                 disabled={svnPreviewLoading}
               >
@@ -1127,7 +1127,7 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
               {svnPreviewFiles.map((f, i) => (
                 <div key={i} className="flex items-center gap-2.5 text-sm group">
                   <span className={`px-2 py-0.5 rounded text-[10px] font-medium flex-shrink-0 ${
-                    f.svnRoot === 'frontend' ? 'bg-blue-500/15 text-blue-400' : 'bg-orange-500/15 text-orange-400'
+                    f.svnRoot === 'frontend' ? 'bg-blue-500/100/15 text-blue-400' : 'bg-orange-500/100/15 text-orange-400'
                   }`}>
                     {f.svnRoot === 'frontend' ? '前端' : '後端'}
                   </span>
@@ -1146,7 +1146,7 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
                   {f.manual && onRemoveSvnFile && (
                     <button
                       onClick={() => onRemoveSvnFile(i)}
-                      className="p-1 rounded text-muted-foreground/30 hover:text-red-400 hover:bg-red-500/10 transition-colors opacity-0 group-hover:opacity-100"
+                      className="p-1 rounded text-muted-foreground/70 hover:text-red-400 hover:bg-red-500/10 transition-colors opacity-0 group-hover:opacity-100"
                       title="移除"
                     >
                       <IconTrash className="w-3.5 h-3.5" />
@@ -1154,12 +1154,12 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
                   )}
                 </div>
               ))}
-              <p className="text-xs text-muted-foreground/60 mt-1.5">
+              <p className="text-xs text-muted-foreground mt-1.5">
                 以上 {svnPreviewFiles.length} 份文件將於執行時自動下載並注入 Agent context。
               </p>
             </div>
           ) : (
-            <p className="text-sm text-muted-foreground/60 italic py-1">未找到匹配的 SVN 規格文件，可手動新增。</p>
+            <p className="text-sm text-muted-foreground italic py-1">未找到匹配的 SVN 規格文件，可手動新增。</p>
           )}
         </div>
       )}
@@ -1193,10 +1193,17 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
       <div className="flex items-center justify-between pt-2 border-t border-border/50 mt-2">
         <div className="flex items-center gap-2">
           {isAsana && task.sourceRef && (
-            <>
-              <IconAsana className="w-3.5 h-3.5 text-orange-400" />
-              <span className="text-xs text-muted-foreground">Asana GID: {task.sourceRef}</span>
-            </>
+            <a
+              href={`https://app.asana.com/0/0/${task.sourceRef}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 text-xs text-orange-400 hover:text-orange-300 hover:underline transition-colors"
+              onClick={e => e.stopPropagation()}
+            >
+              <IconAsana className="w-3.5 h-3.5" />
+              Open in Asana
+              <IconExternalLink className="w-3 h-3" />
+            </a>
           )}
         </div>
         {onExecute && task.status !== 'in_progress' && task.status !== 'assigned' && task.status !== 'completed' && (
