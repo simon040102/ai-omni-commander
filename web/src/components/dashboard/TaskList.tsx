@@ -746,12 +746,12 @@ function TaskRow({ task, confirmDeleteId, expandedTaskId, onExecute, onDelete, o
       payload: {
         projectId: currentProjectId,
         taskId: task.id,
-        taskLabel: task.label,
+        taskLabel: 'all',  // Always search both frontend + backend SVN roots for preview
       },
     });
 
     return unsub;
-  }, [isExpanded, client, currentProjectId, hasSvnConfig, task.id, task.parentName, task.label]);
+  }, [isExpanded, client, currentProjectId, hasSvnConfig, task.id, task.parentName]);
 
   return (
     <div>
