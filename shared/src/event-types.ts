@@ -15,6 +15,7 @@ export const EventTypes = {
   AGENT_PAUSED: 'agent.paused',
   AGENT_PLAN_READY: 'agent.planReady',
   AGENT_INITIAL_PROMPT: 'agent.initialPrompt',
+  AGENT_PROGRESS: 'agent.progress',
 
   TASK_STATUS_CHANGED: 'task.statusChanged',
   TASK_DISPATCHED: 'task.dispatched',
@@ -25,6 +26,7 @@ export const EventTypes = {
 
   REVIEW_REQUESTED: 'review.requested',
   REVIEW_COMPLETED: 'review.completed',
+  TASK_RETRYING: 'task.retrying',
 
   TEST_TRIGGERED: 'test.triggered',
   TEST_COMPLETED: 'test.completed',

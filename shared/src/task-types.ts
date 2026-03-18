@@ -1,3 +1,7 @@
+export type TaskType = 'bug' | 'feature' | 'refactor' | 'other';
+
+export type TaskSource = 'manual' | 'asana';
+
 export type TaskLabel =
   | 'backend'
   | 'frontend'
@@ -30,6 +34,13 @@ export interface Task {
   resultSummary: string | null;
   retryCount: number;
   maxRetries: number;
+  taskType: TaskType;
+  source: TaskSource;
+  sourceRef: string | null;
+  branchName: string | null;
+  specUrl: string | null;
+  preferredModel: string | null;
+  parentName: string | null;
   createdAt: string;
   updatedAt: string;
 }

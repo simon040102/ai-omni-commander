@@ -43,7 +43,7 @@ export class CreativeModeHandler {
     const project = getProject(projectId);
     if (!project) throw new Error(`Project ${projectId} not found`);
 
-    updateProject(projectId, { status: 'interviewing' });
+    updateProject(projectId, { status: 'planning' });
 
     const config = getConfig();
     const roleConfig = getAgentRoleConfig('architect');

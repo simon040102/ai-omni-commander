@@ -31,8 +31,10 @@ export class DocumentParser {
     content: string,
     fileType: string,
     docType: DocType = 'SD',
+    opts?: { source?: 'upload' | 'svn'; sourceUrl?: string; svnLastModified?: string },
   ): Promise<ParsedDocument> {
     const id = genId();
+    const source = opts?.source || 'upload';
 
     // Ensure upload directory exists
     await fs.mkdir(this.uploadDir, { recursive: true });
@@ -62,13 +64,72 @@ export class DocumentParser {
     // Store in DB
     const db = getDb();
     db.prepare(`
-      INSERT INTO documents (id, project_id, filename, file_path, file_type, doc_type, parsed_text)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(id, projectId, filename, filePath, fileType, docType, textContent);
+      INSERT INTO documents (id, project_id, filename, file_path, file_type, doc_type, parsed_text, source, source_url, svn_last_modified)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, projectId, filename, filePath, fileType, docType, textContent,
+      source, opts?.sourceUrl || null, opts?.svnLastModified || null);
 
-    logger.info({ id, filename, fileType, docType, filePath }, 'Document saved');
+    logger.info({ id, filename, fileType, docType, filePath, source }, 'Document saved');
 
     return { id, filename, filePath, content: textContent, fileType, docType };
+  }
+
+  /** Save a pre-downloaded binary file (for SVN exports) */
+  async saveFromBuffer(
+    projectId: string,
+    filename: string,
+    buffer: Buffer,
+    docType: DocType = 'SD',
+    opts?: { source?: 'upload' | 'svn'; sourceUrl?: string; svnLastModified?: string; parsedText?: string },
+  ): Promise<ParsedDocument> {
+    const id = genId();
+    const source = opts?.source || 'upload';
+
+    await fs.mkdir(this.uploadDir, { recursive: true });
+
+    const filePath = path.join(this.uploadDir, `${id}-${filename}`);
+    await fs.writeFile(filePath, buffer);
+
+    const textContent = opts?.parsedText || `[Binary file saved at: ${filePath}]`;
+
+    const db = getDb();
+    db.prepare(`
+      INSERT INTO documents (id, project_id, filename, file_path, file_type, doc_type, parsed_text, source, source_url, svn_last_modified)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, projectId, filename, filePath, 'binary', docType, textContent,
+      source, opts?.sourceUrl || null, opts?.svnLastModified || null);
+
+    logger.info({ id, filename, filePath, source }, 'Document saved from buffer');
+
+    return { id, filename, filePath, content: textContent, fileType: 'binary', docType };
+  }
+
+  /** Find a document by its SVN source URL */
+  findBySourceUrl(projectId: string, sourceUrl: string): {
+    id: string; filename: string; filePath: string; svnLastModified: string | null;
+  } | null {
+    const db = getDb();
+    const row = db.prepare(
+      "SELECT id, filename, file_path, svn_last_modified FROM documents WHERE project_id = ? AND source_url = ?"
+    ).get(projectId, sourceUrl) as { id: string; filename: string; file_path: string; svn_last_modified: string | null } | undefined;
+    if (!row) return null;
+    return { id: row.id, filename: row.filename, filePath: row.file_path, svnLastModified: row.svn_last_modified };
+  }
+
+  /** Update SVN last modified date and re-save file content */
+  async updateSvnDocument(documentId: string, buffer: Buffer, svnLastModified: string, parsedText?: string): Promise<void> {
+    const db = getDb();
+    const row = db.prepare('SELECT file_path FROM documents WHERE id = ?').get(documentId) as { file_path: string } | undefined;
+    if (!row) return;
+
+    await fs.writeFile(row.file_path, buffer);
+
+    const text = parsedText || `[Binary file saved at: ${row.file_path}]`;
+    db.prepare(
+      "UPDATE documents SET svn_last_modified = ?, parsed_text = ?, created_at = datetime('now') WHERE id = ?"
+    ).run(svnLastModified, text, documentId);
+
+    logger.info({ documentId, svnLastModified }, 'SVN document updated');
   }
 
   /** Get all documents for a project */

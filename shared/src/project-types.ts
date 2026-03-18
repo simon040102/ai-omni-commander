@@ -1,7 +1,3 @@
-export type ProjectMode = 'spec' | 'creative' | 'quick';
-
-export type QuickTaskType = 'bug' | 'change' | 'refactor' | 'other';
-
 export type SuperpowersFeature = 'brainstorm' | 'tdd' | 'debugging';
 
 export interface SuperpowersConfig {
@@ -10,8 +6,8 @@ export interface SuperpowersConfig {
 }
 
 export type ProjectStatus =
+  | 'idle'
   | 'setup'
-  | 'interviewing'
   | 'planning'
   | 'executing'
   | 'paused'
@@ -21,9 +17,12 @@ export type ProjectStatus =
 export interface Project {
   id: string;
   name: string;
-  mode: ProjectMode;
   status: ProjectStatus;
   workingDir: string;
+  frontendPath: string | null;
+  backendPath: string | null;
+  asanaProjectGid: string | null;
+  dbConnectionString: string | null;
   configJson: string | null;
   createdAt: string;
   updatedAt: string;
@@ -38,25 +37,37 @@ export interface PlanConfig {
   requireApproval: boolean;  // If true, agent pauses after [PLAN_READY] and waits for approval
 }
 
+export interface AsanaSyncConfig {
+  enabled: boolean;
+  intervalMinutes: number;
+  autoExecuteRules: {
+    bug: boolean;
+    feature: boolean;
+    refactor: boolean;
+    other: boolean;
+  };
+  maxConcurrentAgents: number;
+}
+
+export interface SvnConfig {
+  frontendSpecPath: string;  // SVN root for frontend specs
+  backendSpecPath: string;   // SVN root for backend specs
+}
+
+/** SVN credentials stored in global config (not per-project) */
+export interface SvnCredentials {
+  username: string;
+  password: string;
+}
+
 export interface ProjectConfig {
-  workspaces?: Workspace[];
   maxConcurrentAgents?: number;
   defaultModel?: string;
   autoReview?: boolean;
-  autoTest?: boolean;
-  // Superpowers methodology
-  superpowers?: SuperpowersConfig;
-  // Plan approval workflow
   planConfig?: PlanConfig;
-  // Quick Mode specific
-  quickTask?: {
-    type: QuickTaskType;
-    description: string;
-    errorLog?: string;
-    relatedFiles?: string[];
-    role?: 'backend' | 'frontend' | 'devops' | 'testing';
-    useWorkspaceSkills?: boolean;
-  };
+  autoExecuteConfig?: { bug: boolean; feature: boolean; refactor: boolean };
+  asanaSyncConfig?: AsanaSyncConfig;
+  svnConfig?: SvnConfig;
 }
 
 /** Stored plan for an agent */
@@ -80,6 +91,9 @@ export interface Document {
   fileType: string | null;
   docType: DocType | null;
   parsedText: string | null;
+  source: 'upload' | 'svn';
+  sourceUrl: string | null;
+  svnLastModified: string | null;
   createdAt: string;
 }
 

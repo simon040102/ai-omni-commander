@@ -6,10 +6,14 @@ import { IconChevronRight, IconSun, IconMoon } from '../ui/Icons';
 import type { View } from './AppShell';
 
 const VIEW_LABELS: Record<string, string> = {
-  dashboard: 'Dashboard',
-  setup: 'New Project',
+  home: 'Home',
   tasks: 'Tasks',
+  setup: 'New Project',
+  'new-task': 'Quick Run',
   events: 'Events',
+  agents: 'Agents',
+  'db-explorer': 'DB Explorer',
+  settings: 'Settings',
 };
 
 interface HeaderProps {
@@ -30,7 +34,7 @@ export function Header({ currentView, onViewChange }: HeaderProps) {
       {/* Left: Breadcrumb */}
       <div className="flex items-center gap-1.5 min-w-0">
         <button
-          onClick={() => onViewChange('dashboard')}
+          onClick={() => onViewChange('home')}
           className="text-lg font-bold text-primary hover:text-primary/80 transition-colors whitespace-nowrap"
         >
           AI-OmniCommander
@@ -40,20 +44,23 @@ export function Header({ currentView, onViewChange }: HeaderProps) {
           <>
             <IconChevronRight className="w-3.5 h-3.5 text-muted-foreground/40 flex-shrink-0" />
             <button
-              onClick={() => onViewChange('dashboard')}
+              onClick={() => onViewChange('tasks')}
               className="text-sm text-muted-foreground hover:text-foreground transition-colors truncate max-w-[200px]"
             >
               {currentProject.name}
             </button>
 
-            {/* Mode badge */}
-            <span className={`text-[10px] px-2 py-0.5 rounded-full flex-shrink-0 ${
-              currentProject.mode === 'spec'
-                ? 'bg-blue-500/15 text-blue-400'
-                : 'bg-purple-500/15 text-purple-400'
-            }`}>
-              {currentProject.mode === 'spec' ? 'Spec' : 'Creative'}
-            </span>
+            {/* FE/BE path badges */}
+            {currentProject.frontendPath && (
+              <span className="text-[10px] px-2 py-0.5 rounded-full flex-shrink-0 bg-blue-500/15 text-blue-400" title={currentProject.frontendPath}>
+                FE
+              </span>
+            )}
+            {currentProject.backendPath && (
+              <span className="text-[10px] px-2 py-0.5 rounded-full flex-shrink-0 bg-purple-500/15 text-purple-400" title={currentProject.backendPath}>
+                BE
+              </span>
+            )}
 
             {/* Status badge */}
             <span className={`text-[10px] px-2 py-0.5 rounded-full flex-shrink-0 ${
@@ -71,7 +78,7 @@ export function Header({ currentView, onViewChange }: HeaderProps) {
         )}
 
         {/* Current view label (if not dashboard) */}
-        {currentView !== 'dashboard' && currentView !== 'setup' && (
+        {currentView !== 'home' && currentView !== 'tasks' && currentView !== 'setup' && (
           <>
             <IconChevronRight className="w-3.5 h-3.5 text-muted-foreground/40 flex-shrink-0" />
             <span className="text-sm text-foreground font-medium whitespace-nowrap">

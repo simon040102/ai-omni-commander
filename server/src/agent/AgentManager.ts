@@ -6,6 +6,7 @@ import type {
 import { EventTypes } from '@omni/shared';
 import { AgentProcess } from './AgentProcess.js';
 import { getAgentRoleConfig } from './AgentRoles.js';
+import { ProgressDetector } from './ProgressDetector.js';
 import { createAgent, updateAgent, getAgent, getAgentsByRole, getAgentsByProject } from '../db/queries/agents.js';
 import { getProject, updateProject } from '../db/queries/projects.js';
 import { updateTask, getTask } from '../db/queries/tasks.js';
@@ -23,6 +24,7 @@ const logger = createChildLogger('AgentManager');
  */
 export class AgentManager {
   private processes = new Map<string, AgentProcess>();
+  private progressDetector = new ProgressDetector();
 
   constructor(
     private eventBus: EventBus,
@@ -43,10 +45,18 @@ export class AgentManager {
       systemPrompt += `\n\nCurrent API Contracts:\n${JSON.stringify(contracts, null, 2)}`;
     }
 
+    // Auto-generate title from task or role
+    let agentTitle: string | undefined;
+    if (config.taskId) {
+      const task = getTask(config.taskId);
+      if (task) agentTitle = task.title;
+    }
+
     // Create DB record
     const agent = createAgent({
       projectId: config.projectId,
       role: config.role,
+      title: agentTitle,
       systemPrompt,
       model: config.model || roleConfig.model,
       allowedTools: roleConfig.allowedTools,
@@ -312,7 +322,7 @@ export class AgentManager {
       this.eventBus.emit({
         type: EventTypes.AGENT_STARTED,
         source: agentId,
-        payload: { agentId, role: proc.role, projectId, model: msg.model },
+        payload: { agentId, role: proc.role, projectId, model: msg.model, taskId, title: getAgent(agentId)?.title },
         timestamp: new Date().toISOString(),
       });
     });
@@ -343,6 +353,19 @@ export class AgentManager {
       if (output.streamType === 'text') {
         this.checkMarkers(agentId, projectId, taskId, output.content);
       }
+
+      // Detect progress changes (non-streaming only to avoid noise)
+      if (!output.isStreaming) {
+        const progress = this.progressDetector.processOutput(agentId, output);
+        if (progress) {
+          this.eventBus.emit({
+            type: EventTypes.AGENT_PROGRESS,
+            source: agentId,
+            payload: progress as unknown as Record<string, unknown>,
+            timestamp: new Date().toISOString(),
+          });
+        }
+      }
     });
 
     proc.on('result', (result: ClaudeStreamResult) => {
@@ -372,7 +395,15 @@ export class AgentManager {
       return config.projectRoot;
     }
 
-    // Check if workspaces are configured
+    // Role-based path resolution (frontendPath / backendPath)
+    if (role === 'frontend' && project.frontendPath) {
+      return project.frontendPath;
+    }
+    if (role === 'backend' && project.backendPath) {
+      return project.backendPath;
+    }
+
+    // Check if workspaces are configured (legacy)
     if (project.configJson) {
       try {
         const cfg = JSON.parse(project.configJson) as { workspaces?: Workspace[] };
@@ -399,6 +430,7 @@ export class AgentManager {
     taskId: string | null,
     result: ClaudeStreamResult,
   ): Promise<void> {
+    this.progressDetector.clear(agentId);
     updateAgent(agentId, {
       status: 'stopped',
       totalCostUsd: result.cost_usd,
@@ -511,6 +543,11 @@ export class AgentManager {
     if (/(?:^|\n)\s*\[PLAN_READY\]/.test(content)) {
       this.extractAndSavePlan(agentId, projectId);
     }
+
+    // Check for [REVIEW_COMPLETE] marker — extract structured review JSON
+    if (/(?:^|\n)\s*\[REVIEW_COMPLETE\]/.test(content)) {
+      this.extractAndSaveReview(agentId, projectId, taskId);
+    }
   }
 
   /** Extract plan content from recent agent outputs and save to DB */
@@ -574,6 +611,71 @@ export class AgentManager {
           // and provide approve/reject buttons.
         }
       } catch { /* ignore parse errors */ }
+    }
+  }
+
+  /** Extract structured review JSON from recent agent outputs and save */
+  private async extractAndSaveReview(agentId: string, projectId: string, taskId: string | null): Promise<void> {
+    const agent = getAgent(agentId);
+    if (!agent) return;
+
+    const outputs = getAgentOutputs(agentId, 100);
+    const textContent = outputs
+      .filter(o => o.streamType === 'text')
+      .reverse()
+      .map(o => o.content)
+      .join('\n');
+
+    // Extract JSON from ```json...``` code block
+    const jsonMatch = textContent.match(/```json\s*\n?([\s\S]*?)\n?\s*```/);
+    if (!jsonMatch) {
+      logger.warn({ agentId }, 'REVIEW_COMPLETE marker found but no JSON block extracted');
+      // Emit with a fallback result
+      await this.eventBus.emit({
+        type: EventTypes.REVIEW_COMPLETED,
+        source: agentId,
+        payload: {
+          projectId,
+          taskId: taskId?.replace('review-', '') || null,
+          agentId,
+          result: { verdict: 'pass', score: 50, issues: [], summary: 'Review completed (no structured output)' },
+        },
+        timestamp: new Date().toISOString(),
+      });
+      return;
+    }
+
+    try {
+      // Lenient parse: strip trailing commas
+      const cleanJson = jsonMatch[1].replace(/,\s*([\]}])/g, '$1');
+      const result = JSON.parse(cleanJson);
+
+      // Validate minimum structure
+      if (!result.verdict || typeof result.score !== 'number') {
+        throw new Error('Invalid review JSON structure');
+      }
+
+      // Save to agents table
+      updateAgent(agentId, { reviewResultJson: JSON.stringify(result) });
+
+      // Resolve original taskId (strip "review-" prefix)
+      const originalTaskId = taskId?.replace('review-', '') || null;
+
+      logger.info({ agentId, projectId, verdict: result.verdict, score: result.score }, 'Review result extracted');
+
+      await this.eventBus.emit({
+        type: EventTypes.REVIEW_COMPLETED,
+        source: agentId,
+        payload: {
+          projectId,
+          taskId: originalTaskId,
+          agentId,
+          result,
+        },
+        timestamp: new Date().toISOString(),
+      });
+    } catch (err) {
+      logger.error({ err, agentId }, 'Failed to parse review JSON');
     }
   }
 

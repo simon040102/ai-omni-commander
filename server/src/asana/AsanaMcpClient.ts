@@ -157,6 +157,163 @@ export class AsanaMcpClient {
     }
   }
 
+  /** Fetch projects in the workspace */
+  async getProjects(workspace?: string): Promise<Array<{ gid: string; name: string }>> {
+    if (!this.config.asanaPat) {
+      throw new Error('ASANA_PAT not configured');
+    }
+
+    logger.info('Fetching Asana projects...');
+
+    try {
+      // Get workspace GID
+      const userResponse = await fetch(`${ASANA_API_BASE}/users/me`, {
+        headers: {
+          'Authorization': `Bearer ${this.config.asanaPat}`,
+          'Accept': 'application/json',
+        },
+      });
+
+      if (!userResponse.ok) {
+        throw new Error(`Failed to get user info: ${userResponse.status}`);
+      }
+
+      const userData = await userResponse.json();
+      const workspaces = userData.data?.workspaces || [];
+      const workspaceGid = workspace || this.config.asanaWorkspace || workspaces[0]?.gid;
+
+      if (!workspaceGid) {
+        throw new Error('No workspace found');
+      }
+
+      const url = `${ASANA_API_BASE}/projects?workspace=${workspaceGid}&limit=100&opt_fields=name,archived`;
+      const response = await fetch(url, {
+        headers: {
+          'Authorization': `Bearer ${this.config.asanaPat}`,
+          'Accept': 'application/json',
+        },
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Failed to fetch projects: ${response.status} ${errorText}`);
+      }
+
+      const data = await response.json();
+      const projects = (data.data || [])
+        .filter((p: Record<string, unknown>) => !p['archived'])
+        .map((p: Record<string, unknown>) => ({
+          gid: String(p['gid'] || ''),
+          name: String(p['name'] || ''),
+        }));
+
+      logger.info({ count: projects.length }, 'Fetched Asana projects');
+      this._connected = true;
+      return projects;
+    } catch (error) {
+      logger.error({ error }, 'Failed to fetch Asana projects');
+      throw error;
+    }
+  }
+
+  /** Fetch tasks for a specific Asana project */
+  async getProjectTasks(projectGid: string, options?: { limit?: number; includeCompleted?: boolean }): Promise<AsanaTask[]> {
+    if (!this.config.asanaPat) {
+      throw new Error('ASANA_PAT not configured');
+    }
+
+    logger.info({ projectGid }, 'Fetching Asana project tasks...');
+
+    try {
+      const limit = options?.limit || 100;
+      const completedSince = options?.includeCompleted ? '' : '&completed_since=now';
+
+      const url = `${ASANA_API_BASE}/tasks?project=${projectGid}&limit=${limit}${completedSince}&opt_fields=name,notes,due_on,completed,permalink_url,projects.name,projects.gid,tags.name,parent.gid,parent.name,parent.notes`;
+
+      const response = await fetch(url, {
+        headers: {
+          'Authorization': `Bearer ${this.config.asanaPat}`,
+          'Accept': 'application/json',
+        },
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Failed to fetch project tasks: ${response.status} ${errorText}`);
+      }
+
+      const data = await response.json();
+      const tasks = (data.data || []).map((task: Record<string, unknown>) => this.mapToAsanaTask(task));
+
+      logger.info({ projectGid, count: tasks.length }, 'Fetched Asana project tasks');
+      this._connected = true;
+      return tasks;
+    } catch (error) {
+      logger.error({ error, projectGid }, 'Failed to fetch Asana project tasks');
+      throw error;
+    }
+  }
+
+  /** Fetch tasks assigned to the current user in a specific Asana project */
+  async getMyTasksForProject(projectGid: string, options?: { limit?: number; includeCompleted?: boolean }): Promise<AsanaTask[]> {
+    if (!this.config.asanaPat) {
+      throw new Error('ASANA_PAT not configured');
+    }
+
+    logger.info({ projectGid }, 'Fetching my tasks for Asana project...');
+
+    try {
+      // Get user info for workspace GID
+      const userResponse = await fetch(`${ASANA_API_BASE}/users/me`, {
+        headers: {
+          'Authorization': `Bearer ${this.config.asanaPat}`,
+          'Accept': 'application/json',
+        },
+      });
+
+      if (!userResponse.ok) {
+        throw new Error(`Failed to get user info: ${userResponse.status}`);
+      }
+
+      const userData = await userResponse.json();
+      const userGid = userData.data?.gid;
+      const workspaces = userData.data?.workspaces || [];
+      const workspaceGid = this.config.asanaWorkspace || workspaces[0]?.gid;
+
+      if (!userGid || !workspaceGid) {
+        throw new Error('Could not get user GID or workspace');
+      }
+
+      // Use Asana search API to filter by assignee AND project
+      const completedFilter = options?.includeCompleted ? '' : '&completed=false';
+      const limit = options?.limit || 100;
+
+      const url = `${ASANA_API_BASE}/workspaces/${workspaceGid}/tasks/search?assignee.any=${userGid}&projects.any=${projectGid}${completedFilter}&limit=${limit}&opt_fields=name,notes,due_on,completed,permalink_url,projects.name,projects.gid,tags.name,parent.gid,parent.name,parent.notes`;
+
+      const response = await fetch(url, {
+        headers: {
+          'Authorization': `Bearer ${this.config.asanaPat}`,
+          'Accept': 'application/json',
+        },
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Failed to search tasks: ${response.status} ${errorText}`);
+      }
+
+      const data = await response.json();
+      const tasks = (data.data || []).map((task: Record<string, unknown>) => this.mapToAsanaTask(task));
+
+      logger.info({ projectGid, count: tasks.length }, 'Fetched my tasks for Asana project');
+      this._connected = true;
+      return tasks;
+    } catch (error) {
+      logger.error({ error, projectGid }, 'Failed to fetch my tasks for Asana project');
+      throw error;
+    }
+  }
+
   /** Fetch stories (comments) for a specific task */
   async getTaskStories(taskGid: string): Promise<Array<{ author: string; text: string; createdAt: string }>> {
     if (!this.config.asanaPat) {

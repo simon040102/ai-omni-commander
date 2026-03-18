@@ -27,6 +27,7 @@ export interface AgentUsage {
 export interface Agent {
   id: string;
   projectId: string;
+  title: string | null;
   role: AgentRole;
   status: AgentStatus;
   sessionId: string | null;
@@ -79,4 +80,14 @@ export interface AgentOutputEvent {
   toolName?: string;
   toolInput?: Record<string, unknown>;
   timestamp: string;
+}
+
+export interface AgentProgress {
+  agentId: string;
+  completedSteps: number;
+  totalSteps: number;
+  currentPhase: string;
+  fileWrites: number;
+  toolUses: number;
+  percentage: number;
 }

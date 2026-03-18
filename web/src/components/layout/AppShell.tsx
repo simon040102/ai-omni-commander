@@ -6,14 +6,14 @@ import { useWebSocket } from '../../hooks/useWebSocket';
 import { useProjectStore } from '../../stores/projectStore';
 import { initTabNotification } from '../../lib/tabNotification';
 
-export type View = 'dashboard' | 'tasks' | 'setup' | 'events' | 'asana' | 'agents';
+export type View = 'home' | 'setup' | 'new-task' | 'tasks' | 'agents' | 'events' | 'db-explorer' | 'settings';
 
 interface AppShellProps {
   children: (view: View, onViewChange: (v: View) => void) => React.ReactNode;
 }
 
 export function AppShell({ children }: AppShellProps) {
-  const [currentView, setCurrentView] = useState<View>('setup');
+  const [currentView, setCurrentView] = useState<View>('home');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const agents = useProjectStore(s => s.agents);
   const hasAutoSwitched = useRef(false);
@@ -35,9 +35,9 @@ export function AppShell({ children }: AppShellProps) {
 
   // Auto-switch to dashboard when agents appear (only on initial load, not after user navigation)
   useEffect(() => {
-    if (agents.length > 0 && !hasAutoSwitched.current && !userHasNavigated.current && currentView === 'setup') {
+    if (agents.length > 0 && !hasAutoSwitched.current && !userHasNavigated.current && (currentView === 'home' || currentView === 'setup')) {
       hasAutoSwitched.current = true;
-      setCurrentView('dashboard');
+      setCurrentView('agents');
     }
   }, [agents.length, currentView]);
 

@@ -8,6 +8,7 @@ export class WsClient {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private messageQueue: unknown[] = [];
   private _connected = false;
+  private extraListeners = new Set<WsMessageHandler>();
 
   constructor(
     private url: string,
@@ -38,6 +39,9 @@ export class WsClient {
         try {
           const msg = JSON.parse(event.data as string);
           this.onMessage(msg);
+          for (const listener of this.extraListeners) {
+            listener(msg);
+          }
         } catch {
           console.warn('Invalid WebSocket message:', event.data);
         }
@@ -66,6 +70,12 @@ export class WsClient {
     } else {
       this.messageQueue.push(msg);
     }
+  }
+
+  /** Add a temporary message listener. Returns a cleanup function. */
+  addMessageListener(handler: WsMessageHandler): () => void {
+    this.extraListeners.add(handler);
+    return () => { this.extraListeners.delete(handler); };
   }
 
   disconnect(): void {

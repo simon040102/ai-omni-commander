@@ -21,7 +21,7 @@ export function ToastContainer() {
   if (toasts.length === 0) return null;
 
   return (
-    <div className="fixed top-4 right-4 z-[9999] flex flex-col gap-2 max-w-sm">
+    <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[9999] flex flex-col gap-2 max-w-sm">
       {toasts.map((toast) => {
         const style = TYPE_STYLES[toast.type] || TYPE_STYLES.info;
         const textColor = TYPE_TEXT[toast.type] || TYPE_TEXT.info;
@@ -29,7 +29,7 @@ export function ToastContainer() {
         return (
           <div
             key={toast.id}
-            className={`${style.bg} ${style.border} border rounded-lg px-4 py-3 shadow-lg backdrop-blur-sm animate-in slide-in-from-right-5 duration-200`}
+            className={`${style.bg} ${style.border} border rounded-lg px-4 py-3 shadow-lg backdrop-blur-sm animate-in slide-in-from-top-5 duration-200`}
           >
             <div className="flex items-start gap-3">
               <span className={`${textColor} font-bold text-sm mt-0.5 w-4 text-center shrink-0`}>

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import type { QuickTaskType } from '@omni/shared';
+type QuickTaskType = 'bug' | 'feature' | 'refactor' | 'other';
 import { IconPlay, IconAsana } from '../ui/Icons';
+import { FolderPicker } from './FolderPicker';
 
 type QuickRole = 'backend' | 'frontend' | 'devops' | 'testing';
 
@@ -17,8 +18,8 @@ interface SkillInfo {
 }
 
 interface QuickModeSetupProps {
-  projectId: string;
-  workspacePath: string;
+  /** If provided, workspace picker is hidden and this path is used */
+  workspacePath?: string;
   selectedModel: string;
   onModelChange: (model: string) => void;
   onStartExecution: (quickTask: {
@@ -28,13 +29,14 @@ interface QuickModeSetupProps {
     relatedFiles?: string[];
     role?: QuickRole;
     useWorkspaceSkills?: boolean;
+    workspacePath: string;
   }) => void;
   importedTask?: ImportedTask;
 }
 
 const TASK_TYPES: { value: QuickTaskType; label: string; emoji: string; desc: string }[] = [
   { value: 'bug', label: 'Bug Fix', emoji: '\u{1F41B}', desc: 'Fix an error or unexpected behavior' },
-  { value: 'change', label: 'Small Change', emoji: '\u2728', desc: 'Minor feature or UI update' },
+  { value: 'feature', label: 'Feature / Change', emoji: '\u2728', desc: 'Minor feature or UI update' },
   { value: 'refactor', label: 'Refactor', emoji: '\u{1F527}', desc: 'Improve code structure' },
   { value: 'other', label: 'Other', emoji: '\u{1F4DD}', desc: 'General task' },
 ];
@@ -47,7 +49,7 @@ const ROLES: { value: QuickRole; label: string; emoji: string; desc: string }[] 
 ];
 
 export function QuickModeSetup({
-  workspacePath,
+  workspacePath: externalWorkspacePath,
   selectedModel,
   onModelChange,
   onStartExecution,
@@ -63,7 +65,11 @@ export function QuickModeSetup({
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [hasClaudeMd, setHasClaudeMd] = useState(false);
   const [skillsLoading, setSkillsLoading] = useState(false);
+  const [localWorkspacePath, setLocalWorkspacePath] = useState('');
   const hasAppliedImport = useRef(false);
+
+  const workspacePath = externalWorkspacePath ?? localWorkspacePath;
+  const showPathPicker = externalWorkspacePath === undefined;
 
   // Fetch available skills when workspace path changes
   const fetchSkills = useCallback(async (dir: string) => {
@@ -101,7 +107,7 @@ export function QuickModeSetup({
   }, [importedTask]);
 
   const handleStart = () => {
-    if (!description.trim()) return;
+    if (!description.trim() || !workspacePath.trim()) return;
 
     onStartExecution({
       type: taskType,
@@ -112,6 +118,7 @@ export function QuickModeSetup({
         : undefined,
       role,
       useWorkspaceSkills,
+      workspacePath: workspacePath.trim(),
     });
   };
 
@@ -123,6 +130,19 @@ export function QuickModeSetup({
           <IconAsana className="w-4 h-4 text-pink-500" />
           <span className="text-sm text-pink-400">Imported from Asana</span>
           <span className="text-xs text-muted-foreground ml-auto">GID: {importedTask.asanaGid}</span>
+        </div>
+      )}
+
+      {/* Workspace Path Picker (shown in standalone mode) */}
+      {showPathPicker && (
+        <div>
+          <label className="block text-sm font-medium mb-1">
+            Workspace Path <span className="text-red-400">*</span>
+          </label>
+          <p className="text-xs text-muted-foreground mb-2">
+            Select the project folder where the agent will work.
+          </p>
+          <FolderPicker value={localWorkspacePath} onChange={setLocalWorkspacePath} />
         </div>
       )}
 
@@ -184,7 +204,7 @@ export function QuickModeSetup({
           placeholder={
             taskType === 'bug'
               ? "e.g. When clicking the submit button, the form doesn't validate the email field. It should show an error if the email format is invalid."
-              : taskType === 'change'
+              : taskType === 'feature'
                 ? "e.g. Add a dark mode toggle button in the header next to the user profile icon."
                 : taskType === 'refactor'
                   ? "e.g. The useAuth hook has duplicated logic with useSession. Consolidate them into a single hook."
@@ -322,7 +342,7 @@ export function QuickModeSetup({
       {/* Start Button */}
       <button
         onClick={handleStart}
-        disabled={!description.trim()}
+        disabled={!description.trim() || !workspacePath.trim()}
         className="group inline-flex items-center gap-2 px-6 py-3 bg-amber-600 hover:bg-amber-500 disabled:bg-amber-600/50 disabled:cursor-not-allowed text-white rounded-lg text-sm font-semibold shadow-lg shadow-amber-600/20 hover:shadow-amber-500/30 transition-all"
       >
         <IconPlay className="w-4 h-4" />

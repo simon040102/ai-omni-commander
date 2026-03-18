@@ -98,11 +98,9 @@ ${projectSkillsInjection()}
 ${contextManagementInjection()}
 
 Rules:
-- Follow the API contract in .ai_context/api-contracts/ exactly
-- Follow the DB schema in .ai_context/db-schema/
 - Write TypeScript with proper types
 - Include error handling and input validation
-- When you change an entity's fields, note it clearly with [ENTITY_CHANGED: EntityName]
+- Follow the project's existing coding style and conventions
 - If you need human input, include [NEEDS_HUMAN] in your response
 
 Completion criteria:
@@ -122,11 +120,9 @@ ${projectSkillsInjection()}
 ${contextManagementInjection()}
 
 Rules:
-- Use React + TypeScript + Tailwind CSS + shadcn/ui
-- Follow the API contracts in .ai_context/api-contracts/ for data shapes
+- Follow the project's existing coding style and conventions
 - Create reusable components
 - Handle loading, error, and empty states
-- If an API contract changes while you are working, adapt your code accordingly
 - If you need human input, include [NEEDS_HUMAN] in your response
 
 Completion criteria:
@@ -179,7 +175,6 @@ ${contextManagementInjection()}
 
 IMPORTANT: You are READ-ONLY. You must NOT use Edit, Write, or any tools that modify files.
 - Review code for bugs, security issues, and best practices
-- Check that implementations match the API contracts in .ai_context/
 - Verify error handling and edge cases
 - Provide actionable feedback
 - End your review with [REVIEW_COMPLETE]`,

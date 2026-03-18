@@ -1,4 +1,5 @@
-import type { Workspace, QuickTaskType, AgentRole, SuperpowersConfig, SuperpowersFeature } from '@omni/shared';
+import type { Workspace, AgentRole, SuperpowersConfig, SuperpowersFeature } from '@omni/shared';
+type QuickTaskType = 'bug' | 'feature' | 'refactor' | 'other';
 import type { AgentManager } from '../agent/AgentManager.js';
 import type { EventBus } from '../eventbus/EventBus.js';
 import { updateProject, getProject } from '../db/queries/projects.js';
@@ -20,7 +21,7 @@ export interface QuickTask {
 
 const TASK_TYPE_LABELS: Record<QuickTaskType, string> = {
   bug: 'Bug Fix',
-  change: 'Small Change',
+  feature: 'Feature / Change',
   refactor: 'Refactor',
   other: 'Task',
 };
@@ -51,6 +52,11 @@ export class QuickModeHandler {
         workspace = cfg.workspaces?.[0];
         superpowers = cfg.superpowers;
       } catch { /* ignore */ }
+    }
+
+    // Fall back to project.workingDir if no workspace in configJson
+    if (!workspace && project.workingDir) {
+      workspace = { label: 'default', path: project.workingDir };
     }
 
     if (!workspace) {
@@ -118,7 +124,7 @@ ${task.relatedFiles.map(f => `- ${f}`).join('\n')}
 5. **實作修復**：修改程式碼
 6. **驗證修復**：如果有測試，執行測試確認修復成功`,
 
-      change: `## 修改策略
+      feature: `## 修改策略
 
 1. **理解需求**：確認要做什麼改動
 2. **找到相關程式碼**：使用 Grep/Glob 找到需要修改的檔案

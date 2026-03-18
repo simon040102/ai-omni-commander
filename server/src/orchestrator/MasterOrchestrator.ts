@@ -1,45 +1,54 @@
 import type { SpecModeHandler } from './SpecModeHandler.js';
 import type { CreativeModeHandler } from './CreativeModeHandler.js';
-import type { QuickModeHandler, QuickTask } from './QuickModeHandler.js';
+import type { ExecutionPipeline } from './ExecutionPipeline.js';
 import { getProject } from '../db/queries/projects.js';
 import { createChildLogger } from '../utils/logger.js';
 
 const logger = createChildLogger('MasterOrchestrator');
 
 /**
- * Top-level orchestrator that routes between Spec, Creative, and Quick modes.
+ * Top-level orchestrator that delegates to the unified ExecutionPipeline.
+ * Retains references to SpecModeHandler (for document handling) and
+ * CreativeModeHandler (for interview flow) for backward compatibility.
  */
 export class MasterOrchestrator {
   constructor(
     private specHandler: SpecModeHandler,
     private creativeHandler: CreativeModeHandler,
-    private quickHandler?: QuickModeHandler,
+    private pipeline: ExecutionPipeline,
   ) {}
 
-  /** Start execution for a project based on its mode */
-  async start(projectId: string, requirement?: string, model?: string, quickTask?: QuickTask, debugMode?: boolean): Promise<void> {
+  /**
+   * Start execution for a project.
+   * v2: Routes to ExecutionPipeline for task-based or ad-hoc execution.
+   */
+  async start(
+    projectId: string,
+    opts?: {
+      taskId?: string;
+      requirement?: string;
+      model?: string;
+      role?: string;
+    },
+  ): Promise<void> {
     const project = getProject(projectId);
     if (!project) throw new Error(`Project ${projectId} not found`);
 
-    logger.info({ projectId, mode: project.mode, model, debugMode }, 'Starting orchestration');
+    logger.info({ projectId, taskId: opts?.taskId, model: opts?.model }, 'Starting orchestration');
 
-    if (project.mode === 'spec') {
-      await this.specHandler.execute(projectId, requirement, model, debugMode);
-    } else if (project.mode === 'creative') {
-      // Creative mode requires an initial requirement from the user
-      throw new Error('Creative mode requires startInterview() to be called with a requirement');
-    } else if (project.mode === 'quick') {
-      if (!this.quickHandler) {
-        throw new Error('QuickModeHandler not configured');
-      }
-      if (!quickTask) {
-        throw new Error('Quick mode requires quickTask to be provided');
-      }
-      await this.quickHandler.execute(projectId, quickTask, model);
+    if (opts?.taskId) {
+      // Execute a specific task
+      await this.pipeline.executeTask(opts.taskId, opts.model);
+    } else if (opts?.requirement) {
+      // Ad-hoc execution
+      await this.pipeline.executeAdHoc(projectId, opts.requirement, opts.model, opts.role);
+    } else {
+      // Legacy: spec mode execution with documents
+      await this.specHandler.execute(projectId, undefined, opts?.model);
     }
   }
 
-  /** Start creative mode interview */
+  /** Start creative mode interview (legacy, kept for backward compat) */
   async startInterview(projectId: string, requirement: string): Promise<void> {
     await this.creativeHandler.startInterview(projectId, requirement);
   }
@@ -52,7 +61,7 @@ export class MasterOrchestrator {
     return this.creativeHandler;
   }
 
-  getQuickHandler(): QuickModeHandler | undefined {
-    return this.quickHandler;
+  getPipeline(): ExecutionPipeline {
+    return this.pipeline;
   }
 }

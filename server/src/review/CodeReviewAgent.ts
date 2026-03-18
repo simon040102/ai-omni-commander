@@ -81,7 +81,19 @@ Please review for:
 
 Use Read, Glob, and Grep to examine the codebase.
 Focus on recently modified files.
-Provide a structured review with issues categorized as CRITICAL, WARNING, or SUGGESTION.
+
+After completing your review, output a structured JSON verdict enclosed in a code block:
+
+\`\`\`json
+{
+  "verdict": "pass" or "fail",
+  "score": 0-100,
+  "issues": [
+    { "severity": "critical" | "warning" | "info", "file": "path/to/file.ts", "line": 42, "message": "Description of the issue" }
+  ],
+  "summary": "Brief overall assessment"
+}
+\`\`\`
 
 End your review with [REVIEW_COMPLETE].`;
 

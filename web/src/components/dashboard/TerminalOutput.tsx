@@ -155,9 +155,11 @@ interface TerminalOutputProps {
   totalOutputTokens?: number;
   onSendCommand?: (agentId: string, command: string) => void;
   onAction?: (agentId: string, action: 'stop' | 'restart') => void;
+  /** Compact mode for grid view — hides some header info */
+  compact?: boolean;
 }
 
-export function TerminalOutput({ outputs, title, role, status, agentId, model, totalInputTokens, totalOutputTokens, onSendCommand, onAction }: TerminalOutputProps) {
+export function TerminalOutput({ outputs, title, role, status, agentId, model, totalInputTokens, totalOutputTokens, onSendCommand, onAction, compact }: TerminalOutputProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const autoScrollRef = useRef(true);
   const [isAutoScroll, setIsAutoScroll] = useState(true);
@@ -327,12 +329,14 @@ export function TerminalOutput({ outputs, title, role, status, agentId, model, t
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-1.5 bg-card border-b border-border">
         <div className="flex items-center gap-2">
-          <span className="font-mono text-sm font-bold">{title}</span>
-          <span className="text-[10px] text-muted-foreground">
-            {outputs.length} lines
-            {toolCount > 0 && ` | ${toolCount} tools`}
-            {errorCount > 0 && ` | ${errorCount} errors`}
-          </span>
+          <span className={`font-mono font-bold ${compact ? 'text-xs' : 'text-sm'}`}>{title}</span>
+          {!compact && (
+            <span className="text-[10px] text-muted-foreground">
+              {outputs.length} lines
+              {toolCount > 0 && ` | ${toolCount} tools`}
+              {errorCount > 0 && ` | ${errorCount} errors`}
+            </span>
+          )}
           {/* Model display */}
           {model && (
             <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-600 dark:text-purple-400">
@@ -340,34 +344,37 @@ export function TerminalOutput({ outputs, title, role, status, agentId, model, t
             </span>
           )}
           {/* Token usage display */}
-          {(totalInputTokens !== undefined && totalInputTokens > 0) && (
+          {!compact && (totalInputTokens !== undefined && totalInputTokens > 0) && (
             <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-600 dark:text-blue-400">
               {((totalInputTokens + (totalOutputTokens || 0)) / 1000).toFixed(1)}k tokens
             </span>
           )}
         </div>
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1.5">
           {/* Search toggle */}
           <button
             onClick={() => { setShowSearch(!showSearch); if (showSearch) setSearchQuery(''); }}
-            className={`p-1 rounded transition-colors ${
+            className={`p-1.5 rounded transition-colors ${
               showSearch ? 'bg-primary/20 text-primary' : 'text-muted-foreground hover:text-foreground hover:bg-muted'
             }`}
             title="Search output"
           >
-            <IconSearch className="w-3.5 h-3.5" />
+            <IconSearch className="w-4 h-4" />
           </button>
+
+          <div className="h-4 w-px bg-border" />
+
           {/* Filter buttons */}
           {(['text', 'tool_use', 'error'] as const).map(type => (
             <button
               key={type}
               onClick={() => setFilterType(filterType === type ? null : type)}
-              className={`px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors ${
+              className={`px-2 py-1 rounded text-[11px] font-medium transition-colors ${
                 filterType === type
                   ? type === 'text' ? 'bg-gray-500/20 text-gray-300'
                     : type === 'tool_use' ? 'bg-cyan-500/15 text-cyan-400'
                     : 'bg-red-500/15 text-red-400'
-                  : 'text-muted-foreground/50 hover:text-muted-foreground hover:bg-muted'
+                  : 'text-muted-foreground/60 hover:text-muted-foreground hover:bg-muted'
               }`}
               title={`Filter ${type}`}
             >
@@ -375,25 +382,25 @@ export function TerminalOutput({ outputs, title, role, status, agentId, model, t
             </button>
           ))}
 
-          <div className="h-3 w-px bg-border mx-0.5" />
+          <div className="h-4 w-px bg-border" />
 
           {/* Agent actions */}
           {agentId && onAction && status === 'running' && (
             <button
               onClick={() => onAction(agentId, 'stop')}
-              className="p-1 rounded text-red-400 hover:bg-red-500/15 transition-colors"
+              className="p-1.5 rounded text-red-400 hover:bg-red-500/15 transition-colors"
               title="Stop agent"
             >
-              <IconStop className="w-3.5 h-3.5" />
+              <IconStop className="w-4 h-4" />
             </button>
           )}
           {agentId && onAction && (status === 'stopped' || status === 'error') && (
             <button
               onClick={() => onAction(agentId, 'restart')}
-              className="p-1 rounded text-green-400 hover:bg-green-500/15 transition-colors"
+              className="p-1.5 rounded text-green-400 hover:bg-green-500/15 transition-colors"
               title="Restart agent"
             >
-              <IconRefresh className="w-3.5 h-3.5" />
+              <IconRefresh className="w-4 h-4" />
             </button>
           )}
           {/* Status badge */}
