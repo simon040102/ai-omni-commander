@@ -1,30 +1,11 @@
-import { useState, useCallback, Fragment, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { useWsStore } from '../../stores/wsStore';
 import { useToastStore } from '../../stores/toastStore';
 import { useAsanaStore } from '../../stores/asanaStore';
 import { useProjectStore } from '../../stores/projectStore';
-import { ModeSelector } from './ModeSelector';
-import { DocumentUpload } from './DocumentUpload';
-import { InterviewChat } from './InterviewChat';
-import { QuickModeSetup } from './QuickModeSetup';
 import { FolderPicker } from './FolderPicker';
-import { IconCheck, IconPlay, IconArrowRight, IconChevronLeft, IconPlus, IconX, IconRocket } from '../ui/Icons';
+import { IconArrowRight, IconAsana, IconRefresh, IconChevronDown } from '../ui/Icons';
 import type { View } from '../layout/AppShell';
-import type { ProjectMode, QuickTaskType, SuperpowersFeature } from '@omni/shared';
-
-interface WorkspaceEntry {
-  label: string;
-  path: string;
-}
-
-type Step = 'mode' | 'workspaces' | 'content' | 'execute';
-
-const STEP_INFO: { key: Step; label: string; desc: string }[] = [
-  { key: 'mode', label: 'Mode', desc: 'Choose mode' },
-  { key: 'workspaces', label: 'Configure', desc: 'Name & paths' },
-  { key: 'content', label: 'Content', desc: 'Docs / Interview' },
-  { key: 'execute', label: 'Launch', desc: 'Start agents' },
-];
 
 interface ProjectSetupProps {
   onViewChange: (view: View) => void;
@@ -34,136 +15,87 @@ export function ProjectSetup({ onViewChange }: ProjectSetupProps) {
   const client = useWsStore(s => s.client);
   const addToast = useToastStore(s => s.addToast);
   const setCurrentProject = useProjectStore(s => s.setCurrentProject);
-  const [step, setStep] = useState<Step>('mode');
-  const [mode, setMode] = useState<ProjectMode>('spec');
-  const [name, setName] = useState('');
-  const [workspaces, setWorkspaces] = useState<WorkspaceEntry[]>([
-    { label: '', path: '' },
-  ]);
-  const [projectId, setProjectId] = useState<string | null>(null);
-  const [requirement, setRequirement] = useState('');
+  const asanaConnected = useAsanaStore(s => s.connectionStatus.connected);
+  const asanaProjects = useAsanaStore(s => s.projects);
 
-  // Validation
+  const [name, setName] = useState('');
+  const [frontendPath, setFrontendPath] = useState('');
+  const [backendPath, setBackendPath] = useState('');
+  const [asanaProjectGid, setAsanaProjectGid] = useState('');
   const [touched, setTouched] = useState<Record<string, boolean>>({});
 
-  // Code Review settings
-  const [reviewEnabled, setReviewEnabled] = useState(true);
-  const [reviewSkillSource, setReviewSkillSource] = useState<string>('auto');
+  // Workspace scan results
+  const [feScanResult, setFeScanResult] = useState<{ hasClaudeMd: boolean; skills: { name: string }[] } | null>(null);
+  const [beScanResult, setBeScanResult] = useState<{ hasClaudeMd: boolean; skills: { name: string }[] } | null>(null);
 
-  // Model selection
-  const [selectedModel, setSelectedModel] = useState<string>('sonnet');
-
-  // Debug mode for spec (work with existing code)
-  const [debugMode, setDebugMode] = useState(false);
-
-  // Superpowers methodology
-  const [superpowersEnabled, setSuperpowersEnabled] = useState(false);
-  const [superpowersFeatures, setSuperpowersFeatures] = useState<SuperpowersFeature[]>(['brainstorm', 'tdd', 'debugging']);
-
-  // Asana import
-  const [importedAsanaTask, setImportedAsanaTask] = useState<{
-    name: string;
-    notes: string;
-    gid: string;
-    mode: ProjectMode;
-    parentNotes?: string;
-  } | null>(null);
+  // Asana import (from AsanaTaskPanel "Import to Project")
   const hasCheckedAsanaImport = useRef(false);
-  const importedAsanaGid = useRef<string | null>(null);
-  const taskStories = useAsanaStore(s => s.taskStories);
-
-  // Check for Asana import on mount
   useEffect(() => {
     if (hasCheckedAsanaImport.current) return;
     hasCheckedAsanaImport.current = true;
-
     const stored = sessionStorage.getItem('asana_import_task');
     if (stored) {
       try {
         const task = JSON.parse(stored);
-        setImportedAsanaTask(task);
-        // Pre-select the mode
-        if (task.mode) {
-          setMode(task.mode);
-        }
-        // Auto-set name from task name
-        if (task.name) {
-          setName(task.name.slice(0, 50));
-        }
-        // Build requirement from notes + parent notes
-        const parts: string[] = [];
-        if (task.notes) {
-          parts.push(task.notes);
-        }
-        if (task.parentNotes) {
-          parts.push(`--- Parent Task Notes ---\n${task.parentNotes}`);
-        }
-        if (parts.length > 0) {
-          setRequirement(parts.join('\n\n'));
-        }
-        // Fetch task comments/stories from Asana
-        if (task.gid && client) {
-          importedAsanaGid.current = task.gid;
-          client.send({
-            type: 'asana.fetchTaskStories',
-            id: crypto.randomUUID(),
-            timestamp: new Date().toISOString(),
-            payload: { taskGid: task.gid },
-          });
-        }
-        // Clear after reading
+        if (task.name) setName(task.name.slice(0, 50));
         sessionStorage.removeItem('asana_import_task');
-        addToast({
-          type: 'info',
-          title: 'Asana Task Imported',
-          message: `Task: ${task.name}`,
-        });
+        addToast({ type: 'info', title: 'Asana Task Imported', message: `Task: ${task.name}` });
       } catch { /* ignore */ }
     }
-  }, [addToast, client]);
+  }, [addToast]);
 
-  // Append stories/comments when they arrive from Asana
+  // Auto-check Asana connection on mount
+  const hasCheckedAsana = useRef(false);
   useEffect(() => {
-    const gid = importedAsanaGid.current;
-    if (!gid) return;
-    const stories = taskStories[gid];
-    if (!stories || stories.length === 0) return;
-
-    // Only append once
-    importedAsanaGid.current = null;
-
-    const commentsText = stories
-      .map(s => `[${s.author}] ${s.text}`)
-      .join('\n\n');
-
-    setRequirement(prev => {
-      const separator = prev ? '\n\n--- Comments ---\n' : '';
-      return prev + separator + commentsText;
+    if (hasCheckedAsana.current || !client) return;
+    hasCheckedAsana.current = true;
+    client.send({
+      type: 'asana.checkConnection',
+      id: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+      payload: {},
     });
-  }, [taskStories]);
+  }, [client]);
 
-  const addWorkspace = () => {
-    setWorkspaces([...workspaces, { label: '', path: '' }]);
-  };
+  // Fetch Asana projects when connected
+  const hasFetchedAsanaProjects = useRef(false);
+  useEffect(() => {
+    if (asanaConnected && !hasFetchedAsanaProjects.current && client) {
+      hasFetchedAsanaProjects.current = true;
+      client.send({
+        type: 'asana.fetchProjects',
+        id: crypto.randomUUID(),
+        timestamp: new Date().toISOString(),
+        payload: {},
+      });
+    }
+  }, [asanaConnected, client]);
 
-  const removeWorkspace = (index: number) => {
-    if (workspaces.length <= 1) return;
-    setWorkspaces(workspaces.filter((_, i) => i !== index));
-  };
+  // Auto-scan workspace when path changes
+  useEffect(() => {
+    if (!frontendPath.trim()) { setFeScanResult(null); return; }
+    fetch(`/api/workspace/scan?path=${encodeURIComponent(frontendPath)}`)
+      .then(r => r.json())
+      .then(data => setFeScanResult({ hasClaudeMd: data.hasClaudeMd, skills: data.skills || [] }))
+      .catch(() => setFeScanResult(null));
+  }, [frontendPath]);
 
-  const updateWorkspace = (index: number, field: 'label' | 'path', value: string) => {
-    setWorkspaces(workspaces.map((ws, i) => (i === index ? { ...ws, [field]: value } : ws)));
-  };
+  useEffect(() => {
+    if (!backendPath.trim()) { setBeScanResult(null); return; }
+    fetch(`/api/workspace/scan?path=${encodeURIComponent(backendPath)}`)
+      .then(r => r.json())
+      .then(data => setBeScanResult({ hasClaudeMd: data.hasClaudeMd, skills: data.skills || [] }))
+      .catch(() => setBeScanResult(null));
+  }, [backendPath]);
 
-  const isWorkspacesValid = name.trim() !== '' && workspaces.every(ws => ws.label.trim() !== '' && ws.path.trim() !== '');
+  const hasAtLeastOnePath = frontendPath.trim() !== '' || backendPath.trim() !== '';
+  const isValid = name.trim() !== '' && hasAtLeastOnePath;
 
   const handleCreate = useCallback(() => {
-    // Mark all as touched for validation display
-    setTouched({ name: true, ...Object.fromEntries(workspaces.flatMap((_, i) => [[`ws${i}label`, true], [`ws${i}path`, true]])) });
-    if (!isWorkspacesValid) return;
+    setTouched({ name: true });
+    if (!isValid) return;
 
     const id = crypto.randomUUID();
-    setProjectId(id);
     setCurrentProject(id);
 
     client?.send({
@@ -173,483 +105,176 @@ export function ProjectSetup({ onViewChange }: ProjectSetupProps) {
       payload: {
         projectId: id,
         name,
-        mode,
-        workingDir: workspaces[0].path,
-        workspaces: workspaces.map(ws => ({ label: ws.label.trim(), path: ws.path.trim() })),
-        reviewConfig: {
-          enabled: reviewEnabled,
-          skillSource: reviewSkillSource,
-        },
-        superpowers: superpowersEnabled ? {
-          enabled: true,
-          features: superpowersFeatures,
-        } : undefined,
+        workingDir: frontendPath.trim() || backendPath.trim(),
+        frontendPath: frontendPath.trim() || null,
+        backendPath: backendPath.trim() || null,
+        asanaProjectGid: asanaProjectGid.trim() || undefined,
       },
     });
 
-    // Save workspace paths to recent paths
-    for (const ws of workspaces) {
-      if (ws.path.trim()) {
+    // Fetch project state
+    client?.send({
+      type: 'project.getState',
+      id: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+      payload: { projectId: id },
+    });
+
+    // Save paths to recent
+    for (const p of [frontendPath, backendPath]) {
+      if (p.trim()) {
         fetch('/api/recent-paths', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ path: ws.path.trim(), label: ws.label.trim() || undefined }),
-        }).catch(() => { /* ignore */ });
+          body: JSON.stringify({ path: p.trim() }),
+        }).catch(() => {});
       }
     }
 
-    addToast({ type: 'success', title: 'Project created', message: `"${name}" (${mode} mode)` });
-    setStep('content');
-  }, [name, mode, workspaces, client, isWorkspacesValid, reviewEnabled, reviewSkillSource, addToast]);
-
-  const handleStartExecution = useCallback(() => {
-    if (!projectId) return;
-    client?.send({
-      type: 'project.startExecution',
-      id: crypto.randomUUID(),
-      timestamp: new Date().toISOString(),
-      payload: {
-        projectId,
-        requirement: requirement.trim() || undefined,
-        model: selectedModel,
-        debugMode: mode === 'spec' ? debugMode : undefined,
-      },
-    });
-    addToast({ type: 'info', title: 'Execution started', message: `Using ${selectedModel} model...` });
-    setStep('execute');
-  }, [projectId, client, addToast, requirement, selectedModel, mode, debugMode]);
-
-  const handleQuickStartExecution = useCallback((quickTask: {
-    type: QuickTaskType;
-    description: string;
-    errorLog?: string;
-    relatedFiles?: string[];
-    role?: 'backend' | 'frontend' | 'devops' | 'testing';
-    useWorkspaceSkills?: boolean;
-  }) => {
-    if (!projectId) return;
-    client?.send({
-      type: 'project.startExecution',
-      id: crypto.randomUUID(),
-      timestamp: new Date().toISOString(),
-      payload: {
-        projectId,
-        model: selectedModel,
-        quickTask,
-      },
-    });
-    addToast({ type: 'info', title: 'Quick task started', message: `Using ${selectedModel} model...` });
-    setStep('execute');
-  }, [projectId, client, addToast, selectedModel]);
-
-  const currentStepIndex = STEP_INFO.findIndex(s => s.key === step);
-
-  // For quick mode, adjust step labels
-  const stepInfo = mode === 'quick'
-    ? [
-        { key: 'mode' as const, label: 'Mode', desc: 'Choose mode' },
-        { key: 'workspaces' as const, label: 'Configure', desc: 'Name & path' },
-        { key: 'content' as const, label: 'Task', desc: 'Describe task' },
-        { key: 'execute' as const, label: 'Launch', desc: 'Start agent' },
-      ]
-    : STEP_INFO;
+    addToast({ type: 'success', title: 'Project created', message: `"${name}"` });
+    onViewChange('tasks');
+  }, [name, frontendPath, backendPath, asanaProjectGid, client, isValid, setCurrentProject, addToast, onViewChange]);
 
   return (
     <div className="max-w-2xl mx-auto">
       <h2 className="text-2xl font-bold mb-6">New Project</h2>
 
-      {/* ─── Stepper ─── */}
-      <div className="flex items-center mb-10">
-        {stepInfo.map((s, i) => {
-          const isCompleted = i < currentStepIndex;
-          const isActive = i === currentStepIndex;
-          return (
-            <Fragment key={s.key}>
-              {i > 0 && (
-                <div className={`h-0.5 flex-1 mx-2 rounded transition-colors duration-500 ${
-                  isCompleted ? 'bg-primary' : isActive ? 'bg-primary/40' : 'bg-border'
-                }`} />
-              )}
-              <div className="flex flex-col items-center gap-1.5 min-w-[4rem]">
-                <div className={`w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold border-2 transition-all duration-500 ${
-                  isCompleted
-                    ? 'bg-primary border-primary text-primary-foreground'
-                    : isActive
-                      ? 'border-primary text-primary bg-primary/10 shadow-[0_0_10px_rgba(59,130,246,0.25)]'
-                      : 'border-border text-muted-foreground'
-                }`}>
-                  {isCompleted ? <IconCheck className="w-4 h-4" /> : (i + 1)}
-                </div>
-                <div className="text-center">
-                  <div className={`text-xs font-medium ${isActive ? 'text-foreground' : 'text-muted-foreground'}`}>
-                    {s.label}
-                  </div>
-                  <div className="text-[10px] text-muted-foreground/60 hidden sm:block">
-                    {s.desc}
-                  </div>
-                </div>
-              </div>
-            </Fragment>
-          );
-        })}
-      </div>
-
-      {/* ─── Step 1: Mode Selection ─── */}
-      {step === 'mode' && (
+      <div className="space-y-6">
+        {/* Project Name */}
         <div>
-          <ModeSelector mode={mode} onModeChange={setMode} />
-          <div className="mt-8">
-            <button
-              onClick={() => setStep('workspaces')}
-              className="inline-flex items-center gap-2 px-5 py-2.5 bg-primary text-primary-foreground rounded-lg text-sm font-semibold hover:bg-primary/90 transition-colors shadow-sm"
-            >
-              Next
-              <IconArrowRight className="w-4 h-4" />
-            </button>
-          </div>
+          <label className="block text-sm font-medium mb-1">Project Name</label>
+          <input
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onBlur={() => setTouched(prev => ({ ...prev, name: true }))}
+            placeholder="My Awesome Project"
+            className={`w-full bg-muted border rounded-md px-3 py-2 text-sm outline-none transition-colors ${
+              touched.name && !name.trim()
+                ? 'border-red-500/50 focus:border-red-500 focus:ring-1 focus:ring-red-500/30'
+                : 'border-border focus:border-primary focus:ring-1 focus:ring-primary/30'
+            }`}
+          />
+          {touched.name && !name.trim() && (
+            <p className="text-xs text-red-400 mt-1">Project name is required</p>
+          )}
         </div>
-      )}
 
-      {/* ─── Step 2: Project Name + Workspaces + Review Config ─── */}
-      {step === 'workspaces' && (
-        <div className="space-y-6">
-          <div>
-            <label className="block text-sm font-medium mb-1">Project Name</label>
-            <input
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              onBlur={() => setTouched(prev => ({ ...prev, name: true }))}
-              placeholder={mode === 'quick' ? "Quick Fix - Login Bug" : "My Awesome Project"}
-              className={`w-full bg-muted border rounded-md px-3 py-2 text-sm outline-none transition-colors ${
-                touched.name && !name.trim()
-                  ? 'border-red-500/50 focus:border-red-500 focus:ring-1 focus:ring-red-500/30'
-                  : 'border-border focus:border-primary focus:ring-1 focus:ring-primary/30'
-              }`}
-            />
-            {touched.name && !name.trim() && (
-              <p className="text-xs text-red-400 mt-1">Project name is required</p>
+        {/* Frontend Path */}
+        <div>
+          <label className="block text-sm font-medium mb-1">
+            Frontend Path
+            <span className="text-xs text-muted-foreground ml-2 font-normal">optional</span>
+          </label>
+          <FolderPicker value={frontendPath} onChange={setFrontendPath} />
+          {feScanResult && <WorkspaceScanBadge result={feScanResult} />}
+        </div>
+
+        {/* Backend Path */}
+        <div>
+          <label className="block text-sm font-medium mb-1">
+            Backend Path
+            <span className="text-xs text-muted-foreground ml-2 font-normal">optional</span>
+          </label>
+          <FolderPicker value={backendPath} onChange={setBackendPath} />
+          {beScanResult && <WorkspaceScanBadge result={beScanResult} />}
+        </div>
+
+        {!hasAtLeastOnePath && touched.name && (
+          <p className="text-xs text-red-400">At least one path (frontend or backend) is required</p>
+        )}
+
+        {/* Asana Project Binding */}
+        <div className="border border-border rounded-lg p-4 space-y-2">
+          <div className="flex items-center gap-2">
+            <IconAsana className="w-4 h-4 text-orange-400" />
+            <h4 className="text-sm font-medium">Asana Integration</h4>
+            {asanaConnected ? (
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-green-500/15 text-green-400">Connected</span>
+            ) : (
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground">Not connected</span>
             )}
           </div>
 
-          {/* Workspaces */}
-          <div>
-            <div className="flex items-center justify-between mb-3">
-              <label className="block text-sm font-medium">
-                {mode === 'quick' ? 'Workspace' : 'Workspaces'}
-              </label>
-              {mode !== 'quick' && (
-                <button
-                  onClick={addWorkspace}
-                  className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 bg-primary/15 text-primary rounded-md hover:bg-primary/25 transition-colors"
-                >
-                  <IconPlus className="w-3 h-3" />
-                  Add Workspace
-                </button>
-              )}
-            </div>
-            <p className="text-xs text-muted-foreground mb-3">
-              {mode === 'quick'
-                ? 'Select the folder where the agent will work.'
-                : 'Add the folders that agents will work on. Give each a label (e.g. "frontend", "backend").'
-              }
-            </p>
-
-            <div className="space-y-3">
-              {workspaces.map((ws, index) => (
-                <div key={index} className="flex gap-2 items-start">
-                  <div className="w-32 shrink-0">
-                    <input
-                      type="text"
-                      value={ws.label}
-                      onChange={(e) => updateWorkspace(index, 'label', e.target.value)}
-                      onBlur={() => setTouched(prev => ({ ...prev, [`ws${index}label`]: true }))}
-                      placeholder="Label"
-                      className={`w-full bg-muted border rounded-md px-3 py-2 text-sm outline-none transition-colors ${
-                        touched[`ws${index}label`] && !ws.label.trim()
-                          ? 'border-red-500/50 focus:border-red-500'
-                          : 'border-border focus:border-primary focus:ring-1 focus:ring-primary/30'
-                      }`}
-                    />
-                    {touched[`ws${index}label`] && !ws.label.trim() && (
-                      <p className="text-[10px] text-red-400 mt-0.5">Required</p>
-                    )}
-                  </div>
-                  <div className="flex-1">
-                    <FolderPicker
-                      value={ws.path}
-                      onChange={(p) => updateWorkspace(index, 'path', p)}
-                    />
-                  </div>
-                  {workspaces.length > 1 && mode !== 'quick' && (
-                    <button
-                      onClick={() => removeWorkspace(index)}
-                      className="shrink-0 p-2 text-muted-foreground hover:text-red-400 hover:bg-red-500/10 rounded-md transition-colors"
-                      title="Remove"
-                    >
-                      <IconX className="w-3.5 h-3.5" />
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Code Review Agent Config - hide for quick mode */}
-          {mode !== 'quick' && (
-            <div className="border border-border rounded-lg p-4 space-y-3">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h4 className="text-sm font-medium">Code Review Agent</h4>
-                  <p className="text-xs text-muted-foreground">Automatically reviews code after tasks complete</p>
-                </div>
-                <button
-                  onClick={() => setReviewEnabled(!reviewEnabled)}
-                  className={`w-10 h-5 rounded-full transition-colors relative ${
-                    reviewEnabled ? 'bg-emerald-500' : 'bg-muted'
-                  }`}
-                >
-                  <span
-                    className={`block w-4 h-4 rounded-full bg-white absolute top-0.5 transition-all ${
-                      reviewEnabled ? 'left-5' : 'left-0.5'
-                    }`}
-                  />
-                </button>
-              </div>
-
-              {reviewEnabled && workspaces.some(ws => ws.label.trim()) && (
-                <div>
-                  <label className="block text-xs text-muted-foreground mb-1">
-                    Agent Skills Source (CLAUDE.md / .claude/)
-                  </label>
+          {asanaConnected && asanaProjects.length > 0 ? (
+            <>
+              <p className="text-xs text-muted-foreground">
+                Select an Asana project to bind to this project.
+              </p>
+              <div className="flex gap-2">
+                <div className="relative flex-1">
                   <select
-                    value={reviewSkillSource}
-                    onChange={(e) => setReviewSkillSource(e.target.value)}
-                    className="w-full bg-muted border border-border rounded-md px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
+                    value={asanaProjectGid}
+                    onChange={(e) => setAsanaProjectGid(e.target.value)}
+                    className="w-full bg-muted border border-border rounded-md px-3 py-2 text-sm appearance-none outline-none focus:border-primary focus:ring-1 focus:ring-primary/30 pr-8"
                   >
-                    <option value="auto">Auto (use reviewed task's workspace)</option>
-                    {workspaces
-                      .filter(ws => ws.label.trim())
-                      .map(ws => (
-                        <option key={ws.label} value={ws.label.trim()}>
-                          Use "{ws.label.trim()}" workspace skills
-                        </option>
-                      ))}
+                    <option value="">— None —</option>
+                    {asanaProjects.map(p => (
+                      <option key={p.gid} value={p.gid}>{p.name}</option>
+                    ))}
                   </select>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    Choose which workspace's CLAUDE.md and .claude/ settings the review agent should follow.
-                  </p>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Superpowers Methodology */}
-          <div className="border border-border rounded-lg p-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <div>
-                <h4 className="text-sm font-medium flex items-center gap-2">
-                  Superpowers Methodology
-                  <span className="text-[10px] px-1.5 py-0.5 bg-purple-500/20 text-purple-400 rounded">Beta</span>
-                </h4>
-                <p className="text-xs text-muted-foreground">Enforce structured development practices (TDD, planning, debugging)</p>
-              </div>
-              <button
-                onClick={() => setSuperpowersEnabled(!superpowersEnabled)}
-                className={`w-10 h-5 rounded-full transition-colors relative ${
-                  superpowersEnabled ? 'bg-purple-500' : 'bg-muted'
-                }`}
-              >
-                <span
-                  className={`block w-4 h-4 rounded-full bg-white absolute top-0.5 transition-all ${
-                    superpowersEnabled ? 'left-5' : 'left-0.5'
-                  }`}
-                />
-              </button>
-            </div>
-
-            {superpowersEnabled && (
-              <div className="space-y-2">
-                <label className="block text-xs text-muted-foreground">
-                  Select methodologies to enable:
-                </label>
-                <div className="flex flex-wrap gap-2">
-                  {([
-                    { id: 'brainstorm', label: 'Brainstorm', desc: 'Plan before coding' },
-                    { id: 'tdd', label: 'TDD', desc: 'Test-driven development' },
-                    { id: 'debugging', label: 'Debugging', desc: 'Systematic debugging' },
-                  ] as const).map(({ id, label, desc }) => {
-                    const isSelected = superpowersFeatures.includes(id);
-                    return (
-                      <button
-                        key={id}
-                        onClick={() => {
-                          if (isSelected) {
-                            setSuperpowersFeatures(superpowersFeatures.filter(f => f !== id));
-                          } else {
-                            setSuperpowersFeatures([...superpowersFeatures, id]);
-                          }
-                        }}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-                          isSelected
-                            ? 'bg-purple-500/20 text-purple-400 border border-purple-500/50'
-                            : 'bg-muted text-muted-foreground border border-border hover:border-purple-500/30'
-                        }`}
-                        title={desc}
-                      >
-                        {label}
-                      </button>
-                    );
-                  })}
-                </div>
-                <p className="text-[10px] text-muted-foreground">
-                  These rules apply on top of project-specific CLAUDE.md skills. Project rules take priority.
-                </p>
-              </div>
-            )}
-          </div>
-
-          <div className="flex gap-3">
-            <button
-              onClick={() => setStep('mode')}
-              className="inline-flex items-center gap-1.5 px-4 py-2 bg-secondary text-secondary-foreground rounded-lg text-sm font-medium hover:bg-secondary/80 transition-colors"
-            >
-              <IconChevronLeft className="w-4 h-4" />
-              Back
-            </button>
-            <button
-              onClick={handleCreate}
-              disabled={!isWorkspacesValid}
-              className="inline-flex items-center gap-2 px-5 py-2.5 bg-primary text-primary-foreground rounded-lg text-sm font-semibold hover:bg-primary/90 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shadow-sm"
-            >
-              Create Project
-              <IconArrowRight className="w-4 h-4" />
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* ─── Step 3: Content (Spec: upload docs, Creative: interview, Quick: task form) ─── */}
-      {step === 'content' && projectId && (
-        <div>
-          {mode === 'spec' ? (
-            <div className="space-y-4">
-              <DocumentUpload projectId={projectId} />
-
-              <div>
-                <label className="block text-sm font-medium mb-1">Requirement / Instructions</label>
-                <p className="text-xs text-muted-foreground mb-2">
-                  Describe what you want the agents to implement this round. This will be included in the prompt sent to each agent.
-                </p>
-                <textarea
-                  value={requirement}
-                  onChange={(e) => setRequirement(e.target.value)}
-                  placeholder="e.g. Implement the user authentication module based on the SD spec, including login, registration, and JWT token management..."
-                  className="w-full bg-muted border border-border rounded-md px-3 py-2 text-sm min-h-[200px] resize-y outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
-                />
-              </div>
-
-              {/* Model Selection */}
-              <div>
-                <label className="block text-sm font-medium mb-1">Model</label>
-                <p className="text-xs text-muted-foreground mb-2">
-                  Choose which Claude model the agents will use.
-                </p>
-                <div className="flex gap-2">
-                  {(['sonnet', 'opus', 'haiku'] as const).map((model) => (
-                    <button
-                      key={model}
-                      onClick={() => setSelectedModel(model)}
-                      className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
-                        selectedModel === model
-                          ? model === 'opus'
-                            ? 'bg-purple-500/20 text-purple-400 border border-purple-500/50'
-                            : model === 'haiku'
-                              ? 'bg-green-500/20 text-green-400 border border-green-500/50'
-                              : 'bg-blue-500/20 text-blue-400 border border-blue-500/50'
-                          : 'bg-muted text-muted-foreground border border-border hover:border-primary/50 hover:text-foreground'
-                      }`}
-                    >
-                      {model.charAt(0).toUpperCase() + model.slice(1)}
-                      {model === 'opus' && <span className="ml-1 text-[10px] opacity-60">(most capable)</span>}
-                      {model === 'haiku' && <span className="ml-1 text-[10px] opacity-60">(fastest)</span>}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Debug Mode Toggle */}
-              <div className="flex items-center justify-between px-4 py-3 bg-muted/30 rounded-lg border border-border">
-                <div className="flex-1">
-                  <label className="text-sm font-medium block mb-0.5">Debug Mode</label>
-                  <p className="text-xs text-muted-foreground">
-                    Work with existing code instead of new build (agent will explore existing codebase first)
-                  </p>
+                  <IconChevronDown className="w-4 h-4 absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
                 </div>
                 <button
-                  onClick={() => setDebugMode(!debugMode)}
-                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                    debugMode ? 'bg-primary' : 'bg-muted'
-                  }`}
+                  onClick={() => {
+                    hasFetchedAsanaProjects.current = false;
+                    client?.send({
+                      type: 'asana.fetchProjects',
+                      id: crypto.randomUUID(),
+                      timestamp: new Date().toISOString(),
+                      payload: {},
+                    });
+                  }}
+                  className="p-2 rounded-md bg-muted border border-border hover:bg-muted/80 transition-colors"
+                  title="Refresh project list"
                 >
-                  <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                    debugMode ? 'translate-x-6' : 'translate-x-1'
-                  }`} />
+                  <IconRefresh className="w-4 h-4 text-muted-foreground" />
                 </button>
               </div>
-
-              <button
-                onClick={handleStartExecution}
-                className="group inline-flex items-center gap-2 px-6 py-3 bg-green-600 hover:bg-green-500 text-white rounded-lg text-sm font-semibold shadow-lg shadow-green-600/20 hover:shadow-green-500/30 transition-all"
-              >
-                <IconPlay className="w-4 h-4" />
-                Start Execution
-              </button>
-            </div>
-          ) : mode === 'creative' ? (
-            <InterviewChat projectId={projectId} />
+            </>
+          ) : asanaConnected ? (
+            <>
+              <p className="text-xs text-muted-foreground">
+                Loading Asana projects...
+              </p>
+              <input
+                type="text"
+                value={asanaProjectGid}
+                onChange={(e) => setAsanaProjectGid(e.target.value)}
+                placeholder="Asana Project GID (optional)"
+                className="w-full bg-muted border border-border rounded-md px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
+              />
+            </>
           ) : (
-            <QuickModeSetup
-              projectId={projectId}
-              workspacePath={workspaces[0]?.path || ''}
-              selectedModel={selectedModel}
-              onModelChange={setSelectedModel}
-              onStartExecution={handleQuickStartExecution}
-              importedTask={importedAsanaTask ? {
-                name: importedAsanaTask.name,
-                notes: importedAsanaTask.notes,
-                asanaGid: importedAsanaTask.gid,
-              } : undefined}
-            />
+            <p className="text-xs text-muted-foreground">
+              Connect Asana in the Asana panel to bind a project.
+            </p>
           )}
         </div>
-      )}
 
-      {/* ─── Step 4: Execution started ─── */}
-      {step === 'execute' && (
-        <div className="text-center py-16">
-          <div className={`w-16 h-16 mx-auto mb-6 rounded-full flex items-center justify-center ${
-            mode === 'quick' ? 'bg-amber-500/10' : 'bg-green-500/10'
-          }`}>
-            <IconRocket className={`w-8 h-8 ${mode === 'quick' ? 'text-amber-400' : 'text-green-400'}`} />
-          </div>
-          <h3 className="text-xl font-bold mb-2">
-            {mode === 'quick' ? 'Quick Task Started!' : 'Execution Started!'}
-          </h3>
-          <p className="text-muted-foreground mb-8 max-w-sm mx-auto">
-            {mode === 'quick'
-              ? 'The agent is working on your task. Monitor progress in real time.'
-              : 'Agents are being spawned and will begin working on your project. Monitor their progress in real time.'
-            }
-          </p>
-          <button
-            onClick={() => onViewChange('dashboard')}
-            className="inline-flex items-center gap-2 px-5 py-2.5 bg-primary text-primary-foreground rounded-lg text-sm font-semibold hover:bg-primary/90 transition-colors shadow-sm"
-          >
-            Go to Dashboard
-            <IconArrowRight className="w-4 h-4" />
-          </button>
-        </div>
+        {/* Create Button */}
+        <button
+          onClick={handleCreate}
+          disabled={!isValid}
+          className="inline-flex items-center gap-2 px-6 py-3 bg-primary text-primary-foreground rounded-lg text-sm font-semibold hover:bg-primary/90 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shadow-sm"
+        >
+          Create Project & Go to Dashboard
+          <IconArrowRight className="w-4 h-4" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* Helper: workspace scan badge */
+function WorkspaceScanBadge({ result }: { result: { hasClaudeMd: boolean; skills: { name: string }[] } }) {
+  return (
+    <div className="flex items-center gap-2 mt-1.5 text-[10px]">
+      <span className={result.hasClaudeMd ? 'text-green-400' : 'text-muted-foreground'}>
+        {result.hasClaudeMd ? '✓ CLAUDE.md' : '✗ No CLAUDE.md'}
+      </span>
+      {result.skills.length > 0 && (
+        <span className="text-blue-400">{result.skills.length} skills</span>
       )}
     </div>
   );

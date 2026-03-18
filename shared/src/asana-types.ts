@@ -48,6 +48,8 @@ export interface AsanaConnectionStatus {
 export interface AsanaFetchTasksOptions {
   /** Filter by workspace GID */
   workspace?: string;
+  /** Filter by Asana project GID */
+  projectGid?: string;
   /** Maximum number of tasks to return */
   limit?: number;
   /** Include completed tasks */

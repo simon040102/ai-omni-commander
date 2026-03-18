@@ -1,14 +1,15 @@
 import { useEffect } from 'react';
 import { AppShell } from './components/layout/AppShell';
 import type { View } from './components/layout/AppShell';
+import { ProjectList } from './components/home/ProjectList';
 import { Dashboard } from './components/dashboard/Dashboard';
 import { ProjectSetup } from './components/project/ProjectSetup';
-import { TaskBoard } from './components/tasks/TaskBoard';
 import { EventLog } from './components/events/EventLog';
-import { AsanaTaskPanel } from './components/asana/AsanaTaskPanel';
-import { ActiveAgents } from './components/agents/ActiveAgents';
+import { AgentsView } from './components/agents/AgentsView';
+import { NewTaskView } from './components/task/NewTaskView';
+import { DbExplorer } from './components/db/DbExplorer';
+import { ProjectSettings } from './components/settings/ProjectSettings';
 import { useThemeStore } from './stores/themeStore';
-import type { AsanaTask, ProjectMode } from '@omni/shared';
 
 export function App() {
   const theme = useThemeStore(s => s.theme);
@@ -22,35 +23,25 @@ export function App() {
   return (
     <AppShell>
       {(view: View, onViewChange: (v: View) => void) => {
-        // Handler for using an Asana task
-        const handleUseAsanaTask = (task: AsanaTask, mode: ProjectMode) => {
-          // Store task info and switch to setup view
-          // The ProjectSetup will pick up the imported task
-          sessionStorage.setItem('asana_import_task', JSON.stringify({
-            name: task.name,
-            notes: task.notes,
-            gid: task.gid,
-            mode,
-            parentNotes: task.parent?.notes || '',
-          }));
-          onViewChange('setup');
-        };
-
         switch (view) {
-          case 'dashboard':
+          case 'home':
+            return <ProjectList onViewChange={onViewChange} />;
+          case 'tasks':
             return <Dashboard onViewChange={onViewChange} />;
           case 'setup':
             return <ProjectSetup onViewChange={onViewChange} />;
-          case 'tasks':
-            return <TaskBoard onViewChange={onViewChange} />;
           case 'agents':
-            return <ActiveAgents onViewChange={onViewChange} />;
+            return <AgentsView onViewChange={onViewChange} />;
           case 'events':
             return <EventLog />;
-          case 'asana':
-            return <AsanaTaskPanel onUseTask={handleUseAsanaTask} />;
+          case 'new-task':
+            return <NewTaskView onViewChange={onViewChange} />;
+          case 'db-explorer':
+            return <DbExplorer />;
+          case 'settings':
+            return <ProjectSettings />;
           default:
-            return <Dashboard onViewChange={onViewChange} />;
+            return <ProjectList onViewChange={onViewChange} />;
         }
       }}
     </AppShell>

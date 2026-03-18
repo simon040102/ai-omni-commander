@@ -1,0 +1,1217 @@
+import { useState, useCallback, useRef, useEffect } from 'react';
+import { useProjectStore } from '../../stores/projectStore';
+import { useWsStore } from '../../stores/wsStore';
+import { useToastStore } from '../../stores/toastStore';
+import { AsanaImportDrawer } from './AsanaImportDrawer';
+import { SvnBrowser } from './SvnBrowser';
+import { IconPlus, IconPlay, IconTrash, IconX, IconChevronDown, IconChevronRight, IconAsana, IconDocument, IconExternalLink, IconUpload, IconCheck } from '../ui/Icons';
+import type { TaskType, Task } from '../../stores/projectStore';
+
+const TASK_TYPE_COLORS: Record<TaskType, string> = {
+  bug: 'bg-red-500/15 text-red-400',
+  feature: 'bg-blue-500/15 text-blue-400',
+  refactor: 'bg-purple-500/15 text-purple-400',
+  other: 'bg-muted text-muted-foreground',
+};
+
+const LABEL_COLORS: Record<string, string> = {
+  frontend: 'bg-blue-500/10 text-blue-400',
+  backend: 'bg-purple-500/10 text-purple-400',
+  devops: 'bg-green-500/10 text-green-400',
+  testing: 'bg-teal-500/10 text-teal-400',
+  review: 'bg-gray-500/10 text-gray-400',
+  architect: 'bg-orange-500/10 text-orange-400',
+};
+
+const STATUS_STYLES: Record<string, string> = {
+  pending: 'bg-gray-500/10 text-gray-400 border-gray-500/20',
+  in_progress: 'bg-green-500/10 text-green-400 border-green-500/20',
+  completed: 'bg-blue-500/10 text-blue-400 border-blue-500/20',
+  failed: 'bg-red-500/10 text-red-400 border-red-500/20',
+  blocked: 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20',
+  queued: 'bg-gray-500/10 text-gray-400 border-gray-500/20',
+  assigned: 'bg-cyan-500/10 text-cyan-400 border-cyan-500/20',
+  needs_review: 'bg-orange-500/10 text-orange-400 border-orange-500/20',
+  needs_intervention: 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20',
+};
+
+/** Auto-detect document type from filename */
+function detectDocType(file: File): 'SA' | 'SD' | 'image' {
+  if (file.type.startsWith('image/')) return 'image';
+  const name = file.name.toLowerCase();
+  // SA patterns: contains SA, 需求, spec, requirement
+  if (/\bsa\b|需求|spec|requirement/i.test(name)) return 'SA';
+  // Everything else defaults to SD
+  return 'SD';
+}
+
+function getSpecTypeBadge(url: string): { label: string; className: string } {
+  if (/^https?:\/\//i.test(url)) return { label: 'HTTP', className: 'bg-blue-500/15 text-blue-400' };
+  if (/^svn(\+ssh)?:\/\//i.test(url)) return { label: 'SVN', className: 'bg-orange-500/15 text-orange-400' };
+  return { label: 'Local', className: 'bg-green-500/15 text-green-400' };
+}
+
+interface TaskListProps {
+  selectedModel: string;
+}
+
+export function TaskList({ selectedModel }: TaskListProps) {
+  const currentProjectId = useProjectStore(s => s.currentProjectId);
+  const tasks = useProjectStore(s => s.tasks);
+  const project = useProjectStore(s => s.projects.find(p => p.id === s.currentProjectId));
+  const client = useWsStore(s => s.client);
+  const addToast = useToastStore(s => s.addToast);
+
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [showImportDrawer, setShowImportDrawer] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
+  const [newTitle, setNewTitle] = useState('');
+  const [newDescription, setNewDescription] = useState('');
+  const [newTaskType, setNewTaskType] = useState<TaskType>('feature');
+  const [newLabel, setNewLabel] = useState('frontend');
+  const [newSpecUrl, setNewSpecUrl] = useState('');
+  const [newBackendSpecUrl, setNewBackendSpecUrl] = useState('');
+  const [stagedFiles, setStagedFiles] = useState<Array<{ file: File; docType: 'SA' | 'SD' | 'image' }>>([]);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
+  const [confirmClearAsana, setConfirmClearAsana] = useState(false);
+  const [showSvnBrowser, setShowSvnBrowser] = useState<'frontend' | 'backend' | false>(false);
+  const [showSvnBrowserForEdit, setShowSvnBrowserForEdit] = useState<'frontend' | 'backend' | false>(false);
+  const pendingUploadsRef = useRef<Array<{ file: File; docType: 'SA' | 'SD' | 'image' }>>([]);
+  const autoExpandNextTask = useRef(false);
+
+  // Check if project has SVN config
+  const svnPaths = (() => {
+    if (!project?.configJson) return { frontend: false, backend: false };
+    try {
+      const config = JSON.parse(project.configJson);
+      return {
+        frontend: !!config?.svnConfig?.frontendSpecPath,
+        backend: !!config?.svnConfig?.backendSpecPath,
+      };
+    } catch { return { frontend: false, backend: false }; }
+  })();
+  const hasSvnConfig = svnPaths.frontend || svnPaths.backend;
+
+  // Available labels based on project paths
+  const availableLabels: string[] = [];
+  if (project?.frontendPath) availableLabels.push('frontend');
+  if (project?.backendPath) availableLabels.push('backend');
+  if (availableLabels.length === 0) availableLabels.push('frontend', 'backend');
+
+  const projectTasks = currentProjectId
+    ? tasks.filter(t => t.projectId === currentProjectId)
+    : [];
+
+  const handleCreateTask = useCallback(() => {
+    if (!currentProjectId || !client || !newTitle.trim()) return;
+
+    // Stage files for upload after task creation
+    pendingUploadsRef.current = [...stagedFiles];
+    autoExpandNextTask.current = true;
+
+    // Combine frontend + backend spec URLs
+    const specUrls = [newSpecUrl.trim(), newBackendSpecUrl.trim()].filter(Boolean);
+    const combinedSpecUrl = specUrls.join('\n') || undefined;
+
+    client.send({
+      type: 'task.create',
+      id: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+      payload: {
+        projectId: currentProjectId,
+        title: newTitle.trim(),
+        description: newDescription.trim() || undefined,
+        taskType: newTaskType,
+        label: newLabel as any,
+        specUrl: combinedSpecUrl,
+      },
+    });
+
+    addToast({ type: 'success', title: 'Task created', message: newTitle.trim() });
+    setNewTitle('');
+    setNewDescription('');
+    setNewSpecUrl('');
+    setNewBackendSpecUrl('');
+    setStagedFiles([]);
+    setShowAddForm(false);
+  }, [currentProjectId, client, newTitle, newDescription, newTaskType, newLabel, newSpecUrl, newBackendSpecUrl, stagedFiles, addToast]);
+
+  // When a new task is created, auto-expand and upload staged files
+  const prevTaskCount = useRef(projectTasks.length);
+  useEffect(() => {
+    if (projectTasks.length > prevTaskCount.current && autoExpandNextTask.current) {
+      const newTask = projectTasks[projectTasks.length - 1];
+      if (newTask) {
+        setExpandedTaskId(newTask.id);
+
+        // Upload staged files with the new task ID
+        const uploads = pendingUploadsRef.current;
+        if (uploads.length > 0 && currentProjectId && client) {
+          for (const { file, docType } of uploads) {
+            const reader = new FileReader();
+            reader.onload = () => {
+              const base64 = (reader.result as string).split(',')[1];
+              client.send({
+                type: 'project.uploadDocument',
+                id: crypto.randomUUID(),
+                timestamp: new Date().toISOString(),
+                payload: {
+                  projectId: currentProjectId,
+                  filename: `[task:${newTask.id}] ${file.name}`,
+                  content: base64,
+                  fileType: file.type || 'application/octet-stream',
+                  docType: docType === 'image' ? 'SD' : docType,
+                },
+              });
+            };
+            reader.readAsDataURL(file);
+          }
+          addToast({ type: 'success', title: `${uploads.length} file(s) uploaded` });
+          pendingUploadsRef.current = [];
+        }
+      }
+      autoExpandNextTask.current = false;
+    }
+    prevTaskCount.current = projectTasks.length;
+  }, [projectTasks.length, currentProjectId, client, addToast]);
+
+  const handleDeleteTask = useCallback((taskId: string) => {
+    if (!currentProjectId || !client) return;
+
+    client.send({
+      type: 'task.delete',
+      id: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+      payload: { projectId: currentProjectId, taskId },
+    });
+
+    addToast({ type: 'success', title: 'Task deleted' });
+    setConfirmDeleteId(null);
+  }, [currentProjectId, client, addToast]);
+
+  const handleClearAsanaTasks = useCallback(() => {
+    if (!currentProjectId || !client) return;
+
+    client.send({
+      type: 'task.bulkDeleteBySource',
+      id: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+      payload: { projectId: currentProjectId, source: 'asana' },
+    });
+
+    addToast({ type: 'success', title: 'All Asana tasks cleared' });
+    setConfirmClearAsana(false);
+  }, [currentProjectId, client, addToast]);
+
+  const handleUpdateTask = useCallback((taskId: string, updates: { description?: string | null; specUrl?: string | null; label?: string; taskType?: TaskType }) => {
+    if (!currentProjectId || !client) return;
+
+    client.send({
+      type: 'task.update',
+      id: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+      payload: { projectId: currentProjectId, taskId, ...updates },
+    });
+  }, [currentProjectId, client]);
+
+  const handleExecuteTask = useCallback((taskId: string) => {
+    if (!currentProjectId || !client) return;
+
+    client.send({
+      type: 'project.startExecution',
+      id: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+      payload: {
+        projectId: currentProjectId,
+        taskId,
+        model: selectedModel,
+      },
+    });
+
+    addToast({ type: 'info', title: 'Task execution started', message: `Using ${selectedModel}...` });
+    setExpandedTaskId(null);
+  }, [currentProjectId, client, selectedModel, addToast]);
+
+  const handleUploadImage = useCallback((taskId: string, file: File) => {
+    if (!currentProjectId || !client) return;
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const base64 = (reader.result as string).split(',')[1];
+      client.send({
+        type: 'project.uploadDocument',
+        id: crypto.randomUUID(),
+        timestamp: new Date().toISOString(),
+        payload: {
+          projectId: currentProjectId,
+          filename: `[task:${taskId}] ${file.name}`,
+          content: base64,
+          fileType: file.type || 'image/png',
+          docType: 'SD',
+        },
+      });
+      addToast({ type: 'success', title: 'Image uploaded', message: file.name });
+    };
+    reader.readAsDataURL(file);
+  }, [currentProjectId, client, addToast]);
+
+  const handleUploadDoc = useCallback((taskId: string, file: File, docType: 'SA' | 'SD') => {
+    if (!currentProjectId || !client) return;
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const base64 = (reader.result as string).split(',')[1];
+      client.send({
+        type: 'project.uploadDocument',
+        id: crypto.randomUUID(),
+        timestamp: new Date().toISOString(),
+        payload: {
+          projectId: currentProjectId,
+          filename: `[task:${taskId}] ${file.name}`,
+          content: base64,
+          fileType: file.type || 'application/octet-stream',
+          docType,
+        },
+      });
+      addToast({ type: 'success', title: `${docType} document uploaded`, message: file.name });
+    };
+    reader.readAsDataURL(file);
+  }, [currentProjectId, client, addToast]);
+
+  const hasAsana = !!project?.asanaProjectGid;
+  const asanaTaskCount = projectTasks.filter(t => t.source === 'asana').length;
+
+  return (
+    <>
+      <div className="bg-card border border-border rounded-lg p-3">
+        {/* Header — clickable to collapse */}
+        <div className="flex items-center justify-between mb-2">
+          <button
+            onClick={() => setCollapsed(prev => !prev)}
+            className="flex items-center gap-2 hover:opacity-80 transition-opacity"
+          >
+            {collapsed
+              ? <IconChevronRight className="w-3.5 h-3.5 text-muted-foreground" />
+              : <IconChevronDown className="w-3.5 h-3.5 text-muted-foreground" />
+            }
+            <h3 className="text-sm font-semibold">Tasks</h3>
+            {projectTasks.length > 0 && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground">
+                {projectTasks.length}
+              </span>
+            )}
+          </button>
+          <div className="flex items-center gap-1.5">
+            {/* Clear Asana tasks */}
+            {asanaTaskCount > 0 && !collapsed && (
+              confirmClearAsana ? (
+                <div className="flex items-center gap-1 animate-fade-in">
+                  <span className="text-[9px] text-muted-foreground">Clear {asanaTaskCount} Asana tasks?</span>
+                  <button
+                    onClick={handleClearAsanaTasks}
+                    className="text-[9px] text-red-400 hover:text-red-300 font-semibold px-1.5 py-0.5 bg-red-500/20 rounded"
+                  >
+                    Yes
+                  </button>
+                  <button
+                    onClick={() => setConfirmClearAsana(false)}
+                    className="text-[9px] text-muted-foreground hover:text-foreground px-1 py-0.5"
+                  >
+                    No
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => setConfirmClearAsana(true)}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-medium text-red-400/70 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+                  title="Clear all Asana-imported tasks"
+                >
+                  <IconTrash className="w-3 h-3" />
+                  Clear Asana
+                </button>
+              )
+            )}
+            {hasAsana && (
+              <button
+                onClick={() => setShowImportDrawer(true)}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-medium bg-orange-500/15 text-orange-400 hover:bg-orange-500/25 transition-colors"
+              >
+                <IconAsana className="w-3 h-3" />
+                Import from Asana
+              </button>
+            )}
+            {!showAddForm && !collapsed && (
+              <button
+                onClick={() => setShowAddForm(true)}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-medium bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
+              >
+                <IconPlus className="w-3 h-3" />
+                Add Task
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Collapsible task list */}
+        {!collapsed && (
+          <>
+            {projectTasks.length === 0 && !showAddForm && (
+              <p className="text-xs text-muted-foreground py-3 text-center">
+                No tasks yet. Add tasks or import from Asana to start.
+              </p>
+            )}
+
+            {projectTasks.length > 0 && (() => {
+              const asanaTasks = projectTasks.filter(t => t.source === 'asana');
+              const manualTasks = projectTasks.filter(t => t.source !== 'asana');
+              const renderTaskRows = (tasks: typeof projectTasks) => tasks.map(task => (
+                <TaskRow
+                  key={task.id}
+                  task={task}
+                  confirmDeleteId={confirmDeleteId}
+                  expandedTaskId={expandedTaskId}
+                  onExecute={handleExecuteTask}
+                  onDelete={handleDeleteTask}
+                  onConfirmDelete={setConfirmDeleteId}
+                  onToggleExpand={(id) => setExpandedTaskId(expandedTaskId === id ? null : id)}
+                  onUpdate={handleUpdateTask}
+                  onUploadDoc={handleUploadDoc}
+                  onUploadImage={handleUploadImage}
+                  hasSvnConfig={hasSvnConfig}
+                  onBrowseSvn={(type) => setShowSvnBrowserForEdit(type || 'frontend')}
+                />
+              ));
+              return (
+                <div className="space-y-3 mb-2">
+                  {asanaTasks.length > 0 && (
+                    <div>
+                      <div className="flex items-center gap-1.5 px-2 mb-1">
+                        <IconAsana className="w-3.5 h-3.5 text-orange-400" />
+                        <span className="text-xs font-semibold text-muted-foreground">Asana Tasks</span>
+                        <span className="text-[10px] text-muted-foreground/60">({asanaTasks.length})</span>
+                      </div>
+                      <div className="space-y-0.5">
+                        {renderTaskRows(asanaTasks)}
+                      </div>
+                    </div>
+                  )}
+                  {manualTasks.length > 0 && (
+                    <div>
+                      <div className="flex items-center gap-1.5 px-2 mb-1">
+                        <span className="text-xs font-semibold text-muted-foreground">Manual Tasks</span>
+                        <span className="text-[10px] text-muted-foreground/60">({manualTasks.length})</span>
+                      </div>
+                      <div className="space-y-0.5">
+                        {renderTaskRows(manualTasks)}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+          </>
+        )}
+
+        {/* Add task form */}
+        {showAddForm && !collapsed && (
+          <div className="border border-border rounded-lg p-3 space-y-2 animate-fade-in mt-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-medium">New Task</span>
+              <button
+                onClick={() => { setShowAddForm(false); setNewTitle(''); setNewDescription(''); setNewSpecUrl(''); setStagedFiles([]); }}
+                className="p-0.5 text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors"
+              >
+                <IconX className="w-3 h-3" />
+              </button>
+            </div>
+
+            <input
+              type="text"
+              value={newTitle}
+              onChange={(e) => setNewTitle(e.target.value)}
+              placeholder="Task title..."
+              className="w-full bg-muted border border-border rounded-md px-2.5 py-1.5 text-xs outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
+              autoFocus
+              onKeyDown={(e) => { if (e.key === 'Enter' && newTitle.trim()) handleCreateTask(); }}
+            />
+
+            <textarea
+              value={newDescription}
+              onChange={(e) => setNewDescription(e.target.value)}
+              onPaste={(e) => {
+                const items = e.clipboardData?.items;
+                if (!items) return;
+                for (let i = 0; i < items.length; i++) {
+                  if (items[i].type.startsWith('image/')) {
+                    e.preventDefault();
+                    const file = items[i].getAsFile();
+                    if (file) {
+                      const ext = file.type.split('/')[1] || 'png';
+                      const named = new File([file], `screenshot-${Date.now()}.${ext}`, { type: file.type });
+                      setStagedFiles(prev => [...prev, { file: named, docType: 'image' }]);
+                      addToast({ type: 'info', title: 'Image staged', message: named.name });
+                    }
+                    return;
+                  }
+                }
+              }}
+              placeholder="Description (optional, 可貼上圖片)..."
+              className="w-full bg-muted border border-border rounded-md px-2.5 py-1.5 text-xs min-h-[50px] resize-y outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
+            />
+
+            <div className="flex gap-2">
+              <div className="flex-1">
+                <label className="block text-[10px] text-muted-foreground mb-0.5">Type</label>
+                <div className="relative">
+                  <select
+                    value={newTaskType}
+                    onChange={(e) => setNewTaskType(e.target.value as TaskType)}
+                    className="w-full bg-muted border border-border rounded-md px-2 py-1.5 text-xs appearance-none outline-none focus:border-primary focus:ring-1 focus:ring-primary/30 pr-6"
+                  >
+                    <option value="feature">Feature</option>
+                    <option value="bug">Bug</option>
+                    <option value="refactor">Refactor</option>
+                    <option value="other">Other</option>
+                  </select>
+                  <IconChevronDown className="w-3 h-3 absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
+                </div>
+              </div>
+              <div className="flex-1">
+                <label className="block text-[10px] text-muted-foreground mb-0.5">Label</label>
+                <div className="relative">
+                  <select
+                    value={newLabel}
+                    onChange={(e) => setNewLabel(e.target.value)}
+                    className="w-full bg-muted border border-border rounded-md px-2 py-1.5 text-xs appearance-none outline-none focus:border-primary focus:ring-1 focus:ring-primary/30 pr-6"
+                  >
+                    {availableLabels.map(l => (
+                      <option key={l} value={l}>{l.charAt(0).toUpperCase() + l.slice(1)}</option>
+                    ))}
+                  </select>
+                  <IconChevronDown className="w-3 h-3 absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
+                </div>
+              </div>
+            </div>
+
+            {/* Spec Source — Frontend */}
+            {svnPaths.frontend && (
+              <div>
+                <label className="block text-[10px] text-muted-foreground mb-0.5">
+                  前端 Spec Source
+                  {newSpecUrl.trim() && (
+                    <span className={`ml-1.5 px-1 py-0 rounded text-[9px] font-medium ${getSpecTypeBadge(newSpecUrl.trim()).className}`}>
+                      {getSpecTypeBadge(newSpecUrl.trim()).label}
+                    </span>
+                  )}
+                </label>
+                <div className="flex gap-1.5">
+                  <input
+                    type="text"
+                    value={newSpecUrl}
+                    onChange={(e) => setNewSpecUrl(e.target.value)}
+                    placeholder="前端 spec URL / path"
+                    className="flex-1 bg-muted border border-border rounded-md px-2.5 py-1.5 text-xs outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowSvnBrowser('frontend')}
+                    className="px-2 py-1.5 text-xs font-medium rounded border border-blue-500/30 text-blue-400 hover:bg-blue-500/10 transition-colors flex-shrink-0"
+                    title="Browse frontend SVN specs"
+                  >
+                    SVN
+                  </button>
+                  {newSpecUrl && (
+                    <button type="button" onClick={() => setNewSpecUrl('')} className="px-1 text-muted-foreground hover:text-red-400 transition-colors">
+                      <IconX className="w-3 h-3" />
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Spec Source — Backend */}
+            {svnPaths.backend && (
+              <div>
+                <label className="block text-[10px] text-muted-foreground mb-0.5">
+                  後端 Spec Source
+                  {newBackendSpecUrl.trim() && (
+                    <span className={`ml-1.5 px-1 py-0 rounded text-[9px] font-medium ${getSpecTypeBadge(newBackendSpecUrl.trim()).className}`}>
+                      {getSpecTypeBadge(newBackendSpecUrl.trim()).label}
+                    </span>
+                  )}
+                </label>
+                <div className="flex gap-1.5">
+                  <input
+                    type="text"
+                    value={newBackendSpecUrl}
+                    onChange={(e) => setNewBackendSpecUrl(e.target.value)}
+                    placeholder="後端 spec URL / path"
+                    className="flex-1 bg-muted border border-border rounded-md px-2.5 py-1.5 text-xs outline-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500/30"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowSvnBrowser('backend')}
+                    className="px-2 py-1.5 text-xs font-medium rounded border border-orange-500/30 text-orange-400 hover:bg-orange-500/10 transition-colors flex-shrink-0"
+                    title="Browse backend SVN specs"
+                  >
+                    SVN
+                  </button>
+                  {newBackendSpecUrl && (
+                    <button type="button" onClick={() => setNewBackendSpecUrl('')} className="px-1 text-muted-foreground hover:text-red-400 transition-colors">
+                      <IconX className="w-3 h-3" />
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Fallback: single spec input if no SVN configured */}
+            {!svnPaths.frontend && !svnPaths.backend && (
+              <div>
+                <label className="block text-[10px] text-muted-foreground mb-0.5">Spec Source (optional)</label>
+                <input
+                  type="text"
+                  value={newSpecUrl}
+                  onChange={(e) => setNewSpecUrl(e.target.value)}
+                  placeholder="HTTP URL / local folder path"
+                  className="w-full bg-muted border border-border rounded-md px-2.5 py-1.5 text-xs outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
+                />
+              </div>
+            )}
+
+            {/* Attachments (auto-detect SA/SD/Image) */}
+            <div>
+              <label className="block text-[10px] text-muted-foreground mb-1">Attachments</label>
+              <button
+                onClick={() => {
+                  const input = document.createElement('input');
+                  input.type = 'file';
+                  input.multiple = true;
+                  input.onchange = () => {
+                    const files = input.files;
+                    if (!files) return;
+                    const newFiles = Array.from(files).map(file => ({
+                      file,
+                      docType: detectDocType(file),
+                    }));
+                    setStagedFiles(prev => [...prev, ...newFiles]);
+                  };
+                  input.click();
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium border border-dashed border-border text-muted-foreground hover:text-foreground hover:border-primary/50 hover:bg-primary/5 transition-colors"
+              >
+                <IconUpload className="w-3.5 h-3.5" />
+                上傳檔案 (自動判斷 SA/SD)
+              </button>
+              {stagedFiles.length > 0 && (
+                <div className="mt-1.5 space-y-1">
+                  {stagedFiles.map((sf, i) => (
+                    <div key={i} className="flex items-center gap-2 text-xs">
+                      <button
+                        onClick={() => {
+                          setStagedFiles(prev => prev.map((f, idx) => idx === i
+                            ? { ...f, docType: f.docType === 'SA' ? 'SD' : f.docType === 'SD' ? 'image' : 'SA' }
+                            : f
+                          ));
+                        }}
+                        className={`px-1.5 py-0.5 rounded text-[9px] font-medium cursor-pointer hover:opacity-80 transition-opacity ${
+                          sf.docType === 'SA' ? 'bg-blue-500/15 text-blue-400' :
+                          sf.docType === 'SD' ? 'bg-purple-500/15 text-purple-400' :
+                          'bg-green-500/15 text-green-400'
+                        }`}
+                        title="點擊切換類型"
+                      >{sf.docType === 'image' ? 'IMG' : sf.docType}</button>
+                      <span className="text-foreground/70 truncate flex-1">{sf.file.name}</span>
+                      <button
+                        onClick={() => setStagedFiles(prev => prev.filter((_, idx) => idx !== i))}
+                        className="text-muted-foreground hover:text-red-400 transition-colors"
+                      >
+                        <IconX className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <button
+              onClick={handleCreateTask}
+              disabled={!newTitle.trim()}
+              className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-primary text-primary-foreground rounded-lg disabled:opacity-40 disabled:cursor-not-allowed hover:bg-primary/90 transition-colors"
+            >
+              <IconPlus className="w-3 h-3" />
+              Create Task{stagedFiles.length > 0 ? ` (${stagedFiles.length} file${stagedFiles.length > 1 ? 's' : ''})` : ''}
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Asana import drawer */}
+      <AsanaImportDrawer open={showImportDrawer} onClose={() => setShowImportDrawer(false)} />
+
+      {/* SVN browser for new task */}
+      {showSvnBrowser && (
+        <SvnBrowser
+          lockedSpecType={showSvnBrowser}
+          onSelect={(url) => {
+            if (showSvnBrowser === 'backend') {
+              setNewBackendSpecUrl(url);
+            } else {
+              setNewSpecUrl(url);
+            }
+            setShowSvnBrowser(false);
+          }}
+          onClose={() => setShowSvnBrowser(false)}
+        />
+      )}
+
+      {/* SVN browser for editing existing task */}
+      {showSvnBrowserForEdit && (
+        <SvnBrowser
+          lockedSpecType={showSvnBrowserForEdit}
+          onSelect={(url) => {
+            if (expandedTaskId) {
+              handleUpdateTask(expandedTaskId, { specUrl: url });
+            }
+            setShowSvnBrowserForEdit(false);
+          }}
+          onClose={() => setShowSvnBrowserForEdit(false)}
+        />
+      )}
+    </>
+  );
+}
+
+/* ─── Single task row with expandable detail ─── */
+function TaskRow({ task, confirmDeleteId, expandedTaskId, onExecute, onDelete, onConfirmDelete, onToggleExpand, onUpdate, onUploadDoc, onUploadImage, hasSvnConfig, onBrowseSvn }: {
+  task: Task;
+  confirmDeleteId: string | null;
+  expandedTaskId: string | null;
+  onExecute: (id: string) => void;
+  onDelete: (id: string) => void;
+  onConfirmDelete: (id: string | null) => void;
+  onToggleExpand: (id: string) => void;
+  onUpdate: (id: string, updates: { description?: string | null; specUrl?: string | null; label?: string; taskType?: TaskType }) => void;
+  onUploadDoc: (taskId: string, file: File, docType: 'SA' | 'SD') => void;
+  onUploadImage: (taskId: string, file: File) => void;
+  hasSvnConfig?: boolean;
+  onBrowseSvn?: (specType?: 'frontend' | 'backend') => void;
+}) {
+  const isRunning = task.status === 'in_progress' || task.status === 'assigned';
+  const isExpanded = expandedTaskId === task.id;
+  const isAsana = task.source === 'asana';
+
+  return (
+    <div>
+      <div
+        className="flex items-center gap-1.5 px-2 py-1.5 rounded-md hover:bg-muted/50 group transition-colors cursor-pointer"
+        onClick={() => onToggleExpand(task.id)}
+      >
+        {/* Expand arrow */}
+        <button className="p-0 text-muted-foreground/50 flex-shrink-0">
+          {isExpanded
+            ? <IconChevronDown className="w-3.5 h-3.5" />
+            : <IconChevronRight className="w-3.5 h-3.5" />
+          }
+        </button>
+
+        {/* Type badge */}
+        <span className={`text-[11px] font-bold px-1.5 py-0.5 rounded flex-shrink-0 w-[3.5rem] text-center ${TASK_TYPE_COLORS[task.taskType] || TASK_TYPE_COLORS.other}`}>
+          {task.taskType}
+        </span>
+
+        {/* Label badge */}
+        <span className={`text-[11px] px-1.5 py-0.5 rounded flex-shrink-0 w-[4rem] text-center ${LABEL_COLORS[task.label] || 'bg-muted text-muted-foreground'}`}>
+          {task.label}
+        </span>
+
+        {/* Spec icon */}
+        <span className="flex-shrink-0 w-4 flex items-center justify-center">
+          {task.specUrl ? (
+            <span title={`Spec: ${task.specUrl}`}><IconDocument className="w-3.5 h-3.5 text-cyan-400" /></span>
+          ) : null}
+        </span>
+
+        {/* Title */}
+        <span className="flex-1 min-w-0 text-sm text-foreground truncate">
+          {task.title || <span className="italic text-muted-foreground">Untitled</span>}
+        </span>
+
+        {/* Status — fixed width for alignment */}
+        <span className={`text-[11px] font-medium flex-shrink-0 w-[6.5rem] text-center px-2 py-0.5 rounded border ${STATUS_STYLES[task.status] || 'bg-gray-500/10 text-gray-400 border-gray-500/20'}`}>
+          {task.status.replace(/_/g, ' ')}
+        </span>
+
+        {/* Execute button — always visible when task is executable */}
+        <div className="flex-shrink-0 w-[2rem] flex justify-center" onClick={e => e.stopPropagation()}>
+          {!isRunning && task.status !== 'completed' && (
+            <button
+              onClick={() => onExecute(task.id)}
+              className="p-1.5 rounded-md bg-green-500/15 text-green-400 hover:bg-green-500/25 hover:text-green-300 transition-colors"
+              title="Execute task"
+            >
+              <IconPlay className="w-4 h-4" />
+            </button>
+          )}
+        </div>
+
+        {/* Actions (delete) */}
+        <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 w-[2.5rem] justify-end" onClick={e => e.stopPropagation()}>
+
+          {confirmDeleteId === task.id ? (
+            <div className="flex items-center gap-0.5 animate-fade-in">
+              <button
+                onClick={() => onDelete(task.id)}
+                className="text-[10px] text-red-400 hover:text-red-300 font-semibold px-1.5 py-0.5 bg-red-500/20 rounded"
+              >
+                Yes
+              </button>
+              <button
+                onClick={() => onConfirmDelete(null)}
+                className="text-[10px] text-muted-foreground hover:text-foreground px-1 py-0.5"
+              >
+                No
+              </button>
+            </div>
+          ) : (
+            !isRunning && (
+              <button
+                onClick={() => onConfirmDelete(task.id)}
+                className="p-1 rounded text-muted-foreground/40 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+                title="Delete task"
+              >
+                <IconTrash className="w-3.5 h-3.5" />
+              </button>
+            )
+          )}
+        </div>
+      </div>
+
+      {/* Expanded detail — editable */}
+      {isExpanded && (
+        <TaskExpandedDetail
+          task={task}
+          onUpdate={onUpdate}
+          onUploadDoc={onUploadDoc}
+          onUploadImage={onUploadImage}
+          hasSvnConfig={hasSvnConfig}
+          onBrowseSvn={onBrowseSvn}
+          onExecute={onExecute}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ─── Expanded detail with inline editing ─── */
+interface SvnPreviewFile {
+  filename: string;
+  svnUrl: string;
+  svnRoot: 'frontend' | 'backend';
+}
+
+function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvnConfig, onBrowseSvn, onExecute }: {
+  task: Task;
+  onUpdate: (id: string, updates: { description?: string | null; specUrl?: string | null; label?: string; taskType?: TaskType }) => void;
+  onUploadDoc: (taskId: string, file: File, docType: 'SA' | 'SD') => void;
+  onUploadImage: (taskId: string, file: File) => void;
+  hasSvnConfig?: boolean;
+  onBrowseSvn?: (specType?: 'frontend' | 'backend') => void;
+  onExecute?: (id: string) => void;
+}) {
+  const ALL_LABELS = ['frontend', 'backend', 'devops', 'testing', 'review', 'architect'] as const;
+  const ALL_TASK_TYPES: TaskType[] = ['bug', 'feature', 'refactor', 'other'];
+  const isAsana = task.source === 'asana';
+  const client = useWsStore(s => s.client);
+  const currentProjectId = useProjectStore(s => s.currentProjectId);
+  const [editingDesc, setEditingDesc] = useState(false);
+  const [editingSpec, setEditingSpec] = useState(false);
+  const [descDraft, setDescDraft] = useState(task.description || '');
+  const [specDraft, setSpecDraft] = useState(task.specUrl || '');
+  const [pastedImages, setPastedImages] = useState<Array<{ name: string; dataUrl: string }>>([]);
+  const saInputRef = useRef<HTMLInputElement>(null);
+  const imgInputRef = useRef<HTMLInputElement>(null);
+
+  // SVN preview: auto-fetch matching spec files based on parentName
+  const [svnPreviewFiles, setSvnPreviewFiles] = useState<SvnPreviewFile[]>([]);
+  const [svnPreviewLoading, setSvnPreviewLoading] = useState(false);
+  const [svnPreviewError, setSvnPreviewError] = useState('');
+  const svnPreviewFetched = useRef(false);
+
+  useEffect(() => {
+    if (!client || !currentProjectId || !hasSvnConfig || svnPreviewFetched.current) return;
+    // Only preview if task has a parentName or a recognizable function code in title
+    const functionCode = task.parentName;
+    if (!functionCode) return;
+
+    svnPreviewFetched.current = true;
+    setSvnPreviewLoading(true);
+
+    const unsub = client.addMessageListener((msg) => {
+      if (msg.type === 'svn.previewResult') {
+        const p = msg.payload as { functionCode: string; files: SvnPreviewFile[]; error?: string };
+        setSvnPreviewLoading(false);
+        if (p.error) {
+          setSvnPreviewError(p.error);
+        } else {
+          setSvnPreviewFiles(p.files || []);
+        }
+        unsub();
+      }
+    });
+
+    client.send({
+      type: 'svn.preview',
+      id: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+      payload: {
+        projectId: currentProjectId,
+        taskId: task.id,
+        taskLabel: task.label,
+      },
+    });
+
+    return unsub;
+  }, [client, currentProjectId, hasSvnConfig, task.id, task.parentName, task.label]);
+
+  const saveDesc = () => {
+    onUpdate(task.id, { description: descDraft.trim() || null });
+    setEditingDesc(false);
+  };
+
+  const saveSpec = () => {
+    onUpdate(task.id, { specUrl: specDraft.trim() || null });
+    setEditingSpec(false);
+  };
+
+  const handleImageUpload = (file: File) => {
+    // Show preview immediately
+    const reader = new FileReader();
+    reader.onload = () => {
+      setPastedImages(prev => [...prev, { name: file.name, dataUrl: reader.result as string }]);
+    };
+    reader.readAsDataURL(file);
+    // Upload to server
+    onUploadImage(task.id, file);
+  };
+
+  const handleDescPaste = (e: React.ClipboardEvent) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].type.startsWith('image/')) {
+        e.preventDefault();
+        const file = items[i].getAsFile();
+        if (file) {
+          const ext = file.type.split('/')[1] || 'png';
+          const named = new File([file], `screenshot-${Date.now()}.${ext}`, { type: file.type });
+          handleImageUpload(named);
+        }
+        return;
+      }
+    }
+  };
+
+  const handleImageFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      handleImageUpload(file);
+      e.target.value = '';
+    }
+  };
+
+  return (
+    <div className="ml-8 mr-2 mb-2 p-3 rounded-md bg-muted/30 border border-border/50 space-y-3 animate-fade-in">
+      {/* Type — editable */}
+      <div>
+        <span className="text-xs text-muted-foreground font-semibold block mb-1">Type</span>
+        <div className="flex flex-wrap gap-1.5">
+          {ALL_TASK_TYPES.map(t => (
+            <button
+              key={t}
+              onClick={() => { if (t !== task.taskType) onUpdate(task.id, { taskType: t }); }}
+              className={`px-2.5 py-1 rounded text-xs font-medium transition-colors ${
+                t === task.taskType
+                  ? `${TASK_TYPE_COLORS[t]} ring-1 ring-current`
+                  : 'bg-muted text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              {t.toUpperCase()}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Label — editable */}
+      <div>
+        <span className="text-xs text-muted-foreground font-semibold block mb-1">Label (Role)</span>
+        <div className="flex flex-wrap gap-1.5">
+          {ALL_LABELS.map(l => (
+            <button
+              key={l}
+              onClick={() => { if (l !== task.label) onUpdate(task.id, { label: l }); }}
+              className={`px-2.5 py-1 rounded text-xs font-medium transition-colors ${
+                l === task.label
+                  ? `${LABEL_COLORS[l]} ring-1 ring-current`
+                  : 'bg-muted text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              {l.toUpperCase()}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Description — editable */}
+      <div>
+        <div className="flex items-center gap-2 mb-1">
+          <span className="text-xs text-muted-foreground font-semibold">Description</span>
+          {!editingDesc && (
+            <button
+              onClick={() => { setDescDraft(task.description || ''); setEditingDesc(true); }}
+              className="px-2 py-0.5 text-xs font-medium rounded border border-primary/40 text-primary hover:bg-primary/10 transition-colors"
+            >
+              {task.description ? 'Edit' : '+ Add'}
+            </button>
+          )}
+        </div>
+        {editingDesc ? (
+          <div className="space-y-1.5">
+            <textarea
+              value={descDraft}
+              onChange={(e) => setDescDraft(e.target.value)}
+              onPaste={handleDescPaste}
+              placeholder="Task description... (可貼上圖片)"
+              className="w-full bg-muted border border-border rounded-md px-3 py-2 text-sm min-h-[80px] resize-y outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
+              autoFocus
+            />
+            {/* Image previews */}
+            {pastedImages.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {pastedImages.map((img, i) => (
+                  <div key={i} className="relative group">
+                    <img src={img.dataUrl} alt={img.name} className="w-24 h-24 object-cover rounded-md border border-border" />
+                    <span className="absolute bottom-0 left-0 right-0 bg-black/60 text-[9px] text-white px-1 py-0.5 truncate rounded-b-md">
+                      {img.name}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="flex gap-2 items-center">
+              <button onClick={saveDesc} className="inline-flex items-center gap-1 px-3 py-1 text-xs font-semibold rounded bg-primary text-primary-foreground hover:bg-primary/90 transition-colors">
+                <IconCheck className="w-3.5 h-3.5" /> Save
+              </button>
+              <button onClick={() => setEditingDesc(false)} className="px-3 py-1 text-xs font-medium rounded border border-border text-muted-foreground hover:text-foreground hover:border-foreground/30 transition-colors">
+                Cancel
+              </button>
+              <input ref={imgInputRef} type="file" accept="image/*" className="hidden" onChange={handleImageFileSelect} />
+              <button
+                onClick={() => imgInputRef.current?.click()}
+                className="ml-auto inline-flex items-center gap-1 px-2 py-1 text-xs font-medium rounded border border-border text-muted-foreground hover:text-foreground hover:border-foreground/30 transition-colors"
+                title="Upload image"
+              >
+                <IconUpload className="w-3 h-3" /> Image
+              </button>
+            </div>
+          </div>
+        ) : task.description ? (
+          <p className="text-sm text-foreground whitespace-pre-wrap">{task.description}</p>
+        ) : (
+          <p className="text-xs text-muted-foreground italic">No description</p>
+        )}
+      </div>
+
+      {/* Spec Source — editable */}
+      <div>
+        <div className="flex items-center gap-2 mb-1">
+          <span className="text-xs text-muted-foreground font-semibold">Spec Source</span>
+          {task.specUrl && (
+            <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${getSpecTypeBadge(task.specUrl).className}`}>
+              {getSpecTypeBadge(task.specUrl).label}
+            </span>
+          )}
+          {!editingSpec && (
+            <>
+              <button
+                onClick={() => { setSpecDraft(task.specUrl || ''); setEditingSpec(true); }}
+                className="px-2 py-0.5 text-xs font-medium rounded border border-primary/40 text-primary hover:bg-primary/10 transition-colors"
+              >
+                {task.specUrl ? 'Edit' : '+ Add'}
+              </button>
+              {hasSvnConfig && (
+                <>
+                  <button
+                    onClick={() => onBrowseSvn?.('frontend')}
+                    className="px-2 py-0.5 text-xs font-medium rounded border border-blue-500/30 text-blue-400 hover:bg-blue-500/10 transition-colors"
+                  >
+                    前端 SVN
+                  </button>
+                  <button
+                    onClick={() => onBrowseSvn?.('backend')}
+                    className="px-2 py-0.5 text-xs font-medium rounded border border-orange-500/30 text-orange-400 hover:bg-orange-500/10 transition-colors"
+                  >
+                    後端 SVN
+                  </button>
+                </>
+              )}
+            </>
+          )}
+        </div>
+        {editingSpec ? (
+          <div className="space-y-1.5">
+            <div className="flex gap-1.5">
+              <input
+                type="text"
+                value={specDraft}
+                onChange={(e) => setSpecDraft(e.target.value)}
+                placeholder="HTTP URL / SVN URL / local folder path"
+                className="flex-1 bg-muted border border-border rounded-md px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
+                autoFocus
+                onKeyDown={(e) => { if (e.key === 'Enter') saveSpec(); }}
+              />
+              {hasSvnConfig && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => onBrowseSvn?.('frontend')}
+                    className="px-2.5 py-2 text-xs font-medium rounded border border-blue-500/30 text-blue-400 hover:bg-blue-500/10 transition-colors flex-shrink-0"
+                    title="Browse Frontend SVN"
+                  >
+                    前端
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onBrowseSvn?.('backend')}
+                    className="px-2.5 py-2 text-xs font-medium rounded border border-orange-500/30 text-orange-400 hover:bg-orange-500/10 transition-colors flex-shrink-0"
+                    title="Browse Backend SVN"
+                  >
+                    後端
+                  </button>
+                </>
+              )}
+            </div>
+            <div className="flex gap-2">
+              <button onClick={saveSpec} className="inline-flex items-center gap-1 px-3 py-1 text-xs font-semibold rounded bg-primary text-primary-foreground hover:bg-primary/90 transition-colors">
+                <IconCheck className="w-3.5 h-3.5" /> Save
+              </button>
+              <button onClick={() => setEditingSpec(false)} className="px-3 py-1 text-xs font-medium rounded border border-border text-muted-foreground hover:text-foreground hover:border-foreground/30 transition-colors">
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : task.specUrl ? (
+          <div className="flex items-center gap-2">
+            <a
+              href={task.specUrl.startsWith('http') ? task.specUrl : undefined}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-sm text-cyan-400 hover:underline truncate"
+            >
+              {task.specUrl}
+            </a>
+            {task.specUrl.startsWith('http') && <IconExternalLink className="w-3.5 h-3.5 text-cyan-400 flex-shrink-0" />}
+          </div>
+        ) : (
+          <p className="text-xs text-muted-foreground italic">No spec source</p>
+        )}
+      </div>
+
+      {/* SVN Spec Preview — auto-matched files from parentName */}
+      {hasSvnConfig && task.parentName && (
+        <div>
+          <span className="text-xs text-muted-foreground font-semibold block mb-1.5">
+            SVN 自動匹配 Spec
+            {task.parentName && (
+              <span className="ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-mono bg-muted text-foreground/70">{task.parentName}</span>
+            )}
+          </span>
+          {svnPreviewLoading ? (
+            <div className="flex items-center gap-2 py-2">
+              <div className="w-3.5 h-3.5 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
+              <span className="text-xs text-muted-foreground">搜尋 SVN 規格文件...</span>
+            </div>
+          ) : svnPreviewError ? (
+            <p className="text-xs text-red-400 py-1">{svnPreviewError}</p>
+          ) : svnPreviewFiles.length > 0 ? (
+            <div className="space-y-1">
+              {svnPreviewFiles.map((f, i) => (
+                <div key={i} className="flex items-center gap-2 text-xs group/svn">
+                  <span className={`px-1.5 py-0.5 rounded text-[9px] font-medium flex-shrink-0 ${
+                    f.svnRoot === 'frontend' ? 'bg-blue-500/15 text-blue-400' : 'bg-orange-500/15 text-orange-400'
+                  }`}>
+                    {f.svnRoot === 'frontend' ? '前端' : '後端'}
+                  </span>
+                  <svg className="w-3.5 h-3.5 text-cyan-400 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                    <polyline points="14 2 14 8 20 8"/>
+                  </svg>
+                  <span className="text-foreground/80 truncate flex-1" title={f.svnUrl}>{f.filename}</span>
+                  <button
+                    onClick={() => onUpdate(task.id, { specUrl: f.svnUrl })}
+                    className="opacity-0 group-hover/svn:opacity-100 px-1.5 py-0.5 text-[10px] font-medium rounded border border-primary/30 text-primary hover:bg-primary/10 transition-all flex-shrink-0"
+                    title="使用此檔案作為 Spec Source"
+                  >
+                    Use
+                  </button>
+                </div>
+              ))}
+              <p className="text-[10px] text-muted-foreground/60 mt-1">
+                執行時會自動下載以上文件。點 Use 可手動指定為 Spec Source。
+              </p>
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground/60 italic py-1">未找到匹配的 SVN 規格文件</p>
+          )}
+        </div>
+      )}
+
+      {/* Document Upload (auto-detect SA/SD) */}
+      <div>
+        <span className="text-xs text-muted-foreground font-semibold block mb-1.5">Upload Documents</span>
+        <input ref={saInputRef} type="file" multiple className="hidden" onChange={(e) => {
+          const files = e.target.files;
+          if (!files) return;
+          for (const file of Array.from(files)) {
+            const docType = detectDocType(file);
+            if (docType === 'image') {
+              handleImageUpload(file);
+            } else {
+              onUploadDoc(task.id, file, docType);
+            }
+          }
+          e.target.value = '';
+        }} />
+        <button
+          onClick={() => saInputRef.current?.click()}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium border border-dashed border-border text-muted-foreground hover:text-foreground hover:border-primary/50 hover:bg-primary/5 transition-colors"
+        >
+          <IconUpload className="w-3.5 h-3.5" />
+          上傳檔案 (自動判斷 SA/SD)
+        </button>
+      </div>
+
+      {/* Asana reference + Execute button row */}
+      <div className="flex items-center justify-between pt-2 border-t border-border/50 mt-2">
+        <div className="flex items-center gap-2">
+          {isAsana && task.sourceRef && (
+            <>
+              <IconAsana className="w-3.5 h-3.5 text-orange-400" />
+              <span className="text-xs text-muted-foreground">Asana GID: {task.sourceRef}</span>
+            </>
+          )}
+        </div>
+        {onExecute && task.status !== 'in_progress' && task.status !== 'assigned' && task.status !== 'completed' && (
+          <button
+            onClick={() => onExecute(task.id)}
+            className="inline-flex items-center gap-2 px-6 py-2 rounded-lg bg-green-500/20 text-green-300 hover:bg-green-500/30 hover:text-green-200 font-semibold text-sm transition-colors whitespace-nowrap border border-green-500/30"
+          >
+            <IconPlay className="w-4.5 h-4.5" />
+            Execute Task
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}

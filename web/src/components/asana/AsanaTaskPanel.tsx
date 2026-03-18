@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useAsanaStore } from '../../stores/asanaStore';
 import { useWsStore } from '../../stores/wsStore';
-import type { AsanaTask, ProjectMode } from '@omni/shared';
+import type { AsanaTask } from '@omni/shared';
 import { IconRefresh, IconSearch, IconExternalLink, IconAsana, IconChevronDown } from '../ui/Icons';
 
 /** Render text with clickable URLs */
@@ -31,7 +31,7 @@ function Linkify({ children }: { children: string }) {
 }
 
 interface AsanaTaskPanelProps {
-  onUseTask?: (task: AsanaTask, mode: ProjectMode) => void;
+  onUseTask?: (task: AsanaTask) => void;
 }
 
 export function AsanaTaskPanel({ onUseTask }: AsanaTaskPanelProps) {
@@ -104,9 +104,9 @@ export function AsanaTaskPanel({ onUseTask }: AsanaTaskPanelProps) {
     return groups;
   }, [filteredTasks]);
 
-  const handleUseTask = (task: AsanaTask, mode: ProjectMode) => {
+  const handleUseTask = (task: AsanaTask) => {
     if (onUseTask) {
-      onUseTask(task, mode);
+      onUseTask(task);
     }
   };
 
@@ -264,7 +264,7 @@ interface TaskCardProps {
   task: AsanaTask;
   expanded: boolean;
   onToggle: () => void;
-  onUseTask: (task: AsanaTask, mode: ProjectMode) => void;
+  onUseTask: (task: AsanaTask) => void;
 }
 
 function TaskCard({ task, expanded, onToggle, onUseTask }: TaskCardProps) {
@@ -358,16 +358,10 @@ function TaskCard({ task, expanded, onToggle, onUseTask }: TaskCardProps) {
           {/* Actions */}
           <div className="flex items-center gap-2 mt-4">
             <button
-              onClick={() => onUseTask(task, 'quick')}
-              className="flex-1 px-3 py-2 bg-amber-500/20 text-amber-400 rounded-lg text-sm font-medium hover:bg-amber-500/30 transition-colors"
+              onClick={() => onUseTask(task)}
+              className="flex-1 px-3 py-2 bg-primary/20 text-primary rounded-lg text-sm font-medium hover:bg-primary/30 transition-colors"
             >
-              Quick Task
-            </button>
-            <button
-              onClick={() => onUseTask(task, 'spec')}
-              className="flex-1 px-3 py-2 bg-blue-500/20 text-blue-400 rounded-lg text-sm font-medium hover:bg-blue-500/30 transition-colors"
-            >
-              Spec Mode
+              Import to Project
             </button>
             {task.permalink_url && (
               <a

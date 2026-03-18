@@ -5,6 +5,7 @@ import { genId } from '../../utils/uuid.js';
 export function createAgent(data: {
   projectId: string;
   role: AgentRole;
+  title?: string;
   systemPrompt?: string;
   model?: string;
   allowedTools?: string[];
@@ -12,10 +13,11 @@ export function createAgent(data: {
   const db = getDb();
   const id = genId();
   db.prepare(`
-    INSERT INTO agents (id, project_id, role, system_prompt, model, allowed_tools)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO agents (id, project_id, role, title, system_prompt, model, allowed_tools)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
   `).run(
     id, data.projectId, data.role,
+    data.title || null,
     data.systemPrompt || null,
     data.model || 'sonnet',
     data.allowedTools ? JSON.stringify(data.allowedTools) : null,
@@ -51,12 +53,14 @@ export function updateAgent(id: string, data: Partial<{
   sessionId: string | null;
   pid: number | null;
   currentTaskId: string | null;
+  title: string | null;
   model: string;
   totalCostUsd: number;
   totalTurns: number;
   totalInputTokens: number;
   totalOutputTokens: number;
   lastHeartbeat: string;
+  reviewResultJson: string | null;
 }>): void {
   const db = getDb();
   const sets: string[] = [];
@@ -66,12 +70,14 @@ export function updateAgent(id: string, data: Partial<{
   if (data.sessionId !== undefined) { sets.push('session_id = ?'); values.push(data.sessionId); }
   if (data.pid !== undefined) { sets.push('pid = ?'); values.push(data.pid); }
   if (data.currentTaskId !== undefined) { sets.push('current_task_id = ?'); values.push(data.currentTaskId); }
+  if (data.title !== undefined) { sets.push('title = ?'); values.push(data.title); }
   if (data.model !== undefined) { sets.push('model = ?'); values.push(data.model); }
   if (data.totalCostUsd !== undefined) { sets.push('total_cost_usd = ?'); values.push(data.totalCostUsd); }
   if (data.totalTurns !== undefined) { sets.push('total_turns = ?'); values.push(data.totalTurns); }
   if (data.totalInputTokens !== undefined) { sets.push('total_input_tokens = ?'); values.push(data.totalInputTokens); }
   if (data.totalOutputTokens !== undefined) { sets.push('total_output_tokens = ?'); values.push(data.totalOutputTokens); }
   if (data.lastHeartbeat !== undefined) { sets.push('last_heartbeat = ?'); values.push(data.lastHeartbeat); }
+  if (data.reviewResultJson !== undefined) { sets.push('review_result_json = ?'); values.push(data.reviewResultJson); }
 
   if (sets.length === 0) return;
   sets.push("updated_at = datetime('now')");
@@ -83,7 +89,8 @@ export function updateAgent(id: string, data: Partial<{
 export function deleteAgent(id: string): void {
   const db = getDb();
   const del = db.transaction(() => {
-    // Clear FK references that lack ON DELETE CASCADE
+    // Reset tasks assigned to this agent back to pending so they can be re-executed
+    db.prepare("UPDATE tasks SET assigned_agent_id = NULL, status = 'pending' WHERE assigned_agent_id = ? AND status IN ('in_progress', 'assigned')").run(id);
     db.prepare('UPDATE tasks SET assigned_agent_id = NULL WHERE assigned_agent_id = ?').run(id);
     db.prepare('DELETE FROM interventions WHERE agent_id = ?').run(id);
     // agent_outputs has ON DELETE CASCADE, so it's handled automatically
@@ -96,6 +103,7 @@ function mapAgent(row: Record<string, unknown>): Agent {
   return {
     id: row['id'] as string,
     projectId: row['project_id'] as string,
+    title: (row['title'] as string) || null,
     role: row['role'] as AgentRole,
     status: row['status'] as AgentStatus,
     sessionId: row['session_id'] as string | null,

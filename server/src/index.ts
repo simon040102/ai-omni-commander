@@ -12,11 +12,20 @@ import { AgentManager } from './agent/AgentManager.js';
 import { TaskDispatcher } from './orchestrator/TaskDispatcher.js';
 import { SpecModeHandler } from './orchestrator/SpecModeHandler.js';
 import { CreativeModeHandler } from './orchestrator/CreativeModeHandler.js';
-import { QuickModeHandler } from './orchestrator/QuickModeHandler.js';
+import { ExecutionPipeline } from './orchestrator/ExecutionPipeline.js';
 import { MasterOrchestrator } from './orchestrator/MasterOrchestrator.js';
+import { QuickModeHandler } from './orchestrator/QuickModeHandler.js';
+import { WorkspaceScanner } from './workspace/WorkspaceScanner.js';
+import { SkillGenerator } from './workspace/SkillGenerator.js';
 import { OmniWebSocketServer } from './websocket/WebSocketServer.js';
 import { registerHandlers } from './websocket/MessageRouter.js';
 import { AsanaMcpClient } from './asana/AsanaMcpClient.js';
+import { AsanaSyncService } from './asana/AsanaSyncService.js';
+import { TaskClassifier } from './orchestrator/TaskClassifier.js';
+import { CodeReviewAgent } from './review/CodeReviewAgent.js';
+import { ReviewTrigger } from './review/ReviewTrigger.js';
+import { RetryHandler } from './review/RetryHandler.js';
+import { SvnSpecService } from './svn/SvnSpecService.js';
 import { listProjects } from './db/queries/projects.js';
 import { getRecentPaths, addRecentPath, removeRecentPath, clearRecentPaths, migrateProjectPathsToRecent } from './db/queries/recentPaths.js';
 import { genId } from './utils/uuid.js';
@@ -70,8 +79,25 @@ async function main() {
 
   const specHandler = new SpecModeHandler(agentManager, dispatcher, contextSync, eventBus);
   const creativeHandler = new CreativeModeHandler(agentManager, dispatcher, contextSync, eventBus);
-  const quickHandler = new QuickModeHandler(agentManager, eventBus);
-  const orchestrator = new MasterOrchestrator(specHandler, creativeHandler, quickHandler);
+  const specCacheDir = path.join(path.dirname(config.dbPath), 'spec-cache');
+  const pipeline = new ExecutionPipeline(agentManager, eventBus, specHandler.getDocumentParser(), specCacheDir);
+
+  // SVN Spec Service: auto-fetch spec documents from SVN
+  const svnCacheDir = path.join(path.dirname(config.dbPath), 'svn-cache');
+  const svnSpecService = new SvnSpecService(specHandler.getDocumentParser(), svnCacheDir);
+  pipeline.setSvnSpecService(svnSpecService);
+
+  const orchestrator = new MasterOrchestrator(specHandler, creativeHandler, pipeline);
+  const quickModeHandler = new QuickModeHandler(agentManager, eventBus);
+
+  // v2: Workspace services
+  const workspaceScanner = new WorkspaceScanner();
+  const skillGenerator = new SkillGenerator(agentManager);
+
+  // v3: Code review and auto-retry
+  const codeReviewAgent = new CodeReviewAgent(agentManager, eventBus, contextSync);
+  const _reviewTrigger = new ReviewTrigger(eventBus, codeReviewAgent);
+  const _retryHandler = new RetryHandler(eventBus, pipeline);
 
   // Create Asana MCP client (optional - only connects when ASANA_PAT is set)
   const asanaClient = new AsanaMcpClient(config);
@@ -80,6 +106,9 @@ async function main() {
   } else {
     logger.info('Asana MCP integration disabled (ASANA_PAT not set)');
   }
+
+  // Create task classifier and sync service
+  const taskClassifier = new TaskClassifier();
 
   // 3. Create Express app for HTTP
   const app = express();
@@ -162,24 +191,116 @@ async function main() {
       return;
     }
     try {
-      const skills: { name: string; filename: string; path: string }[] = [];
-      const commandsDir = path.join(dir, '.claude', 'commands');
-      if (fs.existsSync(commandsDir)) {
-        const entries = fs.readdirSync(commandsDir, { withFileTypes: true });
-        for (const e of entries) {
-          if (e.isFile() && e.name.endsWith('.md')) {
-            skills.push({
-              name: e.name.replace(/\.md$/, ''),
-              filename: e.name,
-              path: path.join(commandsDir, e.name),
-            });
+      const result = workspaceScanner.scan(dir);
+      res.json({
+        skills: result.skills,
+        hasClaudeMd: result.hasClaudeMd,
+        hasClaudeDir: result.hasClaudeDir,
+        detectedFramework: result.detectedFramework,
+        scripts: result.scripts,
+      });
+    } catch (err) {
+      res.status(400).json({ error: `Cannot read skills: ${dir}` });
+    }
+  });
+
+  // v2: Workspace scan endpoint (for folder picker real-time feedback)
+  app.get('/api/workspace/scan', (req, res) => {
+    const dir = req.query['path'] as string;
+    if (!dir) {
+      res.status(400).json({ error: 'path is required' });
+      return;
+    }
+    try {
+      const result = workspaceScanner.scan(dir);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: `Cannot scan workspace: ${dir}` });
+    }
+  });
+
+  // ============ DB Explorer (read-only) ============
+  const DB_TABLE_WHITELIST = [
+    'projects', 'agents', 'tasks', 'task_dependencies', 'task_documents', 'events',
+    'agent_outputs', 'documents', 'interventions', 'agent_plans',
+    'recent_paths', 'workspace_skills',
+  ];
+
+  app.get('/api/db/tables', (_req, res) => {
+    try {
+      const tables = DB_TABLE_WHITELIST.map(name => {
+        const row = db.prepare(`SELECT COUNT(*) as count FROM ${name}`).get() as { count: number };
+        return { name, count: row.count };
+      });
+      res.json({ tables });
+    } catch (err) {
+      res.status(500).json({ error: `Failed to list tables: ${(err as Error).message}` });
+    }
+  });
+
+  app.get('/api/db/:table', (req, res) => {
+    const tableName = req.params['table'];
+    if (!tableName || !DB_TABLE_WHITELIST.includes(tableName)) {
+      res.status(400).json({ error: `Invalid table: ${tableName}. Allowed: ${DB_TABLE_WHITELIST.join(', ')}` });
+      return;
+    }
+
+    const limit = Math.min(parseInt(req.query['limit'] as string) || 50, 200);
+    const offset = parseInt(req.query['offset'] as string) || 0;
+    const orderBy = req.query['orderBy'] as string || 'rowid';
+    const order = (req.query['order'] as string || 'desc').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+    const search = req.query['search'] as string || '';
+    const projectId = req.query['projectId'] as string || '';
+
+    try {
+      // Get column info
+      const columns = db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{ name: string; type: string }>;
+      const colNames = columns.map(c => c.name);
+
+      // Validate orderBy column
+      const safeOrderBy = colNames.includes(orderBy) ? orderBy : 'rowid';
+
+      // Build WHERE clause
+      const conditions: string[] = [];
+      const params: string[] = [];
+
+      if (projectId && colNames.includes('project_id')) {
+        conditions.push('project_id = ?');
+        params.push(projectId);
+      }
+
+      if (search) {
+        // Search across all TEXT columns
+        const textCols = columns.filter(c => c.type === 'TEXT').map(c => c.name);
+        if (textCols.length > 0) {
+          const searchCondition = textCols.map(c => `${c} LIKE ?`).join(' OR ');
+          conditions.push(`(${searchCondition})`);
+          for (const _ of textCols) {
+            params.push(`%${search}%`);
           }
         }
       }
-      const hasClaudeMd = fs.existsSync(path.join(dir, 'CLAUDE.md'));
-      res.json({ skills, hasClaudeMd });
+
+      const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+      // Count total
+      const countRow = db.prepare(`SELECT COUNT(*) as total FROM ${tableName} ${whereClause}`).get(...params) as { total: number };
+
+      // Fetch rows
+      const rows = db.prepare(
+        `SELECT * FROM ${tableName} ${whereClause} ORDER BY ${safeOrderBy} ${order} LIMIT ? OFFSET ?`
+      ).all(...params, limit, offset);
+
+      res.json({
+        table: tableName,
+        columns: columns.map(c => ({ name: c.name, type: c.type })),
+        rows,
+        totalCount: countRow.total,
+        limit,
+        offset,
+      });
     } catch (err) {
-      res.status(400).json({ error: `Cannot read skills: ${dir}` });
+      res.status(500).json({ error: `Failed to query table: ${(err as Error).message}` });
     }
   });
 
@@ -224,8 +345,11 @@ async function main() {
   const httpServer = createServer(app);
   const wsServer = new OmniWebSocketServer(httpServer);
 
-  // 5. Register WebSocket message handlers
-  registerHandlers(wsServer, orchestrator, agentManager, asanaClient);
+  // 5. Create sync service (needs wsServer)
+  const asanaSyncService = new AsanaSyncService(asanaClient, taskClassifier, pipeline, wsServer);
+
+  // 6. Register WebSocket message handlers
+  registerHandlers(wsServer, orchestrator, agentManager, workspaceScanner, skillGenerator, asanaClient, asanaSyncService, quickModeHandler, svnSpecService);
 
   // 6. Wire EventBus to WebSocket broadcast
   eventBus.on('agent.*', (event) => {
@@ -257,6 +381,15 @@ async function main() {
         payload: { projects: allProjects },
       } as WsMessage);
     }
+  });
+
+  eventBus.on('review.*', (event) => {
+    wsServer.broadcast({
+      type: event.type,
+      id: genId(),
+      timestamp: event.timestamp,
+      payload: event.payload,
+    } as WsMessage);
   });
 
   eventBus.on('contract.*', (event) => {
@@ -317,6 +450,7 @@ async function main() {
   // Graceful shutdown
   const shutdown = async () => {
     logger.info('Shutting down...');
+    asanaSyncService.stopAll();
     await agentManager.stopAllForProject('*');
     await contractWatcher.stop();
     await asanaClient.disconnect();

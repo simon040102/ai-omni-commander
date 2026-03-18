@@ -7,9 +7,16 @@ export interface AsanaStory {
   createdAt: string;
 }
 
+export interface AsanaProject {
+  gid: string;
+  name: string;
+}
+
 interface AsanaState {
   /** List of tasks fetched from Asana */
   tasks: AsanaTask[];
+  /** List of projects fetched from Asana */
+  projects: AsanaProject[];
   /** Whether tasks are being fetched */
   loading: boolean;
   /** Error message if fetch failed */
@@ -23,6 +30,7 @@ interface AsanaState {
 
   // Actions
   setTasks: (tasks: AsanaTask[]) => void;
+  setProjects: (projects: AsanaProject[]) => void;
   setLoading: (loading: boolean) => void;
   setError: (error: string | null) => void;
   setConnectionStatus: (status: AsanaConnectionStatus) => void;
@@ -34,6 +42,7 @@ interface AsanaState {
 
 export const useAsanaStore = create<AsanaState>((set, get) => ({
   tasks: [],
+  projects: [],
   loading: false,
   error: null,
   connectionStatus: {
@@ -46,6 +55,8 @@ export const useAsanaStore = create<AsanaState>((set, get) => ({
   taskStories: {},
 
   setTasks: (tasks) => set({ tasks, loading: false, error: null }),
+
+  setProjects: (projects) => set({ projects }),
 
   setLoading: (loading) => set({ loading }),
 

@@ -1,5 +1,7 @@
 import { useProjectStore } from '../../stores/projectStore';
+import { useAgentStore } from '../../stores/agentStore';
 import { useWsStore } from '../../stores/wsStore';
+import { ProgressRing } from '../ui/ProgressRing';
 import type { View } from '../layout/AppShell';
 
 const ROLE_COLORS: Record<string, { bg: string; text: string; border: string }> = {
@@ -21,6 +23,7 @@ export function ActiveAgents({ onViewChange }: ActiveAgentsProps) {
   const projects = useProjectStore(s => s.projects);
   const allAgents = useProjectStore(s => s.agents);
   const setCurrentProject = useProjectStore(s => s.setCurrentProject);
+  const progress = useAgentStore(s => s.progress);
   const client = useWsStore(s => s.client);
 
   // Filter only running agents
@@ -38,7 +41,7 @@ export function ActiveAgents({ onViewChange }: ActiveAgentsProps) {
     // Store focus agent ID for Dashboard to pick up
     sessionStorage.setItem('focusAgentId', agentId);
     // Navigate to dashboard
-    onViewChange('dashboard');
+    onViewChange('agents');
   };
 
   if (runningAgents.length === 0) {
@@ -86,25 +89,30 @@ export function ActiveAgents({ onViewChange }: ActiveAgentsProps) {
                 <div className="flex items-center gap-2">
                   <h3 className="text-lg font-semibold">{project?.name || 'Unknown Project'}</h3>
                   <span className="text-xs text-muted-foreground px-2 py-0.5 bg-muted rounded">
-                    {project?.mode}
+                    {project?.status}
                   </span>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
                   {agents.map(agent => {
                     const roleStyle = ROLE_COLORS[agent.role] || ROLE_COLORS.review;
+                    const agentProgress = progress[agent.id];
                     return (
                       <button
                         key={agent.id}
                         onClick={() => handleAgentClick(agent.id, projectId)}
                         className={`relative p-4 rounded-lg border ${roleStyle.border} ${roleStyle.bg} hover:scale-[1.02] transition-all text-left group`}
                       >
-                        {/* Pulsing indicator */}
+                        {/* Progress ring or pulsing indicator */}
                         <div className="absolute top-3 right-3">
-                          <span className="relative flex h-3 w-3">
-                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
-                            <span className="relative inline-flex rounded-full h-3 w-3 bg-green-500"></span>
-                          </span>
+                          {agentProgress ? (
+                            <ProgressRing percentage={agentProgress.percentage} size={28} strokeWidth={2.5} phase={agentProgress.currentPhase} />
+                          ) : (
+                            <span className="relative flex h-3 w-3">
+                              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+                              <span className="relative inline-flex rounded-full h-3 w-3 bg-green-500"></span>
+                            </span>
+                          )}
                         </div>
 
                         {/* Role */}

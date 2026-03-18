@@ -30,10 +30,15 @@ export function useWebSocket() {
   const setOutputsBulk = useAgentStore(s => s.setOutputsBulk);
   const clearOutputs = useAgentStore(s => s.clearOutputs);
   const clearAllOutputs = useAgentStore(s => s.clearAll);
+  const setProgress = useAgentStore(s => s.setProgress);
+  const addTask = useProjectStore(s => s.addTask);
+  const setTasks = useProjectStore(s => s.setTasks);
+  const setReviewResult = useProjectStore(s => s.setReviewResult);
   const addToast = useToastStore(s => s.addToast);
 
   // Asana store actions
   const setAsanaTasks = useAsanaStore(s => s.setTasks);
+  const setAsanaProjects = useAsanaStore(s => s.setProjects);
   const setAsanaLoading = useAsanaStore(s => s.setLoading);
   const setAsanaError = useAsanaStore(s => s.setError);
   const setAsanaConnectionStatus = useAsanaStore(s => s.setConnectionStatus);
@@ -202,10 +207,12 @@ export function useWebSocket() {
             addOrUpdateAgent({
               id: payload['agentId'] as string,
               projectId: startedProjectId,
+              title: (payload['title'] as string) || null,
               role: payload['role'] as string,
               status: 'running',
-              currentTaskId: null,
+              currentTaskId: (payload['taskId'] as string) || null,
               model: (payload['model'] as string) || '',
+              sessionId: (payload['sessionId'] as string) || null,
               totalCostUsd: 0,
               totalTurns: 0,
             });
@@ -245,7 +252,7 @@ export function useWebSocket() {
               totalTurns: (payload['turns'] as number) || 0,
               totalInputTokens: inputTokens,
               totalOutputTokens: outputTokens,
-            } as import('../../stores/projectStore').Agent);
+            } as import('../stores/projectStore').Agent);
             addToast({
               type: 'success',
               title: 'Agent completed',
@@ -265,6 +272,46 @@ export function useWebSocket() {
               addToast({ type: 'error', title: 'Task failed', message: `Task ${payload['taskId']}`, duration: 8000 });
             } else if (taskStatus === 'completed') {
               addToast({ type: 'success', title: 'Task completed' });
+            }
+            break;
+          }
+
+          // v2: Task management
+          case 'task.created': {
+            const newTask = payload['task'] as import('../stores/projectStore').Task;
+            if (newTask) {
+              addTask(newTask);
+              addToast({ type: 'info', title: 'Task created', message: newTask.title });
+            }
+            break;
+          }
+
+          case 'task.list': {
+            const taskListProjectId = payload['projectId'] as string;
+            const taskList = payload['tasks'] as import('../stores/projectStore').Task[];
+            if (taskListProjectId && taskList) {
+              setTasks(taskListProjectId, taskList);
+            }
+            break;
+          }
+
+          // v2: Workspace scan results (dispatched to listening components)
+          case 'workspace.scanResult':
+            window.dispatchEvent(new CustomEvent('omni:workspace-scan', { detail: payload }));
+            break;
+
+          // SVN errors — show toast for auth failures
+          case 'svn.browseResult':
+          case 'svn.previewResult': {
+            const svnError = payload['error'] as string | undefined;
+            if (svnError) {
+              const isAuth = /auth|401|403|password|credential/i.test(svnError);
+              addToast({
+                type: 'error',
+                title: isAuth ? 'SVN 認證失敗' : 'SVN 錯誤',
+                message: isAuth ? '請檢查 SVN 帳號密碼設定' : svnError,
+                duration: 8000,
+              });
             }
             break;
           }
@@ -307,6 +354,10 @@ export function useWebSocket() {
             setAsanaTasks(payload['tasks'] as AsanaTask[]);
             break;
 
+          case 'asana.projects':
+            setAsanaProjects(payload['projects'] as Array<{ gid: string; name: string }>);
+            break;
+
           case 'asana.connectionStatus':
             setAsanaConnectionStatus(payload as unknown as AsanaConnectionStatus);
             break;
@@ -317,6 +368,60 @@ export function useWebSocket() {
               payload['stories'] as Array<{ author: string; text: string; createdAt: string }>,
             );
             break;
+
+          case 'asana.syncResult': {
+            const syncNewTasks = payload['newTasks'] as number;
+            const syncAutoExec = payload['autoExecuted'] as number;
+            addToast({
+              type: 'success',
+              title: 'Asana Sync Complete',
+              message: `${syncNewTasks} new task${syncNewTasks !== 1 ? 's' : ''}, ${syncAutoExec} auto-executed`,
+              duration: 5000,
+            });
+            window.dispatchEvent(new CustomEvent('omni:asana-sync', { detail: payload }));
+            break;
+          }
+
+          case 'asana.syncConfig':
+            window.dispatchEvent(new CustomEvent('omni:asana-sync-config', { detail: payload }));
+            break;
+
+          case 'agent.progress': {
+            const progressData = payload as unknown as import('../stores/agentStore').AgentProgress;
+            if (progressData.agentId) {
+              setProgress(progressData.agentId, progressData);
+            }
+            break;
+          }
+
+          case 'review.completed': {
+            const reviewTaskId = payload['taskId'] as string;
+            const reviewResult = payload['result'] as import('../stores/projectStore').ReviewResult;
+            if (reviewTaskId && reviewResult) {
+              setReviewResult(reviewTaskId, reviewResult);
+              const icon = reviewResult.verdict === 'pass' ? '✅' : '❌';
+              addToast({
+                type: reviewResult.verdict === 'pass' ? 'success' : 'warning',
+                title: `Review: ${icon} ${reviewResult.verdict.toUpperCase()}`,
+                message: `Score: ${reviewResult.score}/100 — ${reviewResult.issues.length} issue(s)`,
+                duration: reviewResult.verdict === 'pass' ? 5000 : 0,
+              });
+            }
+            break;
+          }
+
+          case 'task.retrying': {
+            const retryTaskId = payload['taskId'] as string;
+            const retryCount = payload['retryCount'] as number;
+            const maxRetries = payload['maxRetries'] as number;
+            addToast({
+              type: 'info',
+              title: 'Task auto-retrying',
+              message: `Task ${retryTaskId} retry ${retryCount}/${maxRetries} after review failure`,
+              duration: 5000,
+            });
+            break;
+          }
 
           case 'asana.error':
             setAsanaError(payload['message'] as string);

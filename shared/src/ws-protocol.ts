@@ -1,7 +1,9 @@
-import type { Agent, AgentStatus, AgentOutputEvent } from './agent-types.js';
-import type { Task, TaskStatus, DependencyEdge, TaskSummary } from './task-types.js';
-import type { Project, Workspace, DocType, SuperpowersConfig, PlanConfig, AgentPlan } from './project-types.js';
+import type { Agent, AgentStatus, AgentOutputEvent, AgentProgress } from './agent-types.js';
+import type { Task, TaskStatus, TaskType, TaskSource, TaskLabel, DependencyEdge, TaskSummary } from './task-types.js';
+import type { ReviewResult } from './review-types.js';
+import type { Project, Workspace, DocType, SuperpowersConfig, PlanConfig, AgentPlan, SvnCredentials } from './project-types.js';
 import type { AsanaTask, AsanaConnectionStatus, AsanaFetchTasksOptions } from './asana-types.js';
+import type { AsanaSyncConfig } from './project-types.js';
 
 // Base envelope for all WebSocket messages
 export interface WsMessage {
@@ -24,11 +26,10 @@ export interface WsCreateProject extends WsMessage {
   payload: {
     projectId?: string;
     name: string;
-    mode: 'spec' | 'creative' | 'quick';
     workingDir: string;
-    workspaces: Workspace[];
-    reviewConfig?: ReviewConfig;
-    superpowers?: SuperpowersConfig;
+    frontendPath: string | null;
+    backendPath: string | null;
+    asanaProjectGid?: string;
     planConfig?: PlanConfig;
   };
 }
@@ -48,22 +49,10 @@ export interface WsStartExecution extends WsMessage {
   type: 'project.startExecution';
   payload: {
     projectId: string;
+    taskId?: string;
     requirement?: string;
-    /** Model to use for agents (e.g., 'sonnet', 'opus', 'haiku') */
     model?: string;
-    /** Debug mode for spec: work with existing codebase instead of new build */
-    debugMode?: boolean;
-    /** Quick mode task details */
-    quickTask?: {
-      type: 'bug' | 'change' | 'refactor' | 'other';
-      description: string;
-      errorLog?: string;
-      relatedFiles?: string[];
-      /** Role for the agent (backend, frontend, etc.) */
-      role?: 'backend' | 'frontend' | 'devops' | 'testing';
-      /** Whether to load CLAUDE.md/.claude/ skills from workspace (default: true) */
-      useWorkspaceSkills?: boolean;
-    };
+    role?: string;
   };
 }
 
@@ -140,7 +129,11 @@ export interface WsUpdateProject extends WsMessage {
   payload: {
     projectId: string;
     name?: string;
-    workspaces?: Workspace[];
+    frontendPath?: string | null;
+    backendPath?: string | null;
+    asanaProjectGid?: string | null;
+    dbConnectionString?: string | null;
+    configJson?: string | null;
   };
 }
 
@@ -148,6 +141,14 @@ export interface WsDeleteAgent extends WsMessage {
   type: 'agent.delete';
   payload: {
     agentId: string;
+  };
+}
+
+export interface WsUpdateAgent extends WsMessage {
+  type: 'agent.update';
+  payload: {
+    agentId: string;
+    title?: string | null;
   };
 }
 
@@ -178,7 +179,120 @@ export interface WsPlanAction extends WsMessage {
     agentId: string;
     planId: string;
     action: 'approve' | 'reject';
-    feedback?: string;  // Optional feedback if rejected
+    feedback?: string;
+  };
+}
+
+// v2: Task management messages
+export interface WsTaskCreate extends WsMessage {
+  type: 'task.create';
+  payload: {
+    projectId: string;
+    title: string;
+    description?: string;
+    taskType: TaskType;
+    label: TaskLabel;
+    source?: TaskSource;
+    sourceRef?: string;
+    specUrl?: string;
+    preferredModel?: string;
+    parentName?: string;
+  };
+}
+
+export interface WsTaskDelete extends WsMessage {
+  type: 'task.delete';
+  payload: {
+    projectId: string;
+    taskId: string;
+  };
+}
+
+export interface WsTaskUpdate extends WsMessage {
+  type: 'task.update';
+  payload: {
+    projectId: string;
+    taskId: string;
+    title?: string;
+    description?: string | null;
+    specUrl?: string | null;
+    label?: TaskLabel;
+    taskType?: TaskType;
+    status?: TaskStatus;
+    preferredModel?: string | null;
+    parentName?: string | null;
+  };
+}
+
+export interface WsTaskBulkDeleteBySource extends WsMessage {
+  type: 'task.bulkDeleteBySource';
+  payload: {
+    projectId: string;
+    source: TaskSource;
+  };
+}
+
+// v2: Workspace messages
+export interface WsWorkspaceScan extends WsMessage {
+  type: 'workspace.scan';
+  payload: {
+    projectId: string;
+    path: string;
+    workspaceType: 'frontend' | 'backend';
+  };
+}
+
+export interface WsWorkspaceGenerateSkills extends WsMessage {
+  type: 'workspace.generateSkills';
+  payload: {
+    projectId: string;
+    path: string;
+    workspaceType: 'frontend' | 'backend';
+  };
+}
+
+// ============================================
+// SVN Browse messages
+// ============================================
+
+export interface WsSvnBrowse extends WsMessage {
+  type: 'svn.browse';
+  payload: {
+    projectId: string;
+    /** SVN directory URL to list. If omitted, uses project's svnConfig root based on specType. */
+    svnUrl?: string;
+    /** Which SVN root to use: 'frontend' or 'backend' */
+    specType?: 'frontend' | 'backend';
+  };
+}
+
+export interface WsSvnBrowseResult extends WsMessage {
+  type: 'svn.browseResult';
+  payload: {
+    svnUrl: string;
+    entries: Array<{ name: string; isDir: boolean; fullUrl: string }>;
+    error?: string;
+  };
+}
+
+export interface WsSvnPreview extends WsMessage {
+  type: 'svn.preview';
+  payload: {
+    projectId: string;
+    /** Function code to search for (e.g. "IC01", "OV0101"). If omitted, extracted from taskId's title/parentName. */
+    functionCode?: string;
+    taskId?: string;
+    taskLabel?: string;
+  };
+}
+
+export interface WsSvnPreviewResult extends WsMessage {
+  type: 'svn.previewResult';
+  payload: {
+    functionCode: string;
+    rootCode: string;
+    files: Array<{ filename: string; svnUrl: string; svnRoot: 'frontend' | 'backend' }>;
+    error?: string;
   };
 }
 
@@ -196,6 +310,21 @@ export interface WsAsanaCheckConnection extends WsMessage {
   payload: Record<string, never>;
 }
 
+export interface WsAsanaFetchProjects extends WsMessage {
+  type: 'asana.fetchProjects';
+  payload: {
+    workspace?: string;
+  };
+}
+
+export interface WsAsanaFetchMyProjectTasks extends WsMessage {
+  type: 'asana.fetchMyProjectTasks';
+  payload: {
+    projectGid: string;
+    includeCompleted?: boolean;
+  };
+}
+
 export interface WsAsanaFetchTaskStories extends WsMessage {
   type: 'asana.fetchTaskStories';
   payload: {
@@ -203,27 +332,112 @@ export interface WsAsanaFetchTaskStories extends WsMessage {
   };
 }
 
+export interface WsAsanaSyncNow extends WsMessage {
+  type: 'asana.syncNow';
+  payload: {
+    projectId: string;
+  };
+}
+
+export interface WsAsanaUpdateSyncConfig extends WsMessage {
+  type: 'asana.updateSyncConfig';
+  payload: {
+    projectId: string;
+    config: AsanaSyncConfig;
+  };
+}
+
+export interface WsAgentResume extends WsMessage {
+  type: 'agent.resume';
+  payload: {
+    agentId: string;
+    prompt?: string;
+  };
+}
+
+export interface WsStartQuickTask extends WsMessage {
+  type: 'project.startQuickTask';
+  payload: {
+    workingDir: string;
+    taskType: 'bug' | 'feature' | 'refactor' | 'other';
+    role: 'backend' | 'frontend' | 'devops' | 'testing';
+    description: string;
+    errorLog?: string;
+    relatedFiles?: string[];
+    model?: string;
+    useWorkspaceSkills?: boolean;
+  };
+}
+
+// ============================================
+// Global config messages
+// ============================================
+
+export interface WsGetGlobalConfig extends WsMessage {
+  type: 'config.get';
+  payload: Record<string, never>;
+}
+
+export interface WsSetGlobalConfig extends WsMessage {
+  type: 'config.set';
+  payload: {
+    key: string;
+    value: string;
+  };
+}
+
+export interface WsSetSvnCredentials extends WsMessage {
+  type: 'config.setSvnCredentials';
+  payload: SvnCredentials;
+}
+
+export interface WsGlobalConfigState extends WsMessage {
+  type: 'config.state';
+  payload: {
+    svnUsername: string;
+    hasSvnPassword: boolean;
+  };
+}
+
 export type ClientMessage =
   | WsCreateProject
   | WsUploadDocument
   | WsStartExecution
+  | WsStartQuickTask
   | WsPauseExecution
   | WsResumeExecution
   | WsInterviewResponse
   | WsInterviewConfirm
   | WsAgentAction
   | WsAgentCommand
+  | WsAgentResume
   | WsInterventionResolve
   | WsTaskOverride
   | WsDeleteProject
   | WsUpdateProject
   | WsDeleteAgent
+  | WsUpdateAgent
   | WsAddAgent
   | WsDeleteDocument
   | WsPlanAction
+  | WsTaskCreate
+  | WsTaskDelete
+  | WsTaskUpdate
+  | WsTaskBulkDeleteBySource
+  | WsWorkspaceScan
+  | WsWorkspaceGenerateSkills
+  | WsSvnBrowse
+  | WsSvnPreview
   | WsAsanaFetchTasks
+  | WsAsanaFetchMyProjectTasks
+  | WsAsanaFetchProjects
   | WsAsanaCheckConnection
-  | WsAsanaFetchTaskStories;
+  | WsAsanaFetchTaskStories
+  | WsAsanaSyncNow
+  | WsAsanaUpdateSyncConfig
+  | WsGetGlobalConfig
+  | WsSetGlobalConfig
+  | WsSetSvnCredentials;
 
 // ============================================
 // SERVER -> CLIENT messages
@@ -360,6 +574,63 @@ export interface WsAgentInitialPrompt extends WsMessage {
   };
 }
 
+// v3: Agent progress
+export interface WsAgentProgress extends WsMessage {
+  type: 'agent.progress';
+  payload: AgentProgress;
+}
+
+// v3: Review completed with structured result
+export interface WsReviewCompleted extends WsMessage {
+  type: 'review.completed';
+  payload: {
+    projectId: string;
+    taskId: string;
+    agentId: string;
+    result: ReviewResult;
+  };
+}
+
+// v3: Task retrying after failed review
+export interface WsTaskRetrying extends WsMessage {
+  type: 'task.retrying';
+  payload: {
+    taskId: string;
+    projectId: string;
+    retryCount: number;
+    reason: string;
+  };
+}
+
+// v2: Task list response
+export interface WsTaskCreated extends WsMessage {
+  type: 'task.created';
+  payload: {
+    task: Task;
+  };
+}
+
+export interface WsTaskList extends WsMessage {
+  type: 'task.list';
+  payload: {
+    projectId: string;
+    tasks: Task[];
+  };
+}
+
+// v2: Workspace scan result
+export interface WsWorkspaceScanResult extends WsMessage {
+  type: 'workspace.scanResult';
+  payload: {
+    projectId: string;
+    workspaceType: 'frontend' | 'backend';
+    path: string;
+    hasClaudeMd: boolean;
+    hasClaudeDir: boolean;
+    skills: Array<{ name: string; filename: string; path: string }>;
+  };
+}
+
 // ============================================
 // ASANA MCP messages (SERVER -> CLIENT)
 // ============================================
@@ -374,6 +645,13 @@ export interface WsAsanaTasks extends WsMessage {
 export interface WsAsanaConnectionStatus extends WsMessage {
   type: 'asana.connectionStatus';
   payload: AsanaConnectionStatus;
+}
+
+export interface WsAsanaProjects extends WsMessage {
+  type: 'asana.projects';
+  payload: {
+    projects: Array<{ gid: string; name: string }>;
+  };
 }
 
 export interface WsAsanaTaskStories extends WsMessage {
@@ -396,6 +674,24 @@ export interface WsAsanaError extends WsMessage {
   };
 }
 
+export interface WsAsanaSyncResult extends WsMessage {
+  type: 'asana.syncResult';
+  payload: {
+    projectId: string;
+    newTasks: number;
+    autoExecuted: number;
+    lastSyncAt: string;
+  };
+}
+
+export interface WsAsanaSyncConfig extends WsMessage {
+  type: 'asana.syncConfig';
+  payload: {
+    projectId: string;
+    config: AsanaSyncConfig;
+  };
+}
+
 export type ServerMessage =
   | WsProjectState
   | WsProjectsList
@@ -410,8 +706,22 @@ export type ServerMessage =
   | WsAgentPlanReady
   | WsAgentPlansList
   | WsAgentInitialPrompt
+  | WsAgentProgress
+  | WsReviewCompleted
+  | WsTaskRetrying
+  | WsTaskCreated
+  | WsTaskList
+  | WsWorkspaceScanResult
   | WsError
   | WsAsanaTasks
+  | WsAsanaProjects
   | WsAsanaConnectionStatus
   | WsAsanaTaskStories
-  | WsAsanaError;
+  | WsAsanaError
+  | WsAsanaSyncResult
+  | WsAsanaSyncConfig
+  | WsSvnBrowse
+  | WsSvnBrowseResult
+  | WsSvnPreview
+  | WsSvnPreviewResult
+  | WsGlobalConfigState;

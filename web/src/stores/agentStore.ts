@@ -9,6 +9,16 @@ export interface AgentOutput {
   timestamp: string;
 }
 
+export interface AgentProgress {
+  agentId: string;
+  completedSteps: number;
+  totalSteps: number;
+  currentPhase: string;
+  fileWrites: number;
+  toolUses: number;
+  percentage: number;
+}
+
 interface AgentStoreState {
   /** Map of agentId -> output lines */
   outputs: Record<string, AgentOutput[]>;
@@ -18,6 +28,9 @@ interface AgentStoreState {
 
   /** Map of agentId -> current streaming text buffer (not persisted) */
   streamingBuffers: Record<string, { text: string; thinking: string }>;
+
+  /** Map of agentId -> progress info */
+  progress: Record<string, AgentProgress>;
 
   /** Append output to an agent's buffer */
   appendOutput: (agentId: string, output: AgentOutput) => void;
@@ -39,6 +52,12 @@ interface AgentStoreState {
 
   /** Set command input for an agent */
   setCommandInput: (agentId: string, value: string) => void;
+
+  /** Set progress for an agent */
+  setProgress: (agentId: string, progress: AgentProgress) => void;
+
+  /** Clear progress for an agent */
+  clearProgress: (agentId: string) => void;
 
   /** Clear everything */
   clearAll: () => void;
@@ -65,6 +84,7 @@ export const useAgentStore = create<AgentStoreState>()(
       outputs: {},
       commandInputs: {},
       streamingBuffers: {},
+      progress: {},
 
       appendOutput: (agentId, output) => set((state) => {
         const existing = state.outputs[agentId] || [];
@@ -152,7 +172,16 @@ export const useAgentStore = create<AgentStoreState>()(
         commandInputs: { ...state.commandInputs, [agentId]: value },
       })),
 
-      clearAll: () => set({ outputs: {}, commandInputs: {}, streamingBuffers: {} }),
+      setProgress: (agentId, progress) => set((state) => ({
+        progress: { ...state.progress, [agentId]: progress },
+      })),
+
+      clearProgress: (agentId) => set((state) => {
+        const { [agentId]: _, ...rest } = state.progress;
+        return { progress: rest };
+      }),
+
+      clearAll: () => set({ outputs: {}, commandInputs: {}, streamingBuffers: {}, progress: {} }),
     }),
     {
       name: 'omni-agent-store',

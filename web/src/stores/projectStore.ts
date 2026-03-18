@@ -3,12 +3,19 @@ import { create } from 'zustand';
 export interface Project {
   id: string;
   name: string;
-  mode: 'spec' | 'creative';
   status: string;
   workingDir: string;
+  frontendPath: string | null;
+  backendPath: string | null;
+  asanaProjectGid: string | null;
+  dbConnectionString: string | null;
   configJson: string | null;
   createdAt: string;
+  updatedAt: string;
 }
+
+export type TaskType = 'bug' | 'feature' | 'refactor' | 'other';
+export type TaskSource = 'manual' | 'asana';
 
 export interface Task {
   id: string;
@@ -20,14 +27,31 @@ export interface Task {
   assignedAgentId: string | null;
   priority: number;
   retryCount: number;
+  taskType: TaskType;
+  source: TaskSource;
+  sourceRef: string | null;
+  branchName: string | null;
+  specUrl: string | null;
+  preferredModel: string | null;
+  parentName: string | null;
   createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReviewResult {
+  verdict: 'pass' | 'fail';
+  score: number;
+  issues: Array<{ severity: 'critical' | 'warning' | 'info'; file: string; line?: number; message: string }>;
+  summary: string;
 }
 
 export interface Agent {
   id: string;
   projectId: string;
+  title: string | null;
   role: string;
   status: string;
+  sessionId: string | null;
   currentTaskId: string | null;
   model: string;
   totalCostUsd: number;
@@ -76,6 +100,8 @@ interface ProjectState {
   interventions: Intervention[];
   documents: DocumentInfo[];
   plans: AgentPlan[];
+  /** Review results keyed by taskId */
+  reviewResults: Record<string, ReviewResult>;
   /** Projects that have new activity since last viewed */
   projectsWithActivity: Set<string>;
 
@@ -95,6 +121,10 @@ interface ProjectState {
   addOrUpdateAgent: (agent: Agent) => void;
   addIntervention: (intervention: Intervention) => void;
   resolveIntervention: (id: string) => void;
+  addTask: (task: Task) => void;
+  removeTask: (taskId: string) => void;
+  setTasks: (projectId: string, tasks: Task[]) => void;
+  setReviewResult: (taskId: string, result: ReviewResult) => void;
   markProjectActivity: (projectId: string) => void;
   clearProjectActivity: (projectId: string) => void;
 }
@@ -108,6 +138,7 @@ export const useProjectStore = create<ProjectState>((set) => ({
   interventions: [],
   documents: [],
   plans: [],
+  reviewResults: {},
   projectsWithActivity: new Set<string>(),
 
   setProjects: (projects) => set((state) => {
@@ -234,6 +265,28 @@ export const useProjectStore = create<ProjectState>((set) => ({
     interventions: state.interventions.map(i =>
       i.id === id ? { ...i, status: 'resolved' as const } : i
     ),
+  })),
+
+  addTask: (task) => set((state) => {
+    if (state.currentProjectId === task.projectId) {
+      return { tasks: [...state.tasks, task] };
+    }
+    return {};
+  }),
+
+  removeTask: (taskId) => set((state) => ({
+    tasks: state.tasks.filter(t => t.id !== taskId),
+  })),
+
+  setTasks: (projectId, tasks) => set((state) => {
+    if (state.currentProjectId === projectId) {
+      return { tasks };
+    }
+    return {};
+  }),
+
+  setReviewResult: (taskId, result) => set((state) => ({
+    reviewResults: { ...state.reviewResults, [taskId]: result },
   })),
 
   markProjectActivity: (projectId) => set((state) => {
