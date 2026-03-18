@@ -1,10 +1,9 @@
-import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import { useMemo } from 'react';
 import { useProjectStore } from '../../stores/projectStore';
 import { useWsStore } from '../../stores/wsStore';
-import { useToastStore } from '../../stores/toastStore';
 import {
   IconPlus, IconGrid, IconClock, IconLightning,
-  IconEdit, IconTrash, IconMoreVertical, IconPanelLeft, IconChevronDown,
+  IconPanelLeft,
 } from '../ui/Icons';
 import type { View } from './AppShell';
 
@@ -14,16 +13,6 @@ interface SidebarProps {
   collapsed: boolean;
   onToggleCollapse: () => void;
 }
-
-const STATUS_COLORS: Record<string, string> = {
-  idle: 'bg-gray-500',
-  setup: 'bg-gray-500',
-  planning: 'bg-yellow-500',
-  executing: 'bg-green-500 animate-breathe',
-  paused: 'bg-orange-500',
-  completed: 'bg-blue-500',
-  failed: 'bg-red-500',
-};
 
 /* ─── Icon components for sidebar nav ─── */
 function IconTasks({ className }: { className?: string }) {
@@ -79,22 +68,10 @@ export function Sidebar({ currentView, onViewChange, collapsed, onToggleCollapse
     });
   }, [rawProjects]);
   const setCurrentProject = useProjectStore(s => s.setCurrentProject);
-  const projectsWithActivity = useProjectStore(s => s.projectsWithActivity);
   const allAgents = useProjectStore(s => s.agents);
   const allTasks = useProjectStore(s => s.tasks);
   const allInterventions = useProjectStore(s => s.interventions);
-  const connected = useWsStore(s => s.connected);
   const client = useWsStore(s => s.client);
-  const addToast = useToastStore(s => s.addToast);
-
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editName, setEditName] = useState('');
-  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
-  const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
-  const [menuDropUp, setMenuDropUp] = useState(false);
-  const [projectsCollapsed, setProjectsCollapsed] = useState(false);
-  const menuRef = useRef<HTMLDivElement>(null);
-  const kebabRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
 
   const currentProject = projects.find(p => p.id === currentProjectId);
   const isProjectMode = !!currentProjectId && !!currentProject;
@@ -110,67 +87,6 @@ export function Sidebar({ currentView, onViewChange, collapsed, onToggleCollapse
   const completedTasks = tasks.filter(t => t.status === 'completed').length;
   const failedTasks = tasks.filter(t => t.status === 'failed').length;
 
-  // Auto-collapse projects list when in project mode
-  useEffect(() => {
-    if (isProjectMode) setProjectsCollapsed(true);
-  }, [isProjectMode]);
-
-  // Close menu on outside click
-  useEffect(() => {
-    function handleClick(e: MouseEvent) {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setMenuOpenId(null);
-      }
-    }
-    if (menuOpenId) document.addEventListener('mousedown', handleClick);
-    return () => document.removeEventListener('mousedown', handleClick);
-  }, [menuOpenId]);
-
-  const handleDelete = useCallback((projectId: string) => {
-    client?.send({
-      type: 'project.delete',
-      id: crypto.randomUUID(),
-      timestamp: new Date().toISOString(),
-      payload: { projectId },
-    });
-    if (projectId === currentProjectId) {
-      setCurrentProject(null);
-    }
-    setConfirmDeleteId(null);
-    setMenuOpenId(null);
-    addToast({ type: 'success', title: 'Project deleted' });
-  }, [client, currentProjectId, setCurrentProject, addToast]);
-
-  const handleEditSave = useCallback((projectId: string) => {
-    if (!editName.trim()) return;
-    client?.send({
-      type: 'project.update',
-      id: crypto.randomUUID(),
-      timestamp: new Date().toISOString(),
-      payload: { projectId, name: editName.trim() },
-    });
-    setEditingId(null);
-    addToast({ type: 'success', title: 'Project renamed' });
-  }, [client, editName, addToast]);
-
-  const startEditing = (p: { id: string; name: string }) => {
-    setEditingId(p.id);
-    setEditName(p.name);
-    setConfirmDeleteId(null);
-    setMenuOpenId(null);
-  };
-
-  const handleSelectProject = (projectId: string) => {
-    setCurrentProject(projectId);
-    client?.send({
-      type: 'project.getState',
-      id: crypto.randomUUID(),
-      timestamp: new Date().toISOString(),
-      payload: { projectId },
-    });
-    onViewChange('tasks');
-  };
-
   const handleBackToHome = () => {
     setCurrentProject(null);
     onViewChange('home');
@@ -178,7 +94,7 @@ export function Sidebar({ currentView, onViewChange, collapsed, onToggleCollapse
 
   /* ─── Nav items for Mode A (no project) ─── */
   const homeNavItems: { view: View; label: string; Icon: React.FC<{ className?: string }>; badge?: number }[] = [
-    { view: 'home', label: 'Home', Icon: IconGrid },
+    { view: 'home', label: 'Projects', Icon: IconGrid },
     { view: 'setup', label: 'New Project', Icon: IconPlus },
     { view: 'new-task', label: 'Quick Run', Icon: IconLightning },
   ];
@@ -294,135 +210,26 @@ export function Sidebar({ currentView, onViewChange, collapsed, onToggleCollapse
         })}
       </nav>
 
-      {/* Project list */}
-      {!collapsed && projects.length > 0 && (
-        <div className="flex-1 min-h-0 px-2 py-2 border-t border-border overflow-y-auto">
-          <button
-            onClick={() => setProjectsCollapsed(!projectsCollapsed)}
-            className="w-full flex items-center justify-between text-[10px] font-medium text-muted-foreground uppercase tracking-wider mb-1.5 px-1 hover:text-foreground transition-colors"
-          >
-            <span>Projects ({projects.length})</span>
-            <IconChevronDown className={`w-3 h-3 transition-transform duration-200 ${projectsCollapsed ? '-rotate-90' : ''}`} />
-          </button>
-          {!projectsCollapsed && projects.map(p => (
-            <div key={p.id} className="mb-0.5">
-              {/* Inline rename */}
-              {editingId === p.id ? (
-                <div className="flex items-center gap-1 px-2 py-1">
-                  <input
-                    type="text"
-                    value={editName}
-                    onChange={(e) => setEditName(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') handleEditSave(p.id);
-                      if (e.key === 'Escape') setEditingId(null);
-                    }}
-                    className="flex-1 bg-muted border border-border rounded px-1.5 py-0.5 text-xs min-w-0 focus:ring-1 focus:ring-primary/50 focus:border-primary outline-none"
-                    autoFocus
-                  />
-                  <button
-                    onClick={() => handleEditSave(p.id)}
-                    className="text-[10px] text-green-400 hover:text-green-300 px-1 font-medium"
-                    title="Save"
-                  >
-                    OK
-                  </button>
-                  <button
-                    onClick={() => setEditingId(null)}
-                    className="text-[10px] text-muted-foreground hover:text-foreground px-1"
-                    title="Cancel"
-                  >
-                    x
-                  </button>
-                </div>
-              ) : confirmDeleteId === p.id ? (
-                /* Delete confirmation */
-                <div className="flex items-center gap-1 px-2 py-1.5 bg-red-500/10 rounded-md animate-fade-in">
-                  <span className="text-[10px] text-red-400 flex-1">Delete this project?</span>
-                  <button
-                    onClick={() => handleDelete(p.id)}
-                    className="text-[10px] text-red-400 hover:text-red-300 font-semibold px-1.5 py-0.5 bg-red-500/20 rounded"
-                  >
-                    Yes
-                  </button>
-                  <button
-                    onClick={() => setConfirmDeleteId(null)}
-                    className="text-[10px] text-muted-foreground hover:text-foreground px-1.5 py-0.5"
-                  >
-                    No
-                  </button>
-                </div>
-              ) : (
-                /* Normal project row */
-                <div className="group relative flex items-center">
-                  <button
-                    onClick={() => handleSelectProject(p.id)}
-                    className={`flex-1 flex items-center gap-2 text-xs px-2 py-1.5 rounded-md transition-colors ${
-                      p.id === currentProjectId
-                        ? 'bg-primary/10 text-primary'
-                        : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
-                    }`}
-                  >
-                    <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${STATUS_COLORS[p.status] || 'bg-gray-500'}`} />
-                    <span className="truncate">{p.name}</span>
-                    {projectsWithActivity.has(p.id) && (
-                      <span className="ml-auto w-2 h-2 rounded-full bg-blue-500 animate-pulse flex-shrink-0" title="New activity" />
-                    )}
-                  </button>
-                  {/* Kebab menu button */}
-                  <button
-                    ref={(el) => { if (el) kebabRefs.current.set(p.id, el); }}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (menuOpenId === p.id) {
-                        setMenuOpenId(null);
-                      } else {
-                        const btn = kebabRefs.current.get(p.id);
-                        if (btn) {
-                          const rect = btn.getBoundingClientRect();
-                          const spaceBelow = window.innerHeight - rect.bottom;
-                          setMenuDropUp(spaceBelow < 90);
-                        }
-                        setMenuOpenId(p.id);
-                      }
-                    }}
-                    className={`absolute right-1 p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-all ${
-                      p.id === currentProjectId || menuOpenId === p.id
-                        ? 'opacity-50 hover:opacity-100'
-                        : 'opacity-0 group-hover:opacity-50 hover:!opacity-100'
-                    }`}
-                    title="More actions"
-                  >
-                    <IconMoreVertical className="w-3.5 h-3.5" />
-                  </button>
-                  {/* Dropdown menu */}
-                  {menuOpenId === p.id && (
-                    <div
-                      ref={menuRef}
-                      className={`absolute right-0 z-50 bg-card border border-border rounded-md shadow-lg py-1 min-w-[110px] animate-fade-in ${
-                        menuDropUp ? 'bottom-full mb-0.5' : 'top-full mt-0.5'
-                      }`}
-                    >
-                      <button
-                        onClick={() => startEditing(p)}
-                        className="w-full text-left px-3 py-1.5 text-xs hover:bg-muted flex items-center gap-2 text-muted-foreground hover:text-foreground transition-colors"
-                      >
-                        <IconEdit className="w-3 h-3" /> Rename
-                      </button>
-                      <button
-                        onClick={() => { setConfirmDeleteId(p.id); setMenuOpenId(null); }}
-                        className="w-full text-left px-3 py-1.5 text-xs hover:bg-red-500/10 flex items-center gap-2 text-red-400 transition-colors"
-                      >
-                        <IconTrash className="w-3 h-3" /> Delete
-                      </button>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
+      {/* Spacer to push bottom items down */}
+      <div className="flex-1" />
+
+      {/* Settings - pinned at bottom */}
+      <div className={`${collapsed ? 'p-1' : 'px-2 pb-1'} border-t border-border`}>
+        <button
+          onClick={() => onViewChange('settings')}
+          className={`w-full flex items-center gap-2 rounded-md text-sm mb-0.5 transition-colors ${
+            collapsed ? 'justify-center px-2 py-2.5' : 'px-3 py-2.5'
+          } ${
+            currentView === 'settings'
+              ? 'bg-primary/10 text-primary'
+              : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+          }`}
+          title={collapsed ? 'Settings' : undefined}
+        >
+          <IconSettings className="w-4 h-4" />
+          {!collapsed && <span className="flex-1 text-left">Settings</span>}
+        </button>
+      </div>
 
       {/* Status summary - pinned at bottom */}
       {!collapsed && (

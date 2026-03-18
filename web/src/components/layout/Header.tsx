@@ -6,7 +6,7 @@ import { IconChevronRight, IconSun, IconMoon } from '../ui/Icons';
 import type { View } from './AppShell';
 
 const VIEW_LABELS: Record<string, string> = {
-  home: 'Home',
+  home: 'Projects',
   tasks: 'Tasks',
   setup: 'New Project',
   'new-task': 'Quick Run',

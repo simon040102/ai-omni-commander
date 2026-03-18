@@ -71,3 +71,13 @@ export function getConfig(): Config {
 
   return cachedConfig;
 }
+
+/**
+ * Reload Asana PAT from DB (called after user updates it via Settings).
+ * DB value takes precedence over env var.
+ */
+export function reloadAsanaPat(dbPat: string | null): void {
+  if (cachedConfig) {
+    cachedConfig.asanaPat = dbPat || process.env['ASANA_PAT'] || null;
+  }
+}

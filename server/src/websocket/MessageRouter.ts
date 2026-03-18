@@ -14,7 +14,8 @@ import type {
 import type { SvnConfig } from '@omni/shared';
 import { normalizeSvnUrl, extractFunctionCode } from '../svn/SvnSpecService.js';
 import type { SvnSpecService } from '../svn/SvnSpecService.js';
-import { getSvnCredentials, setSvnCredentials } from '../db/queries/globalConfig.js';
+import { getSvnCredentials, setSvnCredentials, getAsanaPat, setAsanaPat } from '../db/queries/globalConfig.js';
+import { reloadAsanaPat } from '../config.js';
 import type { MasterOrchestrator } from '../orchestrator/MasterOrchestrator.js';
 import type { AgentManager } from '../agent/AgentManager.js';
 import type { OmniWebSocketServer } from './WebSocketServer.js';
@@ -832,8 +833,9 @@ export function registerHandlers(
   // Global Config Handlers
   // ============================================
 
-  wsServer.registerHandler('config.get', (_msg: WsMessage, ws: WebSocket) => {
+  const sendConfigState = (ws: WebSocket) => {
     const creds = getSvnCredentials();
+    const asanaPat = getAsanaPat();
     wsServer.send(ws, {
       type: 'config.state',
       id: genId(),
@@ -841,22 +843,27 @@ export function registerHandlers(
       payload: {
         svnUsername: creds.username,
         hasSvnPassword: !!creds.password,
+        hasAsanaPat: !!(asanaPat || config.asanaPat),
+        asanaPatSource: asanaPat ? 'db' : config.asanaPat ? 'env' : 'none',
       },
     } as WsMessage);
+  };
+
+  wsServer.registerHandler('config.get', (_msg: WsMessage, ws: WebSocket) => {
+    sendConfigState(ws);
   });
 
   wsServer.registerHandler('config.setSvnCredentials', (msg: WsMessage, ws: WebSocket) => {
     const { payload } = msg as unknown as { payload: { username: string; password: string } };
     setSvnCredentials({ username: payload.username, password: payload.password });
-    wsServer.send(ws, {
-      type: 'config.state',
-      id: genId(),
-      timestamp: new Date().toISOString(),
-      payload: {
-        svnUsername: payload.username,
-        hasSvnPassword: !!payload.password,
-      },
-    } as WsMessage);
+    sendConfigState(ws);
+  });
+
+  wsServer.registerHandler('config.setAsanaPat', (msg: WsMessage, ws: WebSocket) => {
+    const { payload } = msg as unknown as { payload: { pat: string } };
+    setAsanaPat(payload.pat);
+    reloadAsanaPat(payload.pat || null);
+    sendConfigState(ws);
   });
 
   // ============================================

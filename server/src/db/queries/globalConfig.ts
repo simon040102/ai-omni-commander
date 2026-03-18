@@ -29,6 +29,22 @@ export function getAllGlobalConfig(): Record<string, string> {
 }
 
 // =============================================
+// Asana PAT helper
+// =============================================
+
+export function getAsanaPat(): string {
+  return getGlobalConfig('asana.pat') || '';
+}
+
+export function setAsanaPat(pat: string): void {
+  if (pat) {
+    setGlobalConfig('asana.pat', pat);
+  } else {
+    deleteGlobalConfig('asana.pat');
+  }
+}
+
+// =============================================
 // SVN credential helpers
 // =============================================
 

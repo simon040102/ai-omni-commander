@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import express from 'express';
-import { getConfig } from './config.js';
+import { getConfig, reloadAsanaPat } from './config.js';
 import { getDb } from './db/connection.js';
 import { EventBus } from './eventbus/EventBus.js';
 import { ContextSync } from './eventbus/ContextSync.js';
@@ -99,12 +99,22 @@ async function main() {
   const _reviewTrigger = new ReviewTrigger(eventBus, codeReviewAgent);
   const _retryHandler = new RetryHandler(eventBus, pipeline);
 
+  // Load Asana PAT from DB (takes precedence over env var)
+  {
+    const { getAsanaPat } = await import('./db/queries/globalConfig.js');
+    const dbPat = getAsanaPat();
+    if (dbPat) {
+      reloadAsanaPat(dbPat);
+      logger.info('Asana PAT loaded from database');
+    }
+  }
+
   // Create Asana MCP client (optional - only connects when ASANA_PAT is set)
   const asanaClient = new AsanaMcpClient(config);
   if (config.asanaPat) {
-    logger.info('Asana MCP integration enabled (ASANA_PAT configured)');
+    logger.info('Asana MCP integration enabled');
   } else {
-    logger.info('Asana MCP integration disabled (ASANA_PAT not set)');
+    logger.info('Asana MCP integration disabled (no PAT configured)');
   }
 
   // Create task classifier and sync service
