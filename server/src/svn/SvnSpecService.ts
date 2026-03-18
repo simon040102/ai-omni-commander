@@ -442,32 +442,45 @@ export class SvnSpecService {
   /**
    * Find files that match the parent name (function code) within a folder listing.
    * Handles both flat files and subfolder structures.
+   *
+   * Real SVN examples:
+   *   - SPEC_OV02_(電)銷項發票彙開(AR)_v1.6.docx  ← filename contains "OV02"
+   *   - SPEC_OV06.(電)銷項發票(非AR_匯入)範例/SPEC_OV06...docx  ← subfolder contains "OV06"
+   *   - old/SPEC_OV02_...docx  ← in "old/" subfolder, filename contains code
+   *
+   * Strategy: match if filename or any parent directory CONTAINS the code (not just startsWith).
+   * Use word-boundary-like matching: code must be preceded by non-alphanumeric or start of string,
+   * to avoid "OV02" matching "OV020x" files (but "SPEC_OV02_" is fine).
    */
   private findMatchingFiles(allFiles: string[], parentName: string): string[] {
     const code = parentName.toUpperCase();
+    // Regex: code preceded by non-alphanumeric (or start) and followed by non-digit (or end)
+    // This ensures OV02 matches "SPEC_OV02_xxx" but not "OV020_xxx"
+    const codePattern = new RegExp(`(?<![A-Z0-9])${escapeRegex(code)}(?![0-9])`, 'i');
     const matched: string[] = [];
 
     for (const file of allFiles) {
-      const upper = file.toUpperCase();
-
       // Skip directories themselves
       if (file.endsWith('/')) continue;
 
       // Skip files without spec extensions
       if (!hasSpecExtension(file)) continue;
 
-      // Match 1: Filename starts with the code
-      const basename = path.basename(file).toUpperCase();
-      if (basename.startsWith(code)) {
+      // Skip old/ versions — only match latest (top-level or in code-named subfolder)
+      const parts = file.split('/');
+      if (parts.some(p => p.toLowerCase() === 'old')) continue;
+
+      // Match: filename or any path segment contains the function code
+      const basename = path.basename(file);
+      if (codePattern.test(basename)) {
         matched.push(file);
         continue;
       }
 
-      // Match 2: File is inside a subfolder that starts with the code
-      const parts = file.split('/');
+      // Match: file is inside a subfolder that contains the code
       if (parts.length > 1) {
-        const parentDir = parts[0]!.toUpperCase();
-        if (parentDir.startsWith(code) || parentDir === code) {
+        const parentDir = parts[0]!;
+        if (codePattern.test(parentDir)) {
           matched.push(file);
           continue;
         }
@@ -540,11 +553,11 @@ export function normalizeSvnUrl(url: string): string {
  * Returns the first match, or null if none found.
  */
 export function extractFunctionCode(text: string): string | null {
-  // Match: 2+ uppercase letters + optional digits (at least 2 chars total)
+  // Match: 2+ letters (case-insensitive) + optional digits (at least 2 chars total)
   // Must be at word boundary or start of string to avoid matching random substrings
-  const match = text.match(/\b([A-Z]{2,}[0-9]*)\b/);
+  const match = text.match(/\b([A-Za-z]{2,}[0-9]*)\b/);
   if (match && match[1]!.length >= 2) {
-    return match[1]!;
+    return match[1]!.toUpperCase();
   }
   return null;
 }
@@ -552,4 +565,8 @@ export function extractFunctionCode(text: string): string | null {
 function hasSpecExtension(filename: string): boolean {
   const ext = path.extname(filename).toLowerCase();
   return SPEC_EXTENSIONS.has(ext);
+}
+
+function escapeRegex(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
