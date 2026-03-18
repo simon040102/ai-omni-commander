@@ -15,7 +15,7 @@ import type { SvnConfig } from '@omni/shared';
 import { normalizeSvnUrl, extractFunctionCode } from '../svn/SvnSpecService.js';
 import type { SvnSpecService } from '../svn/SvnSpecService.js';
 import { getSvnCredentials, setSvnCredentials, getAsanaPat, setAsanaPat } from '../db/queries/globalConfig.js';
-import { reloadAsanaPat } from '../config.js';
+import { getConfig, reloadAsanaPat } from '../config.js';
 import type { MasterOrchestrator } from '../orchestrator/MasterOrchestrator.js';
 import type { AgentManager } from '../agent/AgentManager.js';
 import type { OmniWebSocketServer } from './WebSocketServer.js';
@@ -843,8 +843,8 @@ export function registerHandlers(
       payload: {
         svnUsername: creds.username,
         hasSvnPassword: !!creds.password,
-        hasAsanaPat: !!(asanaPat || config.asanaPat),
-        asanaPatSource: asanaPat ? 'db' : config.asanaPat ? 'env' : 'none',
+        hasAsanaPat: !!(asanaPat || getConfig().asanaPat),
+        asanaPatSource: asanaPat ? 'db' : getConfig().asanaPat ? 'env' : 'none',
       },
     } as WsMessage);
   };
