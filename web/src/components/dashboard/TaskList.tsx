@@ -683,6 +683,13 @@ export function TaskList({ selectedModel }: TaskListProps) {
   );
 }
 
+/* ─── SVN preview types ─── */
+interface SvnPreviewFile {
+  filename: string;
+  svnUrl: string;
+  svnRoot: 'frontend' | 'backend';
+}
+
 /* ─── Single task row with expandable detail ─── */
 function TaskRow({ task, confirmDeleteId, expandedTaskId, onExecute, onDelete, onConfirmDelete, onToggleExpand, onUpdate, onUploadDoc, onUploadImage, hasSvnConfig, onBrowseSvn }: {
   task: Task;
@@ -701,6 +708,50 @@ function TaskRow({ task, confirmDeleteId, expandedTaskId, onExecute, onDelete, o
   const isRunning = task.status === 'in_progress' || task.status === 'assigned';
   const isExpanded = expandedTaskId === task.id;
   const isAsana = task.source === 'asana';
+
+  // Lift SVN preview cache here so it persists across expand/collapse
+  const client = useWsStore(s => s.client);
+  const currentProjectId = useProjectStore(s => s.currentProjectId);
+  const [svnPreviewFiles, setSvnPreviewFiles] = useState<SvnPreviewFile[]>([]);
+  const [svnPreviewLoading, setSvnPreviewLoading] = useState(false);
+  const [svnPreviewError, setSvnPreviewError] = useState('');
+  const svnPreviewFetched = useRef(false);
+
+  // Fetch SVN preview once when first expanded (cached in TaskRow which doesn't unmount)
+  useEffect(() => {
+    if (!isExpanded || !client || !currentProjectId || !hasSvnConfig || svnPreviewFetched.current) return;
+    const functionCode = task.parentName;
+    if (!functionCode) return;
+
+    svnPreviewFetched.current = true;
+    setSvnPreviewLoading(true);
+
+    const unsub = client.addMessageListener((msg) => {
+      if (msg.type === 'svn.previewResult') {
+        const p = msg.payload as { functionCode: string; files: SvnPreviewFile[]; error?: string };
+        setSvnPreviewLoading(false);
+        if (p.error) {
+          setSvnPreviewError(p.error);
+        } else {
+          setSvnPreviewFiles(p.files || []);
+        }
+        unsub();
+      }
+    });
+
+    client.send({
+      type: 'svn.preview',
+      id: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+      payload: {
+        projectId: currentProjectId,
+        taskId: task.id,
+        taskLabel: task.label,
+      },
+    });
+
+    return unsub;
+  }, [isExpanded, client, currentProjectId, hasSvnConfig, task.id, task.parentName, task.label]);
 
   return (
     <div>
@@ -798,6 +849,9 @@ function TaskRow({ task, confirmDeleteId, expandedTaskId, onExecute, onDelete, o
           hasSvnConfig={hasSvnConfig}
           onBrowseSvn={onBrowseSvn}
           onExecute={onExecute}
+          svnPreviewFiles={svnPreviewFiles}
+          svnPreviewLoading={svnPreviewLoading}
+          svnPreviewError={svnPreviewError}
         />
       )}
     </div>
@@ -805,13 +859,8 @@ function TaskRow({ task, confirmDeleteId, expandedTaskId, onExecute, onDelete, o
 }
 
 /* ─── Expanded detail with inline editing ─── */
-interface SvnPreviewFile {
-  filename: string;
-  svnUrl: string;
-  svnRoot: 'frontend' | 'backend';
-}
 
-function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvnConfig, onBrowseSvn, onExecute }: {
+function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvnConfig, onBrowseSvn, onExecute, svnPreviewFiles, svnPreviewLoading, svnPreviewError }: {
   task: Task;
   onUpdate: (id: string, updates: { description?: string | null; specUrl?: string | null; label?: string; taskType?: TaskType }) => void;
   onUploadDoc: (taskId: string, file: File, docType: 'SA' | 'SD') => void;
@@ -819,6 +868,9 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
   hasSvnConfig?: boolean;
   onBrowseSvn?: (specType?: 'frontend' | 'backend') => void;
   onExecute?: (id: string) => void;
+  svnPreviewFiles: SvnPreviewFile[];
+  svnPreviewLoading: boolean;
+  svnPreviewError: string;
 }) {
   const ALL_LABELS = ['frontend', 'backend', 'devops', 'testing', 'review', 'architect'] as const;
   const ALL_TASK_TYPES: TaskType[] = ['bug', 'feature', 'refactor', 'other'];
@@ -832,48 +884,6 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
   const [pastedImages, setPastedImages] = useState<Array<{ name: string; dataUrl: string }>>([]);
   const saInputRef = useRef<HTMLInputElement>(null);
   const imgInputRef = useRef<HTMLInputElement>(null);
-
-  // SVN preview: auto-fetch matching spec files based on parentName
-  const [svnPreviewFiles, setSvnPreviewFiles] = useState<SvnPreviewFile[]>([]);
-  const [svnPreviewLoading, setSvnPreviewLoading] = useState(false);
-  const [svnPreviewError, setSvnPreviewError] = useState('');
-  const svnPreviewFetched = useRef(false);
-
-  useEffect(() => {
-    if (!client || !currentProjectId || !hasSvnConfig || svnPreviewFetched.current) return;
-    // Only preview if task has a parentName or a recognizable function code in title
-    const functionCode = task.parentName;
-    if (!functionCode) return;
-
-    svnPreviewFetched.current = true;
-    setSvnPreviewLoading(true);
-
-    const unsub = client.addMessageListener((msg) => {
-      if (msg.type === 'svn.previewResult') {
-        const p = msg.payload as { functionCode: string; files: SvnPreviewFile[]; error?: string };
-        setSvnPreviewLoading(false);
-        if (p.error) {
-          setSvnPreviewError(p.error);
-        } else {
-          setSvnPreviewFiles(p.files || []);
-        }
-        unsub();
-      }
-    });
-
-    client.send({
-      type: 'svn.preview',
-      id: crypto.randomUUID(),
-      timestamp: new Date().toISOString(),
-      payload: {
-        projectId: currentProjectId,
-        taskId: task.id,
-        taskLabel: task.label,
-      },
-    });
-
-    return unsub;
-  }, [client, currentProjectId, hasSvnConfig, task.id, task.parentName, task.label]);
 
   const saveDesc = () => {
     onUpdate(task.id, { description: descDraft.trim() || null });
