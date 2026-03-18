@@ -64,31 +64,38 @@ export class SvnSpecService {
       return [];
     }
 
-    // Collect matched files from all SVN roots
-    const allMatchedFileUrls: string[] = [];
+    // Collect matched files from all SVN roots, tracking which root each came from
+    const allMatchedFiles: Array<{ fileUrl: string; isFrontendRoot: boolean }> = [];
+    const frontendRoot = svnConfig.frontendSpecPath ? normalizeSvnUrl(svnConfig.frontendSpecPath) : null;
 
     for (const svnRoot of svnRoots) {
       logger.info({ projectId, taskId, parentName, functionCode, rootCode, svnRoot, taskLabel }, 'Searching SVN root for specs');
 
       try {
         // Step 1: Find the matching top-level folder
-        const topFolders = this.svnList(svnRoot, svnConfig, false);
-        const matchedFolder = this.findMatchingFolder(topFolders, rootCode);
+        const topItems = this.svnList(svnRoot, svnConfig, false);
+        const matchedFolder = this.findMatchingFolder(topItems, rootCode);
 
-        if (!matchedFolder) {
-          logger.warn({ rootCode, svnRoot, available: topFolders.slice(0, 10) }, 'No matching SVN folder found');
-          continue;
+        let searchUrl: string;
+        let allFiles: string[];
+
+        if (matchedFolder) {
+          // Has subfolder structure (e.g., "OV.銷項發票管理/")
+          searchUrl = `${svnRoot}/${matchedFolder}`;
+          logger.info({ matchedFolder, searchUrl }, 'Found matching SVN folder');
+          allFiles = this.svnList(searchUrl, svnConfig, true);
+        } else {
+          // Flat structure — all files in root directory (common for backend specs)
+          searchUrl = svnRoot;
+          logger.info({ rootCode, svnRoot }, 'No subfolder found, searching root directly');
+          allFiles = topItems;
         }
 
-        const folderUrl = `${svnRoot}/${matchedFolder}`;
-        logger.info({ matchedFolder, folderUrl }, 'Found matching SVN folder');
-
-        // Step 2: Recursively list files and find matches for function code
-        const allFiles = this.svnList(folderUrl, svnConfig, true);
+        // Step 2: Find matching files by function code
         const matchedFiles = this.findMatchingFiles(allFiles, functionCode);
 
-        if (matchedFiles.length === 0) {
-          logger.info({ parentName, folderUrl }, 'No matching files found, trying 0_共用/ fallback');
+        if (matchedFiles.length === 0 && matchedFolder) {
+          logger.info({ parentName, searchUrl }, 'No matching files found, trying 0_共用/ fallback');
           const sharedFiles = allFiles.filter(f =>
             f.startsWith('0_') && !f.endsWith('/') && hasSpecExtension(f)
           );
@@ -97,8 +104,9 @@ export class SvnSpecService {
           }
         }
 
+        const isFrontendRoot = svnRoot === frontendRoot;
         for (const file of matchedFiles) {
-          allMatchedFileUrls.push(`${folderUrl}/${file}`);
+          allMatchedFiles.push({ fileUrl: `${searchUrl}/${file}`, isFrontendRoot });
         }
 
         if (matchedFiles.length > 0) {
@@ -109,22 +117,24 @@ export class SvnSpecService {
       }
     }
 
-    if (allMatchedFileUrls.length === 0) {
+    if (allMatchedFiles.length === 0) {
       logger.info({ parentName, svnRoots }, 'No spec files found in any SVN root');
       return [];
     }
 
-    logger.info({ parentName, totalFiles: allMatchedFileUrls.length }, 'Total matched spec files across SVN roots');
+    logger.info({ parentName, totalFiles: allMatchedFiles.length }, 'Total matched spec files across SVN roots');
 
     // Step 3: Download/cache each file and bind to task
+    // Frontend SVN root = SA, Backend SVN root = SD
     const docIds: string[] = [];
     const projectCacheDir = path.join(this.cacheDir, projectId);
     fs.mkdirSync(projectCacheDir, { recursive: true });
 
-    for (const fileUrl of allMatchedFileUrls) {
+    for (const { fileUrl, isFrontendRoot } of allMatchedFiles) {
       try {
         const filename = decodeURIComponent(fileUrl.split('/').pop() || 'unknown');
-        const docId = await this.fetchAndCacheFile(projectId, taskId, fileUrl, filename, svnConfig, projectCacheDir);
+        const docType: DocType = isFrontendRoot ? 'SA' : 'SD';
+        const docId = await this.fetchAndCacheFile(projectId, taskId, fileUrl, filename, svnConfig, projectCacheDir, docType);
         if (docId) {
           docIds.push(docId);
         }
@@ -160,15 +170,24 @@ export class SvnSpecService {
       const rootType: 'frontend' | 'backend' = isFrontend ? 'frontend' : 'backend';
 
       try {
-        const topFolders = this.svnList(svnRoot, svnConfig, false);
-        const matchedFolder = this.findMatchingFolder(topFolders, rootCode);
-        if (!matchedFolder) continue;
+        const topItems = this.svnList(svnRoot, svnConfig, false);
+        const matchedFolder = this.findMatchingFolder(topItems, rootCode);
 
-        const folderUrl = `${svnRoot}/${matchedFolder}`;
-        const allFiles = this.svnList(folderUrl, svnConfig, true);
+        let searchUrl: string;
+        let allFiles: string[];
+
+        if (matchedFolder) {
+          searchUrl = `${svnRoot}/${matchedFolder}`;
+          allFiles = this.svnList(searchUrl, svnConfig, true);
+        } else {
+          // Flat structure — search root directly
+          searchUrl = svnRoot;
+          allFiles = topItems;
+        }
+
         let matchedFiles = this.findMatchingFiles(allFiles, functionCode);
 
-        if (matchedFiles.length === 0) {
+        if (matchedFiles.length === 0 && matchedFolder) {
           const sharedFiles = allFiles.filter(f =>
             f.startsWith('0_') && !f.endsWith('/') && hasSpecExtension(f)
           );
@@ -178,7 +197,7 @@ export class SvnSpecService {
         for (const file of matchedFiles) {
           results.push({
             filename: file,
-            svnUrl: `${folderUrl}/${file}`,
+            svnUrl: `${searchUrl}/${file}`,
             svnRoot: rootType,
           });
         }
@@ -200,6 +219,7 @@ export class SvnSpecService {
     relativePath: string,
     svnConfig: SvnConfig,
     projectCacheDir: string,
+    docType: DocType = 'SD',
   ): Promise<string | null> {
     const filename = path.basename(relativePath);
 
@@ -244,7 +264,6 @@ export class SvnSpecService {
     // New file — save to documents
     const buffer = fs.readFileSync(localPath);
     const parsedText = await this.extractText(localPath, filename);
-    const docType: DocType = 'SD'; // SVN specs default to SD
 
     const doc = await this.documentParser.saveFromBuffer(
       projectId, filename, buffer, docType,

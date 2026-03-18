@@ -357,6 +357,7 @@ async function main() {
 
   // 5. Create sync service (needs wsServer)
   const asanaSyncService = new AsanaSyncService(asanaClient, taskClassifier, pipeline, wsServer);
+  asanaSyncService.setSvnSpecService(svnSpecService);
 
   // 6. Register WebSocket message handlers
   registerHandlers(wsServer, orchestrator, agentManager, workspaceScanner, skillGenerator, asanaClient, asanaSyncService, quickModeHandler, svnSpecService);

@@ -85,8 +85,12 @@ export class ExecutionPipeline {
     // Find task-associated attachments (documents with [task:id] prefix)
     const taskAttachments = this.getTaskAttachments(task.projectId, taskId);
 
-    // Get SVN-bound documents for this task
-    const svnDocuments = svnDocIds.length > 0 ? getDocumentsForTask(taskId) : [];
+    // Get SVN-bound documents for this task, filtered by role:
+    // Frontend agent → SA + SD, Backend agent → SD only
+    const allSvnDocs = svnDocIds.length > 0 ? getDocumentsForTask(taskId).filter(d => d.source === 'svn') : [];
+    const svnDocuments = task.label === 'backend'
+      ? allSvnDocs.filter(d => d.docType === 'SD')
+      : allSvnDocs;  // frontend / others get SA + SD
 
     // Assemble context
     const prompt = this.assembleContext({

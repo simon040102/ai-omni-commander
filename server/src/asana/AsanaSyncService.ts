@@ -3,6 +3,7 @@ import type { AsanaMcpClient } from './AsanaMcpClient.js';
 import type { TaskClassifier } from '../orchestrator/TaskClassifier.js';
 import type { ExecutionPipeline } from '../orchestrator/ExecutionPipeline.js';
 import type { OmniWebSocketServer } from '../websocket/WebSocketServer.js';
+import type { SvnSpecService } from '../svn/SvnSpecService.js';
 import { getProject, updateProject } from '../db/queries/projects.js';
 import { createTask, getTasksByProject, updateTaskFields, deleteTask } from '../db/queries/tasks.js';
 import { genId } from '../utils/uuid.js';
@@ -27,12 +28,19 @@ export class AsanaSyncService {
   private timers = new Map<string, ReturnType<typeof setInterval>>();
   private lastSyncAt = new Map<string, string>();
 
+  private svnSpecService: SvnSpecService | null = null;
+
   constructor(
     private asanaClient: AsanaMcpClient,
     private classifier: TaskClassifier,
     private pipeline: ExecutionPipeline,
     private wsServer: OmniWebSocketServer,
   ) {}
+
+  /** Inject SvnSpecService for auto-fetching specs during sync */
+  setSvnSpecService(svc: SvnSpecService): void {
+    this.svnSpecService = svc;
+  }
 
   /**
    * Start auto-sync for a project based on its config.
@@ -134,6 +142,20 @@ export class AsanaSyncService {
           updatedTasks++;
           logger.info({ taskId: existing.id, asanaGid: asanaTask.gid }, 'Updated Asana task');
 
+          // Pre-fetch SVN specs if parentName changed
+          if (parentChanged && asanaTask.parent?.name && config?.svnConfig && this.svnSpecService) {
+            try {
+              const svnDocIds = await this.svnSpecService.fetchSpecsForTask(
+                projectId, existing.id, asanaTask.parent.name, config.svnConfig, 'all',
+              );
+              if (svnDocIds.length > 0) {
+                logger.info({ taskId: existing.id, parentName: asanaTask.parent.name, docCount: svnDocIds.length }, 'Pre-fetched SVN specs on parent change');
+              }
+            } catch (err) {
+              logger.warn({ err, taskId: existing.id }, 'Failed to pre-fetch SVN specs on parent change');
+            }
+          }
+
           // Broadcast updated task list
           const updatedTaskList = getTasksByProject(projectId);
           this.wsServer.broadcast({
@@ -176,6 +198,20 @@ export class AsanaSyncService {
           timestamp: new Date().toISOString(),
           payload: { task },
         } as WsMessage);
+
+        // Pre-fetch SVN specs for this task (both frontend and backend)
+        if (task.parentName && config?.svnConfig && this.svnSpecService) {
+          try {
+            const svnDocIds = await this.svnSpecService.fetchSpecsForTask(
+              projectId, task.id, task.parentName, config.svnConfig, 'all',
+            );
+            if (svnDocIds.length > 0) {
+              logger.info({ taskId: task.id, parentName: task.parentName, docCount: svnDocIds.length }, 'Pre-fetched SVN specs during sync');
+            }
+          } catch (err) {
+            logger.warn({ err, taskId: task.id, parentName: task.parentName }, 'Failed to pre-fetch SVN specs during sync');
+          }
+        }
 
         // Auto-execute if rules allow
         const shouldAutoExecute = autoExecuteRules[classification.taskType] || false;
