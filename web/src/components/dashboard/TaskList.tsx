@@ -82,7 +82,6 @@ export function TaskList({ selectedModel }: TaskListProps) {
   const [newSpecUrl, setNewSpecUrl] = useState('');
   const [newBackendSpecUrl, setNewBackendSpecUrl] = useState('');
   const [stagedFiles, setStagedFiles] = useState<Array<{ file: File; docType: 'SA' | 'SD' | 'image' }>>([]);
-  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
   const [confirmClearAsana, setConfirmClearAsana] = useState(false);
   const [showSvnBrowser, setShowSvnBrowser] = useState<'frontend' | 'backend' | false>(false);
@@ -169,7 +168,8 @@ export function TaskList({ selectedModel }: TaskListProps) {
                 timestamp: new Date().toISOString(),
                 payload: {
                   projectId: currentProjectId,
-                  filename: `[task:${newTask.id}] ${file.name}`,
+                  filename: file.name,
+                  taskId: newTask.id,
                   content: base64,
                   fileType: file.type || 'application/octet-stream',
                   docType: docType === 'image' ? 'SD' : docType,
@@ -198,7 +198,6 @@ export function TaskList({ selectedModel }: TaskListProps) {
     });
 
     addToast({ type: 'success', title: 'Task deleted' });
-    setConfirmDeleteId(null);
   }, [currentProjectId, client, addToast]);
 
   const handleClearAsanaTasks = useCallback(() => {
@@ -226,8 +225,9 @@ export function TaskList({ selectedModel }: TaskListProps) {
     });
   }, [currentProjectId, client]);
 
-  const handleExecuteTask = useCallback((taskId: string) => {
+  const handleExecuteTask = useCallback((taskId: string, modelOverride?: string) => {
     if (!currentProjectId || !client) return;
+    const model = modelOverride || selectedModel;
 
     client.send({
       type: 'project.startExecution',
@@ -236,11 +236,11 @@ export function TaskList({ selectedModel }: TaskListProps) {
       payload: {
         projectId: currentProjectId,
         taskId,
-        model: selectedModel,
+        model,
       },
     });
 
-    addToast({ type: 'info', title: 'Task execution started', message: `Using ${selectedModel}...` });
+    addToast({ type: 'info', title: 'Task execution started', message: `Using ${model}...` });
     setExpandedTaskId(null);
   }, [currentProjectId, client, selectedModel, addToast]);
 
@@ -256,7 +256,8 @@ export function TaskList({ selectedModel }: TaskListProps) {
         timestamp: new Date().toISOString(),
         payload: {
           projectId: currentProjectId,
-          filename: `[task:${taskId}] ${file.name}`,
+          filename: file.name,
+          taskId,
           content: base64,
           fileType: file.type || 'image/png',
           docType: 'SD',
@@ -279,7 +280,8 @@ export function TaskList({ selectedModel }: TaskListProps) {
         timestamp: new Date().toISOString(),
         payload: {
           projectId: currentProjectId,
-          filename: `[task:${taskId}] ${file.name}`,
+          filename: file.name,
+          taskId,
           content: base64,
           fileType: file.type || 'application/octet-stream',
           docType,
@@ -380,11 +382,9 @@ export function TaskList({ selectedModel }: TaskListProps) {
                 <TaskRow
                   key={task.id}
                   task={task}
-                  confirmDeleteId={confirmDeleteId}
                   expandedTaskId={expandedTaskId}
                   onExecute={handleExecuteTask}
                   onDelete={handleDeleteTask}
-                  onConfirmDelete={setConfirmDeleteId}
                   onToggleExpand={(id) => setExpandedTaskId(expandedTaskId === id ? null : id)}
                   onUpdate={handleUpdateTask}
                   onUploadDoc={handleUploadDoc}
@@ -661,6 +661,7 @@ export function TaskList({ selectedModel }: TaskListProps) {
         )}
       </div>
 
+
       {/* Asana import drawer */}
       <AsanaImportDrawer open={showImportDrawer} onClose={() => setShowImportDrawer(false)} />
 
@@ -708,13 +709,11 @@ interface SvnPreviewFile {
 }
 
 /* ─── Single task row with expandable detail ─── */
-function TaskRow({ task, confirmDeleteId, expandedTaskId, onExecute, onDelete, onConfirmDelete, onToggleExpand, onUpdate, onUploadDoc, onUploadImage, hasSvnConfig, onBrowseSvn }: {
+function TaskRow({ task, expandedTaskId, onExecute, onDelete, onToggleExpand, onUpdate, onUploadDoc, onUploadImage, hasSvnConfig, onBrowseSvn }: {
   task: Task;
-  confirmDeleteId: string | null;
   expandedTaskId: string | null;
-  onExecute: (id: string) => void;
+  onExecute: (id: string, model?: string) => void;
   onDelete: (id: string) => void;
-  onConfirmDelete: (id: string | null) => void;
   onToggleExpand: (id: string) => void;
   onUpdate: (id: string, updates: { description?: string | null; label?: string; taskType?: TaskType }) => void;
   onUploadDoc: (taskId: string, file: File, docType: 'SA' | 'SD') => void;
@@ -725,6 +724,7 @@ function TaskRow({ task, confirmDeleteId, expandedTaskId, onExecute, onDelete, o
   const isRunning = task.status === 'in_progress' || task.status === 'assigned';
   const isExpanded = expandedTaskId === task.id;
   const isAsana = task.source === 'asana';
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
   // Lift SVN preview cache here so it persists across expand/collapse
   const client = useWsStore(s => s.client);
@@ -736,8 +736,7 @@ function TaskRow({ task, confirmDeleteId, expandedTaskId, onExecute, onDelete, o
 
   const fetchSvnPreview = useCallback(() => {
     if (!client || !currentProjectId || !hasSvnConfig) return;
-    const functionCode = task.parentName;
-    if (!functionCode) return;
+    // Server will extract function code from parentName or task title as fallback
 
     // Keep manually-added files across reloads
     setSvnPreviewFiles(prev => prev.filter(f => f.manual));
@@ -860,33 +859,32 @@ function TaskRow({ task, confirmDeleteId, expandedTaskId, onExecute, onDelete, o
         </div>
 
         {/* Actions (delete) */}
-        <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 w-[2.5rem] justify-end" onClick={e => e.stopPropagation()}>
-
-          {confirmDeleteId === task.id ? (
-            <div className="flex items-center gap-0.5 animate-fade-in">
-              <button
-                onClick={() => onDelete(task.id)}
-                className="text-[10px] text-red-400 hover:text-red-300 font-semibold px-1.5 py-0.5 bg-red-500/100/20 rounded"
-              >
-                Yes
-              </button>
-              <button
-                onClick={() => onConfirmDelete(null)}
-                className="text-[10px] text-muted-foreground hover:text-foreground px-1 py-0.5"
-              >
-                No
-              </button>
+        <div className="relative flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 w-[2.5rem] justify-end" onClick={e => e.stopPropagation()}>
+          <button
+            onClick={() => setShowDeleteConfirm(v => !v)}
+            className="p-1.5 rounded text-muted-foreground/70 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+            title={isRunning ? "Force delete (task is running)" : "Delete task"}
+          >
+            <IconTrash className="w-4 h-4" />
+          </button>
+          {showDeleteConfirm && (
+            <div className="absolute right-0 top-7 z-50 bg-card border border-border rounded-lg shadow-lg p-3 w-48 animate-fade-in">
+              <p className="text-xs text-muted-foreground mb-2 line-clamp-2">{task.title}</p>
+              <div className="flex gap-1.5 justify-end">
+                <button
+                  onClick={() => setShowDeleteConfirm(false)}
+                  className="px-2 py-1 rounded text-xs border border-border hover:bg-muted transition-colors"
+                >
+                  取消
+                </button>
+                <button
+                  onClick={() => { onDelete(task.id); setShowDeleteConfirm(false); }}
+                  className="px-2 py-1 rounded text-xs bg-red-500 hover:bg-red-600 text-white font-medium transition-colors"
+                >
+                  刪除
+                </button>
+              </div>
             </div>
-          ) : (
-            !isRunning && (
-              <button
-                onClick={() => onConfirmDelete(task.id)}
-                className="p-1 rounded text-muted-foreground/70 hover:text-red-400 hover:bg-red-500/10 transition-colors"
-                title="Delete task"
-              >
-                <IconTrash className="w-3.5 h-3.5" />
-              </button>
-            )
           )}
         </div>
       </div>
@@ -922,7 +920,7 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
   onUploadImage: (taskId: string, file: File) => void;
   hasSvnConfig?: boolean;
   onBrowseSvn?: (specType: 'frontend' | 'backend') => void;
-  onExecute?: (id: string) => void;
+  onExecute?: (id: string, model?: string) => void;
   svnPreviewFiles: SvnPreviewFile[];
   svnPreviewLoading: boolean;
   svnPreviewError: string;
@@ -934,6 +932,7 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
   const ALL_TASK_TYPES: TaskType[] = ['bug', 'feature', 'refactor', 'other'];
   const isAsana = task.source === 'asana';
   const client = useWsStore(s => s.client);
+  const [execModel, setExecModel] = useState<string>(task.preferredModel || 'sonnet');
   const currentProjectId = useProjectStore(s => s.currentProjectId);
   const [editingDesc, setEditingDesc] = useState(false);
   const [descDraft, setDescDraft] = useState(task.description || '');
@@ -1206,14 +1205,40 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
             </a>
           )}
         </div>
-        {onExecute && task.status !== 'in_progress' && task.status !== 'assigned' && task.status !== 'completed' && (
+        {onExecute && task.status === 'completed' && (
           <button
             onClick={() => onExecute(task.id)}
-            className="inline-flex items-center gap-2 px-6 py-2 rounded-lg bg-green-600 text-white hover:bg-green-500 font-semibold text-sm transition-colors whitespace-nowrap shadow-sm"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground text-xs font-medium transition-colors"
           >
-            <IconPlay className="w-4.5 h-4.5" />
-            Execute Task
+            <IconRefresh className="w-3.5 h-3.5" />
+            Re-run
           </button>
+        )}
+        {onExecute && task.status !== 'in_progress' && task.status !== 'assigned' && task.status !== 'completed' && (
+          <div className="flex items-center gap-1">
+            {(['sonnet', 'opus', 'haiku'] as const).map(m => (
+              <button
+                key={m}
+                onClick={() => setExecModel(m)}
+                className={`px-2 py-1 rounded text-[10px] font-medium transition-all ${
+                  execModel === m
+                    ? m === 'opus' ? 'bg-purple-500/20 text-purple-400'
+                      : m === 'haiku' ? 'bg-green-500/20 text-green-400'
+                      : 'bg-blue-500/20 text-blue-400'
+                    : 'text-muted-foreground hover:text-foreground bg-muted/50'
+                }`}
+              >
+                {m.charAt(0).toUpperCase() + m.slice(1)}
+              </button>
+            ))}
+            <button
+              onClick={() => onExecute(task.id, execModel)}
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-green-600 text-white hover:bg-green-500 font-semibold text-sm transition-colors whitespace-nowrap shadow-sm"
+            >
+              <IconPlay className="w-4 h-4" />
+              Execute
+            </button>
+          </div>
         )}
       </div>
     </div>

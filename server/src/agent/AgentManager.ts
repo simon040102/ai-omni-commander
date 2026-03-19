@@ -25,6 +25,8 @@ const logger = createChildLogger('AgentManager');
 export class AgentManager {
   private processes = new Map<string, AgentProcess>();
   private progressDetector = new ProgressDetector();
+  /** Agents currently in self-review phase (will complete after review finishes) */
+  private reviewingAgents = new Set<string>();
 
   constructor(
     private eventBus: EventBus,
@@ -52,9 +54,10 @@ export class AgentManager {
       if (task) agentTitle = task.title;
     }
 
-    // Create DB record
+    // Create DB record (use pre-generated agentId if provided, so uploaded files can reference it)
     const agent = createAgent({
       projectId: config.projectId,
+      id: config.agentId,
       role: config.role,
       title: agentTitle,
       systemPrompt,
@@ -66,6 +69,14 @@ export class AgentManager {
     if (config.taskId) {
       updateAgent(agent.id, { currentTaskId: config.taskId });
       updateTask(config.taskId, { assignedAgentId: agent.id, status: 'in_progress' });
+
+      // Notify frontend of task status change
+      await this.eventBus.emit({
+        type: EventTypes.TASK_STATUS_CHANGED,
+        source: agent.id,
+        payload: { taskId: config.taskId, projectId: config.projectId, newStatus: 'in_progress', assignedAgentId: agent.id },
+        timestamp: new Date().toISOString(),
+      });
     }
 
     // Create AgentProcess
@@ -431,6 +442,82 @@ export class AgentManager {
     result: ClaudeStreamResult,
   ): Promise<void> {
     this.progressDetector.clear(agentId);
+
+    // --- Self-review: intercept first completion to trigger review ---
+    const agent = getAgent(agentId);
+    const shouldSelfReview = taskId
+      && !result.is_error
+      && !this.reviewingAgents.has(agentId)
+      && agent
+      && (agent.role === 'frontend' || agent.role === 'backend')
+      && this.isReviewEnabled(projectId);
+
+    if (shouldSelfReview) {
+      logger.info({ agentId, taskId }, 'Task completed — starting self-review phase');
+      this.reviewingAgents.add(agentId);
+
+      try {
+        // Update agent status to 'reviewing' so frontend can show it
+        updateAgent(agentId, {
+          status: 'reviewing' as import('@omni/shared').AgentStatus,
+          totalCostUsd: result.cost_usd,
+          totalTurns: result.num_turns,
+          totalInputTokens: result.input_tokens || 0,
+          totalOutputTokens: result.output_tokens || 0,
+          pid: null,
+        });
+
+        // Notify frontend of reviewing status
+        await this.eventBus.emit({
+          type: 'agent.statusChange',
+          source: agentId,
+          payload: { agentId, previousStatus: 'running', newStatus: 'reviewing' },
+          timestamp: new Date().toISOString(),
+        });
+
+        // Resume the same session with a self-review prompt
+        const task = getTask(taskId!);
+        const reviewPrompt = `你剛才完成了任務「${task?.title || ''}」的開發工作。
+
+現在請 Review 你剛才所做的所有程式碼修改：
+1. 程式碼正確性 — 有沒有 bug、typo、邏輯錯誤
+2. 安全性 — SQL injection、XSS 等常見漏洞
+3. Edge cases — 例外處理、空值檢查
+4. 程式碼風格 — 命名、一致性
+
+請使用 git diff 或 Read 工具回顧你的修改，然後輸出以下 JSON：
+
+\`\`\`json
+{
+  "verdict": "pass" 或 "fail",
+  "score": 0-100,
+  "issues": [
+    { "severity": "critical" | "warning" | "info", "file": "路徑", "line": 行號, "message": "問題描述" }
+  ],
+  "summary": "總體評估"
+}
+\`\`\`
+
+完成後請輸出 [REVIEW_COMPLETE]。`;
+
+        // Delay to let the process and session file fully flush to disk
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        this.processes.delete(agentId);
+        await this.resumeAgent(agentId, reviewPrompt);
+        return; // Don't complete yet — wait for review to finish
+      } catch (err) {
+        logger.error({ err, agentId }, 'Failed to start self-review, completing normally');
+        this.reviewingAgents.delete(agentId);
+        // Fall through to normal completion
+      }
+    }
+
+    // --- Normal completion (or post-review completion) ---
+    const wasReviewing = this.reviewingAgents.delete(agentId);
+    if (wasReviewing) {
+      logger.info({ agentId, taskId }, 'Self-review completed');
+    }
+
     updateAgent(agentId, {
       status: 'stopped',
       totalCostUsd: result.cost_usd,
@@ -445,6 +532,14 @@ export class AgentManager {
       updateTask(taskId, {
         status,
         resultSummary: result.result ?? undefined,
+      });
+
+      // Notify frontend of task status change
+      await this.eventBus.emit({
+        type: EventTypes.TASK_STATUS_CHANGED,
+        source: agentId,
+        payload: { taskId, projectId, newStatus: status, assignedAgentId: agentId },
+        timestamp: new Date().toISOString(),
       });
 
       await this.eventBus.emit({
@@ -475,6 +570,17 @@ export class AgentManager {
     this.checkProjectCompletion(projectId);
   }
 
+  /** Check if self-review is enabled for a project (default: true) */
+  private isReviewEnabled(projectId: string): boolean {
+    const project = getProject(projectId);
+    if (!project?.configJson) return true; // enabled by default
+    try {
+      const cfg = JSON.parse(project.configJson);
+      if (cfg.reviewConfig && cfg.reviewConfig.enabled === false) return false;
+    } catch { /* ignore */ }
+    return true;
+  }
+
   private checkProjectCompletion(projectId: string): void {
     const project = getProject(projectId);
     if (!project || project.status !== 'executing') return;
@@ -482,7 +588,7 @@ export class AgentManager {
     const allAgents = getAgentsByProject(projectId);
     const allDone = allAgents.every(a =>
       a.status === 'stopped' || a.status === 'error' || a.status === 'idle'
-    );
+    ) && allAgents.every(a => !this.reviewingAgents.has(a.id));
 
     if (allDone && allAgents.length > 0) {
       const hasErrors = allAgents.some(a => a.status === 'error');
@@ -505,10 +611,27 @@ export class AgentManager {
     taskId: string | null,
     error: Error,
   ): Promise<void> {
+    // If this error happened during self-review, don't fail the task —
+    // the original work was already completed successfully before the review started.
+    const wasReviewing = this.reviewingAgents.delete(agentId);
+    if (wasReviewing) {
+      logger.warn({ agentId, taskId }, 'Self-review failed — task preserved as completed');
+      updateAgent(agentId, { status: 'stopped' });
+      this.processes.delete(agentId);
+      this.checkProjectCompletion(projectId);
+      return;
+    }
+
     updateAgent(agentId, { status: 'error' });
 
     if (taskId) {
       updateTask(taskId, { status: 'failed' });
+      await this.eventBus.emit({
+        type: EventTypes.TASK_STATUS_CHANGED,
+        source: agentId,
+        payload: { taskId, projectId, newStatus: 'failed', assignedAgentId: agentId },
+        timestamp: new Date().toISOString(),
+      });
     }
 
     await this.eventBus.emit({

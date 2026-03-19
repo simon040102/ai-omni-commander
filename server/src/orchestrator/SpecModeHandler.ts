@@ -6,6 +6,7 @@ import type { EventBus } from '../eventbus/EventBus.js';
 import { DocumentParser, type ParsedDocument } from '../documents/DocumentParser.js';
 import { updateProject, getProject } from '../db/queries/projects.js';
 import { getAgentsByRole } from '../db/queries/agents.js';
+import { getTask } from '../db/queries/tasks.js';
 import { getConfig } from '../config.js';
 import { createChildLogger } from '../utils/logger.js';
 import { loadSuperpowersPrompt } from '../skills/superpowers/index.js';
@@ -41,16 +42,26 @@ export class SpecModeHandler {
     );
   }
 
-  /** Upload a document for a project */
+  /** Upload a document for a project, optionally scoped to a task subfolder */
   async uploadDocument(
     projectId: string,
     filename: string,
     content: string,
     fileType: string,
     docType?: DocType,
+    taskId?: string,
+    agentId?: string,
   ): Promise<void> {
-    await this.documentParser.saveAndParse(projectId, filename, content, fileType, docType || 'SD');
-    logger.info({ projectId, filename, docType: docType || 'SD' }, 'Document uploaded');
+    let subFolder: string | undefined;
+    if (agentId) {
+      subFolder = agentId;
+    } else if (taskId) {
+      const task = getTask(taskId);
+      const code = task?.parentName || null;
+      subFolder = code ? `${code}_${taskId.slice(0, 8)}` : `task_${taskId.slice(0, 8)}`;
+    }
+    await this.documentParser.saveAndParse(projectId, filename, content, fileType, docType || 'SD', { subFolder });
+    logger.info({ projectId, filename, docType: docType || 'SD', subFolder }, 'Document uploaded');
   }
 
   /**
@@ -58,7 +69,10 @@ export class SpecModeHandler {
    * Used by the agent.add handler to prepend document info to manually added agents.
    */
   getDocumentContext(projectId: string, role?: string): string {
-    const docs = this.documentParser.getDocuments(projectId);
+    const allDocs = this.documentParser.getDocuments(projectId);
+    // Exclude task-specific attachments (files in subfolders)
+    const projectUploadsDir = path.join(this.documentParser.getUploadDir(), projectId);
+    const docs = allDocs.filter(d => path.dirname(d.filePath) === projectUploadsDir);
     if (docs.length === 0) return '';
 
     // Filter by role if applicable
@@ -69,8 +83,14 @@ export class SpecModeHandler {
     const docLines = finalDocs.map(d => {
       const typeTag = `[${d.docType}] `;
       const isPdf = d.filename.toLowerCase().endsWith('.pdf');
+      const mdMatch = d.content.match(/^\[Document saved at: (.+)\]/);
+
       if (isPdf) {
         return `- ${typeTag}${d.filename}: 請用 Read tool 讀取 "${d.filePath}"（PDF 包含文字與圖片）`;
+      }
+      if (mdMatch) {
+        const mdPath = mdMatch[1];
+        return `- ${typeTag}${d.filename}: 請用 Read tool 讀取 "${mdPath}"（Markdown 含文字與圖片路徑）`;
       }
       return `- ${typeTag}${d.filename}:\n${d.content}`;
     });
@@ -83,8 +103,10 @@ export class SpecModeHandler {
     const project = getProject(projectId);
     if (!project) throw new Error(`Project ${projectId} not found`);
 
-    // Get all uploaded documents
-    const docs = this.documentParser.getDocuments(projectId);
+    // Get all uploaded documents — exclude task-specific attachments (files in subfolders)
+    const allDocs = this.documentParser.getDocuments(projectId);
+    const projectUploadsDir = path.join(this.documentParser.getUploadDir(), projectId);
+    const docs = allDocs.filter(d => path.dirname(d.filePath) === projectUploadsDir);
     if (docs.length === 0) {
       throw new Error('No documents uploaded for this project');
     }
@@ -167,8 +189,16 @@ export class SpecModeHandler {
     const docLines = docs.map(d => {
       const typeTag = `[${d.docType}] `;
       const isPdf = d.filename.toLowerCase().endsWith('.pdf');
+      const mdMatch = d.content.match(/^\[Document saved at: (.+)\]/);
+      const imgMatch = d.content.match(/^\[Image saved at: (.+)\]/);
       if (isPdf) {
         return `- ${typeTag}${d.filename}: 請用 Read tool 讀取 "${d.filePath}"（PDF 包含文字與圖片）`;
+      }
+      if (mdMatch) {
+        return `- ${typeTag}${d.filename}: 請用 Read tool 讀取 "${mdMatch[1]}"（Markdown 含文字與圖片路徑）`;
+      }
+      if (imgMatch) {
+        return `- ${typeTag}${d.filename}: 請用 Read tool 讀取 "${imgMatch[1]}"（截圖圖片）`;
       }
       return `- ${typeTag}${d.filename}:\n${d.content}`;
     });

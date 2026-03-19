@@ -4,6 +4,7 @@ import type { TaskClassifier } from '../orchestrator/TaskClassifier.js';
 import type { ExecutionPipeline } from '../orchestrator/ExecutionPipeline.js';
 import type { OmniWebSocketServer } from '../websocket/WebSocketServer.js';
 import type { SvnSpecService } from '../svn/SvnSpecService.js';
+import type { DocumentParser } from '../documents/DocumentParser.js';
 import { getProject, updateProject } from '../db/queries/projects.js';
 import { createTask, getTasksByProject, updateTaskFields, deleteTask } from '../db/queries/tasks.js';
 import { genId } from '../utils/uuid.js';
@@ -29,6 +30,7 @@ export class AsanaSyncService {
   private lastSyncAt = new Map<string, string>();
 
   private svnSpecService: SvnSpecService | null = null;
+  private documentParser: DocumentParser | null = null;
 
   constructor(
     private asanaClient: AsanaMcpClient,
@@ -40,6 +42,11 @@ export class AsanaSyncService {
   /** Inject SvnSpecService for auto-fetching specs during sync */
   setSvnSpecService(svc: SvnSpecService): void {
     this.svnSpecService = svc;
+  }
+
+  /** Inject DocumentParser for task folder cleanup on delete */
+  setDocumentParser(dp: DocumentParser): void {
+    this.documentParser = dp;
   }
 
   /**
@@ -133,28 +140,31 @@ export class AsanaSyncService {
         const descChanged = (existing.description || '') !== description;
         const parentChanged = (existing.parentName || '') !== (asanaTask.parent?.name || '');
 
-        if (titleChanged || descChanged || parentChanged) {
+        // Always apply explicit Chinese role markers (前端/後端) regardless of whether title changed
+          const forcedLabel = this.classifier.detectLabelFromTitle(asanaTask.name);
+
+      if (titleChanged || descChanged || parentChanged || (forcedLabel && forcedLabel !== existing.label)) {
+          // Re-classify label if title changed (catches keyword changes like 前端/後端)
+          let newLabel = forcedLabel ?? existing.label;
+          if (titleChanged && !forcedLabel) {
+            const reclassification = await this.classifier.classify({
+              title: asanaTask.name,
+              description: asanaTask.notes,
+              tags: asanaTask.tags,
+            });
+            newLabel = reclassification.label;
+            logger.info({ taskId: existing.id, oldLabel: existing.label, newLabel, title: asanaTask.name }, 'Re-classified task label on title change');
+          } else if (forcedLabel && forcedLabel !== existing.label) {
+            logger.info({ taskId: existing.id, oldLabel: existing.label, newLabel: forcedLabel, title: asanaTask.name }, 'Overriding label based on explicit Chinese role marker');
+          }
           updateTaskFields(existing.id, {
             title: asanaTask.name,
             description: description || null,
             parentName: asanaTask.parent?.name || null,
+            label: newLabel,
           });
           updatedTasks++;
           logger.info({ taskId: existing.id, asanaGid: asanaTask.gid }, 'Updated Asana task');
-
-          // Pre-fetch SVN specs if parentName changed
-          if (parentChanged && asanaTask.parent?.name && config?.svnConfig && this.svnSpecService) {
-            try {
-              const svnDocIds = await this.svnSpecService.fetchSpecsForTask(
-                projectId, existing.id, asanaTask.parent.name, config.svnConfig, 'all',
-              );
-              if (svnDocIds.length > 0) {
-                logger.info({ taskId: existing.id, parentName: asanaTask.parent.name, docCount: svnDocIds.length }, 'Pre-fetched SVN specs on parent change');
-              }
-            } catch (err) {
-              logger.warn({ err, taskId: existing.id }, 'Failed to pre-fetch SVN specs on parent change');
-            }
-          }
 
           // Broadcast updated task list
           const updatedTaskList = getTasksByProject(projectId);
@@ -167,11 +177,13 @@ export class AsanaSyncService {
         }
       } else {
         // New task — classify and create
-        const classification = await this.classifier.classify({
-          title: asanaTask.name,
-          description: asanaTask.notes,
-          tags: asanaTask.tags,
-        });
+        // Always check explicit markers first — they override AI classification
+        const markerLabel = this.classifier.detectLabelFromTitle(asanaTask.name);
+        const classification = markerLabel
+          ? { taskType: this.classifier.fallbackClassify(asanaTask.name, asanaTask.notes).taskType, label: markerLabel }
+          : await this.classifier.classify({ title: asanaTask.name, description: asanaTask.notes, tags: asanaTask.tags });
+
+        logger.info({ title: asanaTask.name, markerLabel, label: classification.label }, 'Task label resolved');
 
         const task = createTask({
           projectId,
@@ -199,20 +211,6 @@ export class AsanaSyncService {
           payload: { task },
         } as WsMessage);
 
-        // Pre-fetch SVN specs for this task (both frontend and backend)
-        if (task.parentName && config?.svnConfig && this.svnSpecService) {
-          try {
-            const svnDocIds = await this.svnSpecService.fetchSpecsForTask(
-              projectId, task.id, task.parentName, config.svnConfig, 'all',
-            );
-            if (svnDocIds.length > 0) {
-              logger.info({ taskId: task.id, parentName: task.parentName, docCount: svnDocIds.length }, 'Pre-fetched SVN specs during sync');
-            }
-          } catch (err) {
-            logger.warn({ err, taskId: task.id, parentName: task.parentName }, 'Failed to pre-fetch SVN specs during sync');
-          }
-        }
-
         // Auto-execute if rules allow
         const shouldAutoExecute = autoExecuteRules[classification.taskType] || false;
         if (shouldAutoExecute && autoExecuted < maxConcurrent) {
@@ -234,6 +232,9 @@ export class AsanaSyncService {
         if (localTask.status === 'in_progress' || localTask.status === 'assigned') {
           logger.info({ taskId: localTask.id, asanaGid: gid }, 'Skipped removing running Asana task');
           continue;
+        }
+        if (this.documentParser) {
+          await this.documentParser.deleteTaskFolder(localTask.projectId, localTask.parentName, localTask.id);
         }
         deleteTask(localTask.id);
         removedTasks++;

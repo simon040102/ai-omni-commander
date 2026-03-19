@@ -160,12 +160,12 @@ export function Sidebar({ currentView, onViewChange, collapsed, onToggleCollapse
             </span>
           </div>
           {currentProject.frontendPath && (
-            <div className="text-[9px] text-muted-foreground mt-1 truncate" title={currentProject.frontendPath}>
+            <div className="text-xs text-muted-foreground mt-1 truncate" title={currentProject.frontendPath}>
               <span className="text-blue-400 font-medium">FE</span> {currentProject.frontendPath}
             </div>
           )}
           {currentProject.backendPath && (
-            <div className="text-[9px] text-muted-foreground mt-0.5 truncate" title={currentProject.backendPath}>
+            <div className="text-xs text-muted-foreground mt-0.5 truncate" title={currentProject.backendPath}>
               <span className="text-purple-400 font-medium">BE</span> {currentProject.backendPath}
             </div>
           )}
@@ -213,21 +213,21 @@ export function Sidebar({ currentView, onViewChange, collapsed, onToggleCollapse
       {/* Spacer to push bottom items down */}
       <div className="flex-1" />
 
-      {/* Settings - pinned at bottom */}
+      {/* Global Settings - pinned at bottom */}
       <div className={`${collapsed ? 'p-1' : 'px-2 pb-1'} border-t border-border`}>
         <button
-          onClick={() => onViewChange('settings')}
+          onClick={() => onViewChange('global-settings')}
           className={`w-full flex items-center gap-2 rounded-md text-sm mb-0.5 transition-colors ${
             collapsed ? 'justify-center px-2 py-2.5' : 'px-3 py-2.5'
           } ${
-            currentView === 'settings'
+            currentView === 'global-settings'
               ? 'bg-primary/10 text-primary'
               : 'text-muted-foreground hover:bg-muted hover:text-foreground'
           }`}
-          title={collapsed ? 'Settings' : undefined}
+          title={collapsed ? 'Global Settings' : undefined}
         >
           <IconSettings className="w-4 h-4" />
-          {!collapsed && <span className="flex-1 text-left">Settings</span>}
+          {!collapsed && <span className="flex-1 text-left">Global Settings</span>}
         </button>
       </div>
 

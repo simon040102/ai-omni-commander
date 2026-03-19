@@ -47,7 +47,7 @@ export function ProgressRing({
           className="transition-all duration-500 ease-out"
         />
       </svg>
-      <span className="absolute text-[10px] font-medium text-gray-300">
+      <span className="absolute text-[10px] font-bold text-gray-700 dark:text-gray-100">
         {Math.round(percentage)}
       </span>
     </div>

@@ -35,6 +35,7 @@ import { createChildLogger } from '../utils/logger.js';
 import { loadSuperpowersPrompt } from '../skills/superpowers/index.js';
 import type { SuperpowersFeature } from '@omni/shared';
 import type { QuickModeHandler } from '../orchestrator/QuickModeHandler.js';
+import type { DocumentParser } from '../documents/DocumentParser.js';
 
 const logger = createChildLogger('MessageRouter');
 
@@ -51,6 +52,7 @@ export function registerHandlers(
   asanaSyncService?: AsanaSyncService,
   quickModeHandler?: QuickModeHandler,
   svnSpecService?: SvnSpecService,
+  documentParser?: DocumentParser,
 ): void {
   // PROJECT.CREATE
   wsServer.registerHandler('project.create', (msg: WsMessage, ws: WebSocket) => {
@@ -138,7 +140,7 @@ export function registerHandlers(
     const specHandler = orchestrator.getSpecHandler();
     await specHandler.uploadDocument(
       payload.projectId, payload.filename, payload.content, payload.fileType,
-      payload.docType,
+      payload.docType, payload.taskId, payload.agentId,
     );
 
     const docs = specHandler.getDocumentParser().getDocuments(payload.projectId);
@@ -330,6 +332,12 @@ export function registerHandlers(
     deleteAgent(payload.agentId);
     logger.info({ agentId: payload.agentId }, 'Agent deleted');
 
+    // Clean up per-agent upload folder
+    if (projectId && documentParser) {
+      await documentParser.deleteByAgent(payload.agentId, projectId);
+      logger.info({ agentId: payload.agentId, projectId }, 'Cleaned up per-agent uploads');
+    }
+
     wsServer.broadcast({
       type: 'agent.statusChange',
       id: genId(),
@@ -395,6 +403,7 @@ export function registerHandlers(
 
       const agentId = await agentManager.startAgent({
         projectId: payload.projectId,
+        agentId: payload.agentId,
         role: payload.role as AgentRole,
         prompt: fullPrompt,
         model: payload.model,
@@ -471,14 +480,26 @@ export function registerHandlers(
   // TASK.OVERRIDE
   wsServer.registerHandler('task.override', async (msg: WsMessage) => {
     const { payload } = msg as WsTaskOverride;
+    let newStatus: string;
     switch (payload.action) {
       case 'retry':
         updateTask(payload.taskId, { status: 'queued', retryCount: 0 });
+        newStatus = 'queued';
         break;
       case 'skip':
         updateTask(payload.taskId, { status: 'completed', resultSummary: 'Skipped by user' });
+        newStatus = 'completed';
         break;
+      default:
+        return;
     }
+    // Broadcast task status change to frontend
+    wsServer.broadcast({
+      type: 'task.statusChange',
+      id: genId(),
+      timestamp: new Date().toISOString(),
+      payload: { taskId: payload.taskId, newStatus },
+    } as WsMessage);
   });
 
   // PROJECT.DELETE
@@ -573,8 +594,12 @@ export function registerHandlers(
   });
 
   // TASK.DELETE
-  wsServer.registerHandler('task.delete', (msg: WsMessage) => {
+  wsServer.registerHandler('task.delete', async (msg: WsMessage) => {
     const { payload } = msg as WsTaskDelete;
+    const task = getTask(payload.taskId);
+    if (task && documentParser) {
+      await documentParser.deleteTaskFolder(task.projectId, task.parentName, task.id);
+    }
     deleteTask(payload.taskId);
     logger.info({ taskId: payload.taskId, projectId: payload.projectId }, 'Task deleted');
 
@@ -612,8 +637,12 @@ export function registerHandlers(
   });
 
   // TASK.BULK_DELETE_BY_SOURCE — delete all tasks with a given source (e.g. 'asana')
-  wsServer.registerHandler('task.bulkDeleteBySource', (msg: WsMessage) => {
+  wsServer.registerHandler('task.bulkDeleteBySource', async (msg: WsMessage) => {
     const { payload } = msg as WsTaskBulkDeleteBySource;
+    if (documentParser) {
+      const tasksToDelete = getTasksByProject(payload.projectId).filter(t => t.source === payload.source);
+      await Promise.all(tasksToDelete.map(t => documentParser!.deleteTaskFolder(t.projectId, t.parentName, t.id)));
+    }
     const count = deleteTasksBySource(payload.projectId, payload.source);
     logger.info({ projectId: payload.projectId, source: payload.source, deletedCount: count }, 'Tasks bulk deleted by source');
 
@@ -864,6 +893,104 @@ export function registerHandlers(
     setAsanaPat(payload.pat);
     reloadAsanaPat(payload.pat || null);
     sendConfigState(ws);
+  });
+
+  // Test SVN credentials by running `svn info` on a known SVN path
+  wsServer.registerHandler('config.testSvn', async (msg: WsMessage, ws: WebSocket) => {
+    const creds = getSvnCredentials();
+    if (!creds.username && !creds.password) {
+      wsServer.send(ws, {
+        type: 'config.testResult',
+        id: genId(),
+        timestamp: new Date().toISOString(),
+        payload: { service: 'svn', success: false, message: 'No SVN credentials configured' },
+      } as WsMessage);
+      return;
+    }
+
+    try {
+      const { execSync } = await import('node:child_process');
+      // Use any project's SVN path to test, or just test auth with svn info on the server root
+      const authArgs = [
+        '--non-interactive', '--trust-server-cert', '--no-auth-cache',
+      ];
+      if (creds.username) authArgs.push('--username', creds.username);
+      if (creds.password) authArgs.push('--password', creds.password);
+
+      // Try to find a project with an SVN path configured
+      const projects = listProjects();
+      let testUrl = '';
+      for (const p of projects) {
+        if (p.configJson) {
+          try {
+            const cfg = JSON.parse(p.configJson);
+            testUrl = cfg.svnConfig?.frontendSpecPath || cfg.svnConfig?.backendSpecPath || '';
+            if (testUrl) break;
+          } catch { /* ignore */ }
+        }
+      }
+
+      if (!testUrl) {
+        wsServer.send(ws, {
+          type: 'config.testResult',
+          id: genId(),
+          timestamp: new Date().toISOString(),
+          payload: { service: 'svn', success: false, message: 'No SVN path configured in any project. Set SVN Spec paths in Project Settings first.' },
+        } as WsMessage);
+        return;
+      }
+
+      execSync(`svn info "${testUrl}" ${authArgs.join(' ')}`, {
+        encoding: 'buffer',
+        timeout: 15000,
+      });
+
+      wsServer.send(ws, {
+        type: 'config.testResult',
+        id: genId(),
+        timestamp: new Date().toISOString(),
+        payload: { service: 'svn', success: true, message: 'SVN connection successful' },
+      } as WsMessage);
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      const isAuth = /auth|401|403|password|credential/i.test(errMsg);
+      wsServer.send(ws, {
+        type: 'config.testResult',
+        id: genId(),
+        timestamp: new Date().toISOString(),
+        payload: { service: 'svn', success: false, message: isAuth ? 'Authentication failed — check username/password' : errMsg.slice(0, 200) },
+      } as WsMessage);
+    }
+  });
+
+  // Test Asana PAT by calling /users/me
+  wsServer.registerHandler('config.testAsana', async (_msg: WsMessage, ws: WebSocket) => {
+    if (!asanaClient) {
+      wsServer.send(ws, {
+        type: 'config.testResult',
+        id: genId(),
+        timestamp: new Date().toISOString(),
+        payload: { service: 'asana', success: false, message: 'Asana client not initialized' },
+      } as WsMessage);
+      return;
+    }
+
+    try {
+      await asanaClient.connect();
+      wsServer.send(ws, {
+        type: 'config.testResult',
+        id: genId(),
+        timestamp: new Date().toISOString(),
+        payload: { service: 'asana', success: true, message: 'Asana connection successful' },
+      } as WsMessage);
+    } catch (err: unknown) {
+      wsServer.send(ws, {
+        type: 'config.testResult',
+        id: genId(),
+        timestamp: new Date().toISOString(),
+        payload: { service: 'asana', success: false, message: err instanceof Error ? err.message : String(err) },
+      } as WsMessage);
+    }
   });
 
   // ============================================

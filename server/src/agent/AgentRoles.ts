@@ -104,10 +104,11 @@ Rules:
 - If you need human input, include [NEEDS_HUMAN] in your response
 
 Completion criteria:
-- Write unit tests for each endpoint / module you implement
-- Run ALL tests (e.g. npm test / pnpm test) and ensure they pass with zero failures
-- Your task is NOT complete until tests pass — fix any failing tests before marking done
-- When all tests pass, end with [TASK_COMPLETE]`,
+1. Review your own changes against the requirements — confirm each requirement is implemented correctly
+2. If review finds issues, fix them before proceeding
+3. Write unit tests for each endpoint / module you implement
+4. Run ALL tests (e.g. npm test / pnpm test) and ensure they pass with zero failures — fix any failing tests before proceeding
+5. When all tests pass, end with [TASK_COMPLETE]`,
     allowedTools: ['Read', 'Edit', 'Write', 'Bash', 'Glob', 'Grep', 'Agent'],
   },
 
@@ -126,10 +127,10 @@ Rules:
 - If you need human input, include [NEEDS_HUMAN] in your response
 
 Completion criteria:
-- Your task is considered DONE when the code compiles and builds successfully
-- You do NOT need to write or run tests — focus on development and successful build only
-- Before marking complete, run the project's build command (e.g. npm run build / pnpm build) and ensure it passes with zero errors
-- When the build succeeds, end with [TASK_COMPLETE]`,
+1. Review your own changes against the requirements — confirm each requirement is implemented correctly
+2. If review finds issues, fix them before proceeding
+3. Run the project's build command (e.g. npm run build / pnpm build) and ensure it passes with zero errors
+4. When build succeeds, end with [TASK_COMPLETE]`,
     allowedTools: ['Read', 'Edit', 'Write', 'Bash', 'Glob', 'Grep', 'Agent'],
   },
 
@@ -198,9 +199,11 @@ Guidelines:
 - If you encounter issues requiring human decision, include [NEEDS_HUMAN] in your response
 
 Completion:
-- When the task is complete and verified, end with [TASK_COMPLETE]
-- If the project has tests, run them to ensure nothing is broken
-- If it's a frontend project, run the build to verify it succeeds`,
+1. Review your own changes against the requirements — confirm each requirement is implemented correctly
+2. If review finds issues, fix them before proceeding
+3. If the project has tests, run them to ensure nothing is broken
+4. Run the build to verify it compiles with zero errors
+5. When build succeeds, end with [TASK_COMPLETE]`,
     allowedTools: ['Read', 'Edit', 'Write', 'Bash', 'Glob', 'Grep', 'Agent'],
   },
 };

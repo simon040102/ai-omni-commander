@@ -23,7 +23,7 @@ export function runMigrations(db: Database.Database): void {
       role            TEXT NOT NULL CHECK(role IN ('master', 'architect', 'backend',
                                                     'frontend', 'devops', 'testing', 'review', 'quick')),
       status          TEXT NOT NULL DEFAULT 'idle'
-                        CHECK(status IN ('idle', 'starting', 'running', 'paused',
+                        CHECK(status IN ('idle', 'starting', 'running', 'reviewing', 'paused',
                                           'stopping', 'stopped', 'error')),
       session_id      TEXT,
       pid             INTEGER,
@@ -323,7 +323,9 @@ export function runMigrations(db: Database.Database): void {
   const tableInfo = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='agents'").get() as { sql: string } | undefined;
   const needsQuickRoleMigration = tableInfo?.sql && !tableInfo.sql.includes("'quick'");
 
-  if (needsQuickRoleMigration) {
+  const needsReviewingStatusMigration = tableInfo?.sql && !tableInfo.sql.includes("'reviewing'");
+
+  if (needsQuickRoleMigration || needsReviewingStatusMigration) {
     try {
       db.exec(`
         PRAGMA foreign_keys = OFF;
@@ -334,7 +336,7 @@ export function runMigrations(db: Database.Database): void {
           role            TEXT NOT NULL CHECK(role IN ('master', 'architect', 'backend',
                                                         'frontend', 'devops', 'testing', 'review', 'quick')),
           status          TEXT NOT NULL DEFAULT 'idle'
-                            CHECK(status IN ('idle', 'starting', 'running', 'paused',
+                            CHECK(status IN ('idle', 'starting', 'running', 'reviewing', 'paused',
                                               'stopping', 'stopped', 'error')),
           session_id      TEXT,
           pid             INTEGER,
@@ -348,9 +350,16 @@ export function runMigrations(db: Database.Database): void {
           total_output_tokens INTEGER NOT NULL DEFAULT 0,
           last_heartbeat  TEXT,
           created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-          updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+          updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+          review_result_json TEXT,
+          title           TEXT
         );
-        INSERT OR IGNORE INTO agents_new SELECT * FROM agents;
+        INSERT OR IGNORE INTO agents_new
+          SELECT id, project_id, role, status, session_id, pid, current_task_id,
+                 system_prompt, model, allowed_tools, total_cost_usd, total_turns,
+                 total_input_tokens, total_output_tokens, last_heartbeat,
+                 created_at, updated_at, review_result_json, title
+          FROM agents;
         DROP TABLE agents;
         ALTER TABLE agents_new RENAME TO agents;
         CREATE INDEX IF NOT EXISTS idx_agents_project ON agents(project_id);

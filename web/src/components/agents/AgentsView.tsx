@@ -59,9 +59,10 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
   const client = useWsStore(s => s.client);
   const addToast = useToastStore(s => s.addToast);
 
-  const agents = currentProjectId
+  const agents = (currentProjectId
     ? allAgents.filter(a => a.projectId === currentProjectId)
-    : allAgents;
+    : allAgents
+  ).slice().reverse(); // newest agents appended last → reverse = newest first
 
   const project = projects.find(p => p.id === currentProjectId);
 
@@ -73,21 +74,26 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
   const [dragIdx, setDragIdx] = useState<number | null>(null);
   const [dropIdx, setDropIdx] = useState<number | null>(null);
 
-  // Auto-add new agents to grid
+  // Auto-add new agents to grid (newest first, dedup via functional update)
   useEffect(() => {
+    // agents is already newest-first (reversed insertion order)
     const allIds = agents.map(a => a.id);
-    const newIds = allIds.filter(id => !gridAgentIds.includes(id));
-    if (newIds.length > 0) {
-      setGridAgentIds(prev => [...prev, ...newIds]);
-    }
-    // Remove stale ids
-    setGridAgentIds(prev => prev.filter(id => allIds.includes(id)));
+
+    setGridAgentIds(prev => {
+      // Remove stale ids first
+      const valid = prev.filter(id => allIds.includes(id));
+      // Prepend any new ids (newest first)
+      const existingSet = new Set(valid);
+      const newIds = allIds.filter(id => !existingSet.has(id));
+      return [...newIds, ...valid];
+    });
   }, [agents.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Right panel state (list mode only)
   const [rightPanel, setRightPanel] = useState<RightPanel>({ mode: 'empty' });
   const [confirmDeleteAgentId, setConfirmDeleteAgentId] = useState<string | null>(null);
   const [editingTitleId, setEditingTitleId] = useState<string | null>(null);
+
   const [editTitleDraft, setEditTitleDraft] = useState('');
 
   const handleRenameAgent = useCallback((agentId: string, newTitle: string) => {
@@ -193,7 +199,10 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
   const handleAddAgent = useCallback(async () => {
     if (!currentProjectId || !addAgentPrompt.trim()) return;
 
-    // Upload staged files first
+    // Pre-generate agentId so uploaded files can be stored under the agent's folder
+    const newAgentId = crypto.randomUUID();
+
+    // Upload staged files first, linking them to the pre-generated agentId
     for (const { file, docType } of addAgentFiles) {
       const content = await new Promise<string>((resolve) => {
         const reader = new FileReader();
@@ -213,6 +222,7 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
           content,
           fileType: 'base64',
           docType,
+          agentId: newAgentId,
         },
       });
     }
@@ -228,6 +238,7 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
       timestamp: new Date().toISOString(),
       payload: {
         projectId: currentProjectId,
+        agentId: newAgentId,
         role: addAgentRole,
         prompt: addAgentPrompt.trim(),
         model: addAgentModel,
@@ -387,10 +398,19 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
                 );
               }
 
-              const cols = visibleAgents.length === 1 ? 1 : visibleAgents.length <= 4 ? 2 : 3;
+              const cols = visibleAgents.length === 1 ? 1 : 2;
+              const rows = Math.ceil(visibleAgents.length / cols);
+              // If more than 2 rows, enable scrolling with fixed row height
+              const needsScroll = rows > 2;
 
               return (
-                <div className={`h-full grid gap-2 grid-cols-${cols}`} style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
+                <div
+                  className={`${needsScroll ? 'overflow-y-auto' : 'h-full'} grid gap-2`}
+                  style={{
+                    gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
+                    gridAutoRows: needsScroll ? 'minmax(320px, 1fr)' : 'minmax(0, 1fr)',
+                  }}
+                >
                   {visibleAgents.map((agent, idx) => {
                     const currentTask = agent.currentTaskId ? tasks.find(t => t.id === agent.currentTaskId) : null;
                     const isDragging = dragIdx === idx;
@@ -426,6 +446,7 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
                         <div className="flex items-center gap-1.5 px-2 py-1 bg-card border-b border-border cursor-grab active:cursor-grabbing">
                           <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
                             agent.status === 'running' ? 'bg-green-500 animate-breathe' :
+                            agent.status === 'reviewing' ? 'bg-yellow-500 animate-breathe' :
                             agent.status === 'error' ? 'bg-red-500' : 'bg-gray-500'
                           }`} />
                           <span className={`text-[10px] font-bold capitalize px-1 py-0.5 rounded ${ROLE_BG[agent.role] || 'bg-muted text-muted-foreground'}`}>
@@ -439,7 +460,7 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
                         <div className="flex-1 min-h-0">
                           <TerminalOutput
                             outputs={outputs[agent.id] || []}
-                            title={`${agent.role.charAt(0).toUpperCase() + agent.role.slice(1)} Agent`}
+                            title={`${agent.role.charAt(0).toUpperCase() + agent.role.slice(1)} Agent${agent.title ? ` — ${agent.title}` : ''}`}
                             role={agent.role}
                             status={agent.status}
                             agentId={agent.id}
@@ -461,6 +482,11 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
         </div>
       )}
 
+      {/* Overlay to close delete confirm when clicking outside */}
+      {confirmDeleteAgentId && (
+        <div className="fixed inset-0 z-10" onClick={() => setConfirmDeleteAgentId(null)} />
+      )}
+
       {/* ─── List view: left list + right panel ─── */}
       {viewMode === 'list' && (
       <div className="flex-1 min-h-0 flex gap-2">
@@ -479,36 +505,41 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
               return (
                 <div
                   key={agent.id}
-                  className={`relative px-3 py-2.5 cursor-pointer rounded-lg border transition-all group
+                  className={`relative px-3 py-2.5 cursor-pointer rounded-lg border transition-all ${confirmDeleteAgentId !== agent.id ? 'group' : ''}
                     ${isSelected
                       ? 'bg-primary/8 border-primary/30 shadow-sm shadow-primary/5'
-                      : 'bg-card border-border/60 hover:bg-muted/50 hover:border-border'
+                      : confirmDeleteAgentId === agent.id
+                        ? 'bg-card border-border/60'
+                        : 'bg-card border-border/60 hover:bg-muted/50 hover:border-border'
                     }
                   `}
                   onClick={() => setRightPanel({ mode: 'terminal', agentId: agent.id })}
                 >
-                  {/* Row 1: status dot + role badge + progress ring + tool count */}
-                  <div className="flex items-center gap-1.5 mb-1">
-                    {agentProgress && agent.status === 'running' ? (
-                      <ProgressRing percentage={agentProgress.percentage} size={20} strokeWidth={2} phase={agentProgress.currentPhase} />
-                    ) : (
-                      <span className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                  {/* Row 1: role badge + status + progress ring */}
+                  <div className="flex items-center gap-1.5 mb-1.5">
+                    <span className={`text-[10px] font-bold capitalize px-1.5 py-0.5 rounded ${
+                      ROLE_BG[agent.role] || 'bg-muted text-muted-foreground'
+                    }`}>
+                      {agent.role}
+                    </span>
+                    {!agentProgress && (
+                      <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
                         agent.status === 'running' ? 'bg-green-500 animate-breathe' :
                         agent.status === 'error' ? 'bg-red-500' :
                         agent.status === 'stopped' ? 'bg-gray-500' :
                         'bg-yellow-500'
                       }`} />
                     )}
-                    <span className={`text-[10px] font-bold capitalize px-1.5 py-0.5 rounded ${
-                      ROLE_BG[agent.role] || 'bg-muted text-muted-foreground'
-                    }`}>
-                      {agent.role}
-                    </span>
-                    <span className="text-[9px] text-muted-foreground ml-auto">{toolCalls} tools</span>
+                    <div className="ml-auto flex items-center gap-1.5">
+                      <span className="text-[9px] text-muted-foreground">{toolCalls} tools</span>
+                      {agentProgress && agent.status === 'running' && (
+                        <ProgressRing percentage={agentProgress.percentage} size={36} strokeWidth={3} phase={agentProgress.currentPhase} />
+                      )}
+                    </div>
                   </div>
 
                   {/* Row 2: agent title + delete */}
-                  <div className="flex items-center justify-between mb-0.5">
+                  <div className="flex items-center justify-between mb-1">
                     <div className="flex-1 min-w-0">
                       {editingTitleId === agent.id ? (
                         <input
@@ -526,7 +557,7 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
                         />
                       ) : (
                         <div
-                          className="text-[11px] text-foreground font-medium truncate leading-tight cursor-text"
+                          className="text-xs text-foreground font-semibold truncate leading-tight cursor-text"
                           title={`${agent.title || currentTask?.title || '手動新增'} (double-click to rename)`}
                           onDoubleClick={(e) => {
                             e.stopPropagation();
@@ -537,43 +568,51 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
                           {agent.title || currentTask?.title || '手動新增'}
                         </div>
                       )}
-                      {currentTask && (
-                        <div className="flex items-center gap-1 mt-0.5">
-                          {currentTask.source === 'asana' && (
-                            <span className="text-[8px] px-1 rounded bg-orange-500/15 text-orange-400 font-medium">Asana</span>
-                          )}
-                          {currentTask.source === 'manual' && (
-                            <span className="text-[8px] px-1 rounded bg-muted text-muted-foreground font-medium">Manual</span>
-                          )}
-                        </div>
-                      )}
                     </div>
                     {/* Delete button (non-running only) */}
                     {agent.status !== 'running' && (
                       confirmDeleteAgentId === agent.id ? (
-                        <div className="flex items-center gap-1 animate-fade-in flex-shrink-0 ml-2" onClick={(e) => e.stopPropagation()}>
+                        <div className="relative z-20 flex items-center gap-1 flex-shrink-0 ml-2" onClick={(e) => e.stopPropagation()}>
                           <button
                             onClick={() => { handleDeleteAgent(agent.id); setConfirmDeleteAgentId(null); }}
-                            className="text-[10px] text-red-400 hover:text-red-300 font-semibold px-2 py-0.5 bg-red-500/20 rounded"
+                            className="text-[10px] text-red-400 hover:text-red-300 font-semibold px-1.5 py-0.5 bg-red-500/20 hover:bg-red-500/30 rounded whitespace-nowrap transition-colors"
                           >
-                            Delete
+                            刪除
                           </button>
                           <button
                             onClick={() => setConfirmDeleteAgentId(null)}
-                            className="text-[10px] text-muted-foreground hover:text-foreground px-1.5 py-0.5"
+                            className="text-[10px] text-muted-foreground hover:text-foreground px-1 py-0.5 transition-colors"
                           >
-                            Cancel
+                            取消
                           </button>
                         </div>
                       ) : (
                         <button
                           onClick={(e) => { e.stopPropagation(); setConfirmDeleteAgentId(agent.id); }}
-                          className="flex-shrink-0 ml-2 p-1 rounded text-transparent group-hover:text-muted-foreground hover:!text-red-400 hover:!bg-red-500/10 transition-all"
+                          className="flex-shrink-0 ml-2 p-1 rounded text-red-400/60 hover:text-red-400 hover:bg-red-500/10 transition-all"
                           title="Remove agent"
                         >
                           <IconTrash className="w-3.5 h-3.5" />
                         </button>
                       )
+                    )}
+                  </div>
+
+                  {/* Row 3: phase text + source badge */}
+                  <div className="flex items-center gap-1">
+                    {agentProgress?.currentPhase && agent.status === 'running' ? (
+                      <span className="text-[10px] text-primary/70 truncate flex-1 font-medium" title={agentProgress.currentPhase}>
+                        {agentProgress.currentPhase}
+                      </span>
+                    ) : currentTask && (
+                      <div className="flex items-center gap-1">
+                        {currentTask.source === 'asana' && (
+                          <span className="text-[8px] px-1 rounded bg-orange-500/15 text-orange-400 font-medium">Asana</span>
+                        )}
+                        {currentTask.source === 'manual' && (
+                          <span className="text-[8px] px-1 rounded bg-muted text-muted-foreground font-medium">Manual</span>
+                        )}
+                      </div>
                     )}
                   </div>
 
@@ -629,7 +668,7 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
             <TerminalOutput
               key={selectedAgent.id}
               outputs={outputs[selectedAgent.id] || []}
-              title={`${selectedAgent.role.charAt(0).toUpperCase() + selectedAgent.role.slice(1)} Agent`}
+              title={`${selectedAgent.role.charAt(0).toUpperCase() + selectedAgent.role.slice(1)} Agent${selectedAgent.title ? ` — ${selectedAgent.title}` : ''}`}
               role={selectedAgent.role}
               status={selectedAgent.status}
               agentId={selectedAgent.id}

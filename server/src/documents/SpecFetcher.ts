@@ -130,6 +130,12 @@ export class SpecFetcher {
     }
 
     const text = await response.text();
+
+    // Reject HTML responses — they're usually login pages or error pages, not spec content
+    if (ct.includes('text/html') || text.trimStart().startsWith('<!DOCTYPE') || text.trimStart().startsWith('<html')) {
+      throw new Error(`URL returned HTML (likely requires authentication or is not a direct document link): ${url}`);
+    }
+
     return { type: 'content', content: this.truncate(text), path: url };
   }
 

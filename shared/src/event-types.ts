@@ -17,7 +17,7 @@ export const EventTypes = {
   AGENT_INITIAL_PROMPT: 'agent.initialPrompt',
   AGENT_PROGRESS: 'agent.progress',
 
-  TASK_STATUS_CHANGED: 'task.statusChanged',
+  TASK_STATUS_CHANGED: 'task.statusChange',
   TASK_DISPATCHED: 'task.dispatched',
   TASK_COMPLETED: 'task.completed',
 

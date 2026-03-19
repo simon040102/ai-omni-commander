@@ -178,11 +178,139 @@ npx tsc --build shared/tsconfig.json server/tsconfig.json web/tsconfig.json
 - SQLite database: `data/omni.db` (persists across restarts)
 - Claude CLI path: configurable via `CLAUDE_PATH` env var (default: `claude`)
 
+#### `server/src/svn/` — SVN integration
+| File | Purpose |
+|------|---------|
+| `SvnSpecService.ts` | Fetches spec documents from SVN for tasks. Uses root code extraction (e.g., `OV0101` → `OV`) to find the correct SVN folder, then recursively searches for matching .docx/.pdf files. Caches downloads in `data/uploads/{projectId}/`. |
+
+#### `server/src/asana/` — Asana integration
+| File | Purpose |
+|------|---------|
+| `AsanaMcpClient.ts` | MCP-based Asana API client. |
+| `AsanaSyncService.ts` | Syncs Asana tasks to local DB. Stores `parent_name` (e.g., `OV0101`) for SVN spec matching. |
+
+### `web/src/components/agents/`
+| File | Purpose |
+|------|---------|
+| `AgentsView.tsx` | Manage agents per project. Add new agents (pre-generates `agentId` client-side, passes to both upload and `agent.add` messages so files land in per-agent folder). Delete confirmation with z-index fix. |
+| `ActiveAgents.tsx` | Shows running agents summary. |
+| `ReviewBadge.tsx` | Badge indicating review status. |
+
+### `web/src/components/settings/`
+| File | Purpose |
+|------|---------|
+| `GlobalSettings.tsx` | Global settings page: SVN credentials, Asana PAT. |
+| `ProjectSettings.tsx` | Per-project settings: SVN spec paths (frontend/backend), Asana project link. |
+
+### `web/src/components/asana/`
+| File | Purpose |
+|------|---------|
+| `AsanaTaskPanel.tsx` | Displays Asana tasks with sync status. |
+
+## Key Flows
+
+### Spec Mode (primary flow)
+1. User creates project with workspaces (label + path)
+2. User uploads SA/SD documents with type tags
+3. User clicks "Start Execution"
+4. `SpecModeHandler.execute()`:
+   - Routes documents by type: Frontend gets SA+SD, Backend gets SD
+   - For each workspace: spawns an agent with `cwd` = workspace path
+   - Agent prompt includes document content/PDF paths (DOCX → Markdown path via Read tool)
+   - Each agent reads its workspace's CLAUDE.md/.claude/ and follows those skills
+5. Agents work autonomously. Output streams via EventBus → WebSocket → frontend terminal
+6. When all agents complete, project status auto-transitions to `completed`
+
+### Iterative Execution
+After a project completes, the Dashboard shows a "New Execution" panel:
+- Upload additional SA/SD documents
+- Click "Start Execution" to spawn new agents with ALL documents (old + new)
+- Old agent outputs remain visible; new agents get new IDs
+
+### Send Instruction to Running Agent
+- Terminal input → `agent.command` WS message → `AgentManager.sendInputToAgent()` → `AgentProcess.sendInput()` → writes JSON to Claude's stdin (requires `--input-format stream-json`)
+- Feedback message `[USER INSTRUCTION]` appears in terminal output
+
+### Adding an Agent (AgentsView)
+1. Client pre-generates `agentId = crypto.randomUUID()` before any network calls
+2. Upload WS message (`project.uploadDocument`) includes `agentId` → files saved to `uploads/{projectId}/{agentId}/`
+3. Add WS message (`agent.add`) includes same `agentId` → `createAgent({ id: agentId })`
+4. On delete: `deleteByAgent(agentId, projectId)` cleans up only that agent's folder
+
+## Document Handling
+
+### Upload Directory Structure
+```
+data/uploads/{projectId}/{agentId}/   ← per-agent folder (AgentsView uploads)
+data/uploads/{projectId}/             ← project-level (SVN downloads, SpecMode uploads)
+```
+
+### DOCX → Markdown Conversion
+`.docx` files are converted to `.md` at upload time (both manual upload and SVN fetch):
+1. `mammoth.convertToHtml()` with image extraction callback → images saved as `{docId}-img-N.{ext}`
+2. `turndown` + `turndown-plugin-gfm` converts HTML → Markdown (strips `<p>` inside `<td>`/`<th>` before conversion for correct GFM tables)
+3. Saves `{docId}-{basename}.md` alongside original `.docx`
+4. `parsed_text` in DB = `[Document saved at: /abs/path/to/file.md]`
+5. `SpecModeHandler.getDocumentContext()` detects this pattern → tells agent to use Read tool
+
+### PDF Handling
+PDF file paths are passed in the prompt; agents use Claude's Read tool to read them natively (supports images).
+
+## Development
+
+```bash
+# Install dependencies
+pnpm install
+
+# Start server (with auto-rebuild)
+cd server && pnpm dev
+
+# Start frontend (Vite dev server with HMR)
+cd web && pnpm dev
+
+# TypeScript check
+npx tsc --build shared/tsconfig.json server/tsconfig.json
+```
+
+- Server runs on port 3456 (configurable via `PORT` env var)
+- Vite dev server runs on port 5173 and proxies `/omni-ws` and `/api` to server
+- SQLite database: `data/omni.db` (persists across restarts)
+- Claude CLI path: configurable via `CLAUDE_PATH` env var (default: `claude`)
+
+## Available Skills (`.claude/skills/`)
+
+Superpowers skill framework is installed. Key skills:
+
+| Skill | Purpose |
+|-------|---------|
+| `brainstorming` | Visual brainstorming companion with local server |
+| `dispatching-parallel-agents` | Launch multiple subagents in parallel |
+| `executing-plans` | Execute a written plan step by step |
+| `finishing-a-development-branch` | Checklist for completing a feature branch |
+| `receiving-code-review` | Process and respond to code review feedback |
+| `requesting-code-review` | Request structured code review from a subagent |
+| `subagent-driven-development` | Spec → implement → review via subagents |
+| `systematic-debugging` | Root cause analysis with structured debugging |
+| `test-driven-development` | TDD cycle with anti-patterns guide |
+| `using-git-worktrees` | Parallel development with git worktrees |
+| `verification-before-completion` | Checklist before marking work done |
+| `writing-plans` | Create structured implementation plans |
+| `writing-skills` | Best practices for writing Claude skills |
+| `using-superpowers` | Overview of all available skills |
+
+Use `/brainstorming`, `/systematic-debugging`, etc. to invoke.
+
 ## Important Implementation Details
 
 - **stdin prompt delivery**: Initial prompts are written to Claude's stdin (not CLI args) to avoid ARG_MAX limits. With `--input-format stream-json`, the prompt is sent as `{"type":"user","content":"..."}`.
 - **useStreamInput**: All agents use `--input-format stream-json` to keep stdin open for follow-up instructions.
+- **DOCX → Markdown**: `.docx` files are converted to `.md` on upload. `parsed_text` stores a path pointer, not inline text. Agent reads via Read tool after context compression.
 - **PDF handling**: PDF file paths are passed in the prompt text; agents use Claude's Read tool to read them natively.
+- **Per-agent upload folders**: `uploads/{projectId}/{agentId}/`. Client pre-generates `agentId` before uploading, passes same ID to `agent.add` so files and agent share the same subfolder.
 - **Project skills**: Each agent's `cwd` is set to its workspace → Claude Code auto-discovers CLAUDE.md and `.claude/settings.json`.
 - **EventBus wildcard**: `agent.*` events are broadcast directly as WS messages (e.g., `agent.started`, `agent.output`), NOT wrapped in `eventbus.notification`.
 - **SQLite datetime**: `datetime('now')` returns UTC without 'Z' suffix. Frontend appends 'Z' before parsing.
+- **SVN root code extraction**: `OV0101` → `OV` (take leading alphabetic chars). Used to match `OV.銷項發票管理/` folder in SVN.
+- **z-index stacking**: Fixed overlays use `z-10`. Confirm dialogs inside overlays must use `relative z-20` or higher to receive click events.
+- **Two separate Asana import paths**: `AsanaImportDrawer.tsx` sends `task.create` directly (client-side label decision). `AsanaSyncService.syncOnce()` is used by auto-sync / `asana.syncNow`. Changes to server-side classification only affect the sync path — NOT the manual import drawer.
+- **tsx watch unreliable on Windows**: `pnpm dev` uses `tsx watch` which may not detect file changes on Windows. Always **manually restart the server** after editing `.ts` files to guarantee the new code is loaded.

@@ -1,3 +1,5 @@
+import path from 'node:path';
+import fs from 'node:fs';
 import type { AgentRole, SuperpowersFeature, TaskType, ProjectConfig } from '@omni/shared';
 import type { AgentManager } from '../agent/AgentManager.js';
 import type { EventBus } from '../eventbus/EventBus.js';
@@ -96,6 +98,7 @@ export class ExecutionPipeline {
     const prompt = this.assembleContext({
       superpowers,
       projectId: task.projectId,
+      taskId,
       role: task.label,
       taskTitle: task.title,
       taskDescription: task.description || '',
@@ -227,6 +230,7 @@ export class ExecutionPipeline {
   assembleContext(opts: {
     superpowers: SuperpowersFeature[];
     projectId: string;
+    taskId?: string;
     role: string;
     taskTitle: string;
     taskDescription: string;
@@ -234,7 +238,7 @@ export class ExecutionPipeline {
     specResult?: SpecResult | null;
     dbConnectionString?: string | null;
     taskAttachments?: Array<{ filename: string; filePath: string }>;
-    svnDocuments?: Array<{ documentId: string; filename: string; filePath: string; parsedText: string | null }>;
+    svnDocuments?: Array<{ documentId: string; filename: string; filePath: string; parsedText: string | null; docType: string | null }>;
   }): string {
     const parts: string[] = [];
 
@@ -244,8 +248,10 @@ export class ExecutionPipeline {
       if (spPrompt) parts.push(spPrompt);
     }
 
-    // Layer 2: Project documents (SA/SD routed by role)
-    const docContext = this.getDocumentContext(opts.projectId, opts.role);
+    // Layer 2: Task-bound documents (SA/SD uploaded and bound to this specific task)
+    const docContext = opts.taskId
+      ? this.getDocumentContext(opts.taskId, opts.role)
+      : null;
     if (docContext) parts.push(docContext);
 
     // Layer 2.5: Spec content (if available)
@@ -276,9 +282,27 @@ export class ExecutionPipeline {
   }
 
   /**
-   * Get documents/images associated with a specific task via filename prefix convention.
+   * Get documents/images associated with a specific task.
+   * Checks the task's dedicated subfolder first, then falls back to legacy [task:id] prefix.
    */
   private getTaskAttachments(projectId: string, taskId: string): Array<{ filename: string; filePath: string }> {
+    const task = getTask(taskId);
+    const uploadDir = this.documentParser.getUploadDir();
+
+    // New: read from {uploadDir}/{projectId}/{functionCode}_{taskId8}/ subfolder
+    const code = task?.parentName || null;
+    const subFolder = code ? `${code}_${taskId.slice(0, 8)}` : `task_${taskId.slice(0, 8)}`;
+    const taskDir = path.join(uploadDir, projectId, subFolder);
+    if (fs.existsSync(taskDir)) {
+      try {
+        const entries = fs.readdirSync(taskDir);
+        return entries
+          .filter(e => !fs.statSync(path.join(taskDir, e)).isDirectory())
+          .map(e => ({ filename: e, filePath: path.join(taskDir, e) }));
+      } catch { /* fall through */ }
+    }
+
+    // Fallback: legacy [task:id] prefix in flat project folder
     const prefix = `[task:${taskId}]`;
     const docs = this.documentParser.getDocuments(projectId);
     return docs
@@ -304,7 +328,7 @@ export class ExecutionPipeline {
       lines.push('');
       for (const img of images) {
         const cleanName = img.filename.replace(/\[task:[^\]]+\]\s*/, '');
-        lines.push(`- **${cleanName}**: \`${img.filePath}\``);
+        lines.push(`- **${cleanName}**: \`${img.filePath.replace(/\\/g, '/')}\``);
       }
     }
 
@@ -314,7 +338,7 @@ export class ExecutionPipeline {
       lines.push('');
       for (const doc of docs) {
         const cleanName = doc.filename.replace(/\[task:[^\]]+\]\s*/, '');
-        lines.push(`- **${cleanName}**: \`${doc.filePath}\``);
+        lines.push(`- **${cleanName}**: \`${doc.filePath.replace(/\\/g, '/')}\``);
       }
     }
 
@@ -357,64 +381,96 @@ ${connectionString}
 
   /**
    * Build prompt section for SVN-fetched specification documents.
+   * Only provides file paths — agent must use Read tool to access content.
+   * This prevents spec content from being lost when conversation is compressed.
    */
-  private buildSvnDocsSection(docs: Array<{ documentId: string; filename: string; filePath: string; parsedText: string | null }>): string {
+  private buildSvnDocsSection(docs: Array<{ documentId: string; filename: string; filePath: string; parsedText: string | null; docType: string | null }>): string {
     const lines: string[] = ['## SVN 規格文件（自動取得）', ''];
-    lines.push('以下規格文件已從 SVN 自動下載，與本次任務相關：');
+    lines.push('以下規格文件已從 SVN 自動下載，與本次任務相關。');
+    lines.push('**重要**：請使用 Read 工具讀取這些文件。如果對話被壓縮導致你忘記規格內容，請重新讀取這些檔案。');
     lines.push('');
 
     for (const doc of docs) {
-      const ext = doc.filename.split('.').pop()?.toLowerCase();
-
-      if (ext === 'pdf') {
-        lines.push(`### ${doc.filename}`);
-        lines.push(`PDF 文件路徑：\`${doc.filePath}\``);
-        lines.push('請使用 Read 工具讀取此 PDF 文件。');
+      const typeLabel = doc.docType === 'SA' ? '(SA 需求規格)' : doc.docType === 'SD' ? '(SD 系統設計)' : '';
+      const isPdf = doc.filename.toLowerCase().endsWith('.pdf');
+      const mdMatch = doc.parsedText?.match(/^\[Document saved at: (.+)\]/);
+      const hasText = doc.parsedText && !doc.parsedText.startsWith('[') && doc.parsedText.length > 50;
+      lines.push(`### ${doc.filename} ${typeLabel}`);
+      if (isPdf) {
+        lines.push(`路徑：\`${doc.filePath}\`（請用 Read tool 讀取，PDF 包含文字與圖片）`);
+      } else if (mdMatch) {
+        lines.push(`路徑：\`${mdMatch[1]}\`（請用 Read tool 讀取 Markdown，含文字與圖片路徑）`);
+      } else if (hasText) {
         lines.push('');
-      } else if (doc.parsedText && !doc.parsedText.startsWith('[')) {
-        // Has extracted text content
-        const truncated = doc.parsedText.length > 30000
-          ? doc.parsedText.substring(0, 30000) + '\n\n... (內容過長，已截斷)'
-          : doc.parsedText;
-        lines.push(`### ${doc.filename}`);
-        lines.push('');
-        lines.push(truncated);
-        lines.push('');
+        lines.push(doc.parsedText!);
       } else {
-        // Binary or no content — point to file
-        lines.push(`### ${doc.filename}`);
-        lines.push(`文件路徑：\`${doc.filePath}\``);
-        lines.push('');
+        lines.push(`路徑：\`${doc.filePath}\``);
       }
+      lines.push('');
     }
+
+    lines.push('請理解以上所有規格文件內容後再開始開發。');
 
     return lines.join('\n');
   }
 
   /**
-   * Get document context for an agent based on its role.
-   * Frontend gets SA+SD, Backend gets SD only, others get SA+SD.
+   * Get document context for an agent based on task binding.
+   * Only returns documents explicitly bound to this task (via task_documents table).
+   * Frontend gets SA+SD, Backend gets SD only.
+   * SVN documents are excluded here — they are handled separately in Layer 2.6.
    */
-  private getDocumentContext(projectId: string, role: string): string | null {
-    const docs = this.documentParser.getDocuments(projectId);
+  private getDocumentContext(taskId: string, role: string): string | null {
+    const allTaskDocs = getDocumentsForTask(taskId).filter(d => d.source !== 'svn');
+    if (allTaskDocs.length === 0) return null;
+
+    const filteredDocs = allTaskDocs.filter(d => {
+      if (role === 'backend') return d.docType === 'SD';
+      return true;
+    });
+
+    // Remap to match the shape used below
+    const docs = filteredDocs.map(d => ({
+      docType: d.docType,
+      filename: d.filename,
+      filePath: d.filePath,
+      content: d.parsedText,
+    }));
+
     if (docs.length === 0) return null;
 
-    const filteredDocs = docs.filter(d => {
-      if (role === 'backend') return d.docType === 'SD';
-      return true; // frontend and others get all docs
-    });
+    const sections = docs.map(d => {
+      const typeLabel = d.docType || 'Document';
+      const isPdf = d.filename.toLowerCase().endsWith('.pdf');
+      const mdMatch = d.content?.match(/^\[Document saved at: (.+)\]/);
+      const imgMatch = d.content?.match(/^\[Image saved at: (.+)\]/);
+      const hasText = d.content && !d.content.startsWith('[') && d.content.length > 50;
 
-    if (filteredDocs.length === 0) return null;
-
-    const sections = filteredDocs.map(d => {
-      if (d.fileType === 'application/pdf' || d.filename.endsWith('.pdf')) {
-        return `### ${d.docType || 'Document'}: ${d.filename}\n\nPDF file at: ${d.filePath}\n(Use the Read tool to read this file)`;
+      if (isPdf) {
+        return `- **${typeLabel}: ${d.filename}**: 請用 Read tool 讀取 "${d.filePath}"（PDF 包含文字與圖片）`;
       }
-      const text = d.content || '(no content)';
-      return `### ${d.docType || 'Document'}: ${d.filename}\n\n${text}`;
+      if (mdMatch) {
+        return `- **${typeLabel}: ${d.filename}**: 請用 Read tool 讀取 "${mdMatch[1]}"（Markdown 含文字與圖片路徑）`;
+      }
+      if (imgMatch) {
+        return `- **${typeLabel}: ${d.filename}**: 請用 Read tool 讀取 "${imgMatch[1]}"（截圖圖片）`;
+      }
+      if (hasText) {
+        return `### ${typeLabel}: ${d.filename}\n\n${d.content}`;
+      }
+      return `- **${typeLabel}: ${d.filename}**\n  路徑：\`${d.filePath}\``;
     });
 
-    return `# Project Documents\n\n${sections.join('\n\n---\n\n')}`;
+    const hasInlineText = docs.some(d => {
+      const hasText = d.content && !d.content.startsWith('[') && d.content.length > 50;
+      return hasText;
+    });
+
+    const header = hasInlineText
+      ? `# Project Documents\n\n以下是本次任務的相關文件內容：`
+      : `# Project Documents\n\n以下文件與本次任務相關。**請使用 Read 工具讀取這些文件**。`;
+
+    return `${header}\n\n${sections.join('\n\n')}\n\n請理解以上文件內容後再開始開發。`;
   }
 
   /**
