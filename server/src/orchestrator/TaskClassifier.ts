@@ -17,11 +17,35 @@ export class TaskClassifier {
   /**
    * Classify a task using AI (Claude haiku).
    */
+  /**
+   * Quick label override based on explicit Chinese role markers in the title.
+   * Takes priority over AI classification.
+   */
+  detectLabelFromTitle(title: string): TaskLabel | null {
+    // "-前端" / "前端" suffix → frontend
+    if (/前端/.test(title)) return 'frontend';
+    // "-後端" / "後端" suffix → backend
+    if (/後端/.test(title)) return 'backend';
+    // 串接 → frontend
+    if (/串接/.test(title)) return 'frontend';
+    return null;
+  }
+
   async classify(data: {
     title: string;
     description?: string;
     tags?: string[];
   }): Promise<ClassificationResult> {
+    // Check for explicit Chinese role markers first — override AI entirely
+    const forcedLabel = this.detectLabelFromTitle(data.title);
+    logger.info({ title: data.title, forcedLabel }, 'classify() called');
+    if (forcedLabel) {
+      // Use fallback only for taskType, forcedLabel wins for label
+      const fallback = this.fallbackClassify(data.title, data.description);
+      logger.info({ forcedLabel, taskType: fallback.taskType }, 'Skipping AI — using forced label');
+      return { taskType: fallback.taskType, label: forcedLabel };
+    }
+
     const config = getConfig();
 
     const prompt = `You are a task classifier. Given the task information below, classify it.
@@ -54,7 +78,8 @@ Rules:
       const jsonMatch = result.match(/\{[\s\S]*?\}/);
       if (!jsonMatch) {
         logger.warn({ result }, 'No JSON found in classifier response, using fallback');
-        return this.fallbackClassify(data.title, data.description);
+        const fallback = this.fallbackClassify(data.title, data.description);
+        return { taskType: fallback.taskType, label: forcedLabel ?? fallback.label };
       }
 
       const parsed = JSON.parse(jsonMatch[0]) as { taskType?: string; label?: string };
@@ -65,15 +90,16 @@ Rules:
       const taskType = validTypes.includes(parsed.taskType as TaskType)
         ? parsed.taskType as TaskType
         : 'other';
-      const label = validLabels.includes(parsed.label as TaskLabel)
+      const label = forcedLabel ?? (validLabels.includes(parsed.label as TaskLabel)
         ? parsed.label as TaskLabel
-        : 'backend';
+        : 'backend');
 
-      logger.info({ title: data.title, taskType, label }, 'Task classified by AI');
+      logger.info({ title: data.title, taskType, label, forcedLabel }, 'Task classified by AI');
       return { taskType, label };
     } catch (err) {
       logger.warn({ err, title: data.title }, 'AI classification failed, using fallback');
-      return this.fallbackClassify(data.title, data.description);
+      const fallback = this.fallbackClassify(data.title, data.description);
+      return { taskType: fallback.taskType, label: forcedLabel ?? fallback.label };
     }
   }
 
@@ -93,7 +119,7 @@ Rules:
     }
 
     let label: TaskLabel = 'backend';
-    if (/\b(ui|ux|css|style|component|react|vue|angular|html|layout|design|frontend|front.?end)\b/.test(text)) {
+    if (/\b(ui|ux|css|style|component|react|vue|angular|html|layout|design|frontend|front.?end)\b/.test(text) || /前端|串接/.test(text)) {
       label = 'frontend';
     } else if (/\b(deploy|ci|cd|docker|k8s|kubernetes|pipeline|infra|devops)\b/.test(text)) {
       label = 'devops';

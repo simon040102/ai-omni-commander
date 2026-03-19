@@ -150,6 +150,8 @@ interface TerminalOutputProps {
   role?: string;
   status?: string;
   agentId?: string;
+  projectId?: string;
+  taskId?: string;
   model?: string;
   totalInputTokens?: number;
   totalOutputTokens?: number;
@@ -159,7 +161,7 @@ interface TerminalOutputProps {
   compact?: boolean;
 }
 
-export function TerminalOutput({ outputs, title, role, status, agentId, model, totalInputTokens, totalOutputTokens, onSendCommand, onAction, compact }: TerminalOutputProps) {
+export function TerminalOutput({ outputs, title, role, status, agentId, projectId, taskId, model, totalInputTokens, totalOutputTokens, onSendCommand, onAction, compact }: TerminalOutputProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const autoScrollRef = useRef(true);
   const [isAutoScroll, setIsAutoScroll] = useState(true);
@@ -213,6 +215,8 @@ export function TerminalOutput({ outputs, title, role, status, agentId, model, t
               data: base64,
               filename: file.name || 'pasted_image.png',
               mimeType: file.type,
+              projectId,
+              taskId,
             }),
           });
 
@@ -259,6 +263,8 @@ export function TerminalOutput({ outputs, title, role, status, agentId, model, t
               data: base64,
               filename: file.name,
               mimeType: file.type,
+              projectId,
+              taskId,
             }),
           });
 

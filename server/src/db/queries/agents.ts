@@ -4,6 +4,7 @@ import { genId } from '../../utils/uuid.js';
 
 export function createAgent(data: {
   projectId: string;
+  id?: string; // Pre-generated ID (optional; auto-generated if not provided)
   role: AgentRole;
   title?: string;
   systemPrompt?: string;
@@ -11,7 +12,7 @@ export function createAgent(data: {
   allowedTools?: string[];
 }): Agent {
   const db = getDb();
-  const id = genId();
+  const id = data.id || genId();
   db.prepare(`
     INSERT INTO agents (id, project_id, role, title, system_prompt, model, allowed_tools)
     VALUES (?, ?, ?, ?, ?, ?, ?)

@@ -49,6 +49,8 @@ export function DualTerminal({ focusAgentId }: DualTerminalProps) {
             role={agent.role}
             status={agent.status}
             agentId={agent.id}
+            projectId={agent.projectId}
+            taskId={agent.currentTaskId ?? undefined}
             model={agent.model}
             totalInputTokens={agent.totalInputTokens}
             totalOutputTokens={agent.totalOutputTokens}
@@ -95,6 +97,8 @@ export function DualTerminal({ focusAgentId }: DualTerminalProps) {
               role={agent.role}
               status={agent.status}
               agentId={agent.id}
+              projectId={agent.projectId}
+              taskId={agent.currentTaskId ?? undefined}
               model={agent.model}
               totalInputTokens={agent.totalInputTokens}
               totalOutputTokens={agent.totalOutputTokens}
@@ -124,6 +128,8 @@ export function DualTerminal({ focusAgentId }: DualTerminalProps) {
             role="review"
             status={reviewAgent.status}
             agentId={reviewAgent.id}
+            projectId={reviewAgent.projectId}
+            taskId={reviewAgent.currentTaskId ?? undefined}
             model={reviewAgent.model}
             totalInputTokens={reviewAgent.totalInputTokens}
             totalOutputTokens={reviewAgent.totalOutputTokens}

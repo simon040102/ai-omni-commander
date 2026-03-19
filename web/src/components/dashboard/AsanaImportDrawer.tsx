@@ -88,7 +88,7 @@ export function AsanaImportDrawer({ open, onClose }: AsanaImportDrawerProps) {
           title: asanaTask.name,
           description,
           taskType: 'other' as const,
-          label: 'backend' as const,
+          label: (/前端|串接/.test(asanaTask.name) ? 'frontend' : /後端/.test(asanaTask.name) ? 'backend' : 'backend') as const,
           source: 'asana' as const,
           sourceRef: asanaTask.gid,
           specUrl,

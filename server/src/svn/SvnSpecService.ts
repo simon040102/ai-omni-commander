@@ -39,12 +39,8 @@ export class SvnSpecService {
     svnConfig: SvnConfig,
     taskLabel: string,
   ): Promise<string[]> {
-    // Check if this task already has SVN documents bound
-    const existing = getDocumentsForTask(taskId);
-    if (existing.some(d => d.source === 'svn')) {
-      logger.info({ taskId, count: existing.length }, 'Task already has SVN documents bound');
-      return existing.filter(d => d.source === 'svn').map(d => d.documentId);
-    }
+    // Note: we do NOT short-circuit here even if SVN docs are already bound —
+    // execution always checks SVN for the latest version (svnLastModified cache handles no-op re-downloads).
 
     // Determine which SVN roots to search based on task label
     // Frontend tasks: SA (frontendSpec) + SD (backendSpec)
@@ -127,14 +123,17 @@ export class SvnSpecService {
     // Step 3: Download/cache each file and bind to task
     // Frontend SVN root = SA, Backend SVN root = SD
     const docIds: string[] = [];
-    const projectCacheDir = path.join(this.cacheDir, projectId);
-    fs.mkdirSync(projectCacheDir, { recursive: true });
+    const tempCacheDir = path.join(this.cacheDir, projectId);
+    fs.mkdirSync(tempCacheDir, { recursive: true });
+
+    // Subfolder inside uploads/{projectId}/ for this task's SVN docs
+    const subFolder = `${functionCode}_${taskId.slice(0, 8)}`;
 
     for (const { fileUrl, isFrontendRoot } of allMatchedFiles) {
       try {
         const filename = decodeURIComponent(fileUrl.split('/').pop() || 'unknown');
         const docType: DocType = isFrontendRoot ? 'SA' : 'SD';
-        const docId = await this.fetchAndCacheFile(projectId, taskId, fileUrl, filename, svnConfig, projectCacheDir, docType);
+        const docId = await this.fetchAndCacheFile(projectId, taskId, fileUrl, filename, svnConfig, tempCacheDir, docType, subFolder);
         if (docId) {
           docIds.push(docId);
         }
@@ -220,6 +219,7 @@ export class SvnSpecService {
     svnConfig: SvnConfig,
     projectCacheDir: string,
     docType: DocType = 'SD',
+    subFolder?: string,
   ): Promise<string | null> {
     const filename = path.basename(relativePath);
 
@@ -234,11 +234,15 @@ export class SvnSpecService {
       logger.warn({ err, fileUrl }, 'Failed to get SVN info');
     }
 
-    // If cached and still up to date, just bind to task
+    // If cached and still up to date AND file exists on disk, just bind to task
     if (cached && svnLastModified && cached.svnLastModified === svnLastModified) {
-      logger.info({ fileUrl, docId: cached.id }, 'Using cached SVN document');
-      bindDocumentToTask(taskId, cached.id);
-      return cached.id;
+      if (fs.existsSync(cached.filePath)) {
+        logger.info({ fileUrl, docId: cached.id }, 'Using cached SVN document');
+        bindDocumentToTask(taskId, cached.id);
+        return cached.id;
+      }
+      // File missing on disk — treat as cache miss, fall through to re-download
+      logger.warn({ fileUrl, docId: cached.id, filePath: cached.filePath }, 'Cached SVN document file missing on disk, re-downloading');
     }
 
     // Download the file via svn export
@@ -261,13 +265,16 @@ export class SvnSpecService {
       return cached.id;
     }
 
-    // New file — save to documents
+    // New file — save original binary to documents (keep .docx for images support)
     const buffer = fs.readFileSync(localPath);
     const parsedText = await this.extractText(localPath, filename);
 
+    // Prefix filename with [SA] or [SD] so agent can distinguish doc types on disk
+    const labeledFilename = `[${docType}] ${filename}`;
+
     const doc = await this.documentParser.saveFromBuffer(
-      projectId, filename, buffer, docType,
-      { source: 'svn', sourceUrl: fileUrl, svnLastModified: svnLastModified || undefined, parsedText: parsedText || undefined },
+      projectId, labeledFilename, buffer, docType,
+      { source: 'svn', sourceUrl: fileUrl, svnLastModified: svnLastModified || undefined, parsedText: parsedText || undefined, subFolder },
     );
 
     bindDocumentToTask(taskId, doc.id);
@@ -287,14 +294,8 @@ export class SvnSpecService {
     const ext = path.extname(filename).toLowerCase();
 
     if (ext === '.docx') {
-      try {
-        const buffer = fs.readFileSync(filePath);
-        const result = await mammoth.extractRawText({ buffer });
-        return result.value || null;
-      } catch (err) {
-        logger.warn({ err, filePath }, 'Failed to extract text from DOCX');
-        return null;
-      }
+      // DocumentParser.saveFromBuffer handles DOCX→Markdown conversion internally
+      return null;
     }
 
     if (ext === '.pdf') {

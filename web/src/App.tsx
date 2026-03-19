@@ -9,6 +9,7 @@ import { AgentsView } from './components/agents/AgentsView';
 import { NewTaskView } from './components/task/NewTaskView';
 import { DbExplorer } from './components/db/DbExplorer';
 import { ProjectSettings } from './components/settings/ProjectSettings';
+import { GlobalSettings } from './components/settings/GlobalSettings';
 import { useThemeStore } from './stores/themeStore';
 
 export function App() {
@@ -40,6 +41,8 @@ export function App() {
             return <DbExplorer />;
           case 'settings':
             return <ProjectSettings />;
+          case 'global-settings':
+            return <GlobalSettings />;
           default:
             return <ProjectList onViewChange={onViewChange} />;
         }

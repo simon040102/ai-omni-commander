@@ -12,6 +12,7 @@ export type AgentStatus =
   | 'idle'
   | 'starting'
   | 'running'
+  | 'reviewing'
   | 'paused'
   | 'stopping'
   | 'stopped'
@@ -56,6 +57,7 @@ export interface AgentSpawnConfig {
 
 export interface AgentStartConfig {
   projectId: string;
+  agentId?: string; // Pre-generated ID (allows client to link uploaded files to this agent)
   role: AgentRole;
   taskId?: string;
   prompt: string;

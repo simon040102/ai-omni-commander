@@ -27,6 +27,7 @@ import { ReviewTrigger } from './review/ReviewTrigger.js';
 import { RetryHandler } from './review/RetryHandler.js';
 import { SvnSpecService } from './svn/SvnSpecService.js';
 import { listProjects } from './db/queries/projects.js';
+import { getTask } from './db/queries/tasks.js';
 import { getRecentPaths, addRecentPath, removeRecentPath, clearRecentPaths, migrateProjectPathsToRecent } from './db/queries/recentPaths.js';
 import { genId } from './utils/uuid.js';
 import { logger } from './utils/logger.js';
@@ -95,17 +96,22 @@ async function main() {
   const skillGenerator = new SkillGenerator(agentManager);
 
   // v3: Code review and auto-retry
-  const codeReviewAgent = new CodeReviewAgent(agentManager, eventBus, contextSync);
-  const _reviewTrigger = new ReviewTrigger(eventBus, codeReviewAgent);
+  // Note: ReviewTrigger (separate review agent) replaced by self-review in AgentManager.handleAgentComplete
+  // const codeReviewAgent = new CodeReviewAgent(agentManager, eventBus, contextSync);
+  // const _reviewTrigger = new ReviewTrigger(eventBus, codeReviewAgent);
   const _retryHandler = new RetryHandler(eventBus, pipeline);
 
-  // Load Asana PAT from DB (takes precedence over env var)
+  // Load Asana PAT from DB, or persist ENV value to DB for portability
   {
-    const { getAsanaPat } = await import('./db/queries/globalConfig.js');
+    const { getAsanaPat, setAsanaPat } = await import('./db/queries/globalConfig.js');
     const dbPat = getAsanaPat();
     if (dbPat) {
       reloadAsanaPat(dbPat);
       logger.info('Asana PAT loaded from database');
+    } else if (config.asanaPat) {
+      // ENV has PAT but DB doesn't — persist to DB so it works without ENV next time
+      setAsanaPat(config.asanaPat);
+      logger.info('Asana PAT from ENV persisted to database');
     }
   }
 
@@ -322,10 +328,12 @@ async function main() {
 
   app.post('/api/upload', (req, res) => {
     try {
-      const { data, filename, mimeType } = req.body as {
+      const { data, filename, mimeType, projectId, taskId } = req.body as {
         data: string; // base64 encoded
         filename?: string;
         mimeType?: string;
+        projectId?: string;
+        taskId?: string;
       };
 
       if (!data) {
@@ -333,11 +341,24 @@ async function main() {
         return;
       }
 
+      // Determine target directory (task subfolder if context provided)
+      let targetDir = uploadsDir;
+      if (projectId && taskId) {
+        const task = getTask(taskId);
+        const code = task?.parentName || null;
+        const subFolder = code ? `${code}_${taskId.slice(0, 8)}` : `task_${taskId.slice(0, 8)}`;
+        targetDir = path.join(uploadsDir, projectId, subFolder);
+        if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
+      } else if (projectId) {
+        targetDir = path.join(uploadsDir, projectId);
+        if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
+      }
+
       // Generate unique filename
       const ext = mimeType?.split('/')[1] || 'bin';
       const name = filename || `upload_${Date.now()}.${ext}`;
-      const safeName = name.replace(/[^a-zA-Z0-9._-]/g, '_');
-      const filePath = path.join(uploadsDir, `${Date.now()}_${safeName}`);
+      const safeName = name.replace(/[^a-zA-Z0-9._\u4e00-\u9fff\u3040-\u30ff-]/g, '_');
+      const filePath = path.join(targetDir, `${Date.now()}_${safeName}`);
 
       // Decode base64 and save
       const buffer = Buffer.from(data, 'base64');
@@ -358,9 +379,10 @@ async function main() {
   // 5. Create sync service (needs wsServer)
   const asanaSyncService = new AsanaSyncService(asanaClient, taskClassifier, pipeline, wsServer);
   asanaSyncService.setSvnSpecService(svnSpecService);
+  asanaSyncService.setDocumentParser(specHandler.getDocumentParser());
 
   // 6. Register WebSocket message handlers
-  registerHandlers(wsServer, orchestrator, agentManager, workspaceScanner, skillGenerator, asanaClient, asanaSyncService, quickModeHandler, svnSpecService);
+  registerHandlers(wsServer, orchestrator, agentManager, workspaceScanner, skillGenerator, asanaClient, asanaSyncService, quickModeHandler, svnSpecService, specHandler.getDocumentParser());
 
   // 6. Wire EventBus to WebSocket broadcast
   eventBus.on('agent.*', (event) => {
