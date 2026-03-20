@@ -399,6 +399,25 @@ export function registerHandlers(
       const docContext = orchestrator.getSpecHandler().getDocumentContext(payload.projectId, payload.role);
       if (docContext) parts.push(docContext);
 
+      // Inject Axure HTML snapshots if requested
+      if (payload.useAxureContext !== false) {
+        const nodeFs = await import('node:fs');
+        const nodePath = await import('node:path');
+        const snapshotsDir = nodePath.default.join(
+          nodePath.default.dirname(getConfig().dbPath), '..', 'docs', 'axure-snapshots', payload.projectId,
+        );
+        if (nodeFs.default.existsSync(snapshotsDir)) {
+          const htmlFiles = nodeFs.default.readdirSync(snapshotsDir).filter(f => f.endsWith('.html'));
+          if (htmlFiles.length > 0) {
+            const sections = htmlFiles.map(f => {
+              const content = nodeFs.default.readFileSync(nodePath.default.join(snapshotsDir, f), 'utf-8');
+              return `### ${f}\n\`\`\`html\n${content}\n\`\`\``;
+            });
+            parts.push(`## Axure 原型 HTML 快照\n以下為此專案的 UI 規格快照，請參考這些內容了解畫面佈局與互動：\n\n${sections.join('\n\n')}`);
+          }
+        }
+      }
+
       const prefix = parts.length > 0 ? parts.join('\n\n---\n\n') + '\n\n---\n\n' : '';
       const fullPrompt = prefix + payload.prompt;
 
