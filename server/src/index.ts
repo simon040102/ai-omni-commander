@@ -235,6 +235,41 @@ async function main() {
     }
   });
 
+  // ============ Mockup HTML Snapshots ============
+  const SNAPSHOTS_DIR = path.join(path.dirname(config.dbPath), '..', 'docs', 'axure-snapshots');
+
+  app.get('/api/projects/:id/mockups', (req, res) => {
+    const dir = path.join(SNAPSHOTS_DIR, req.params['id']);
+    try {
+      if (!fs.existsSync(dir)) { res.json({ files: [] }); return; }
+      const files = fs.readdirSync(dir)
+        .filter(f => f.endsWith('.html'))
+        .map(f => {
+          const stat = fs.statSync(path.join(dir, f));
+          return { filename: f, updatedAt: stat.mtime.toISOString() };
+        })
+        .sort((a, b) => a.filename.localeCompare(b.filename));
+      res.json({ files });
+    } catch {
+      res.status(400).json({ error: 'Cannot read mockup directory' });
+    }
+  });
+
+  app.get('/api/projects/:id/mockups/:filename', (req, res) => {
+    const filename = path.basename(req.params['filename']); // prevent path traversal
+    const filepath = path.join(SNAPSHOTS_DIR, req.params['id'], filename);
+    try {
+      if (!fs.existsSync(filepath)) { res.status(404).json({ error: 'File not found' }); return; }
+      const content = fs.readFileSync(filepath, 'utf-8');
+      // Wrap fragment in minimal full HTML doc for iframe rendering
+      const wrapped = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{font-family:sans-serif;font-size:13px;padding:8px;}</style></head><body>${content}</body></html>`;
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.send(wrapped);
+    } catch {
+      res.status(400).json({ error: 'Cannot read file' });
+    }
+  });
+
   // ============ DB Explorer (read-only) ============
   const DB_TABLE_WHITELIST = [
     'projects', 'agents', 'tasks', 'task_dependencies', 'task_documents', 'events',

@@ -10,6 +10,7 @@ import { NewTaskView } from './components/task/NewTaskView';
 import { DbExplorer } from './components/db/DbExplorer';
 import { ProjectSettings } from './components/settings/ProjectSettings';
 import { GlobalSettings } from './components/settings/GlobalSettings';
+import { MockupView } from './components/mockup/MockupView';
 import { useThemeStore } from './stores/themeStore';
 
 export function App() {
@@ -43,6 +44,8 @@ export function App() {
             return <ProjectSettings />;
           case 'global-settings':
             return <GlobalSettings />;
+          case 'mockup':
+            return <MockupView />;
           default:
             return <ProjectList onViewChange={onViewChange} />;
         }

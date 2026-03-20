@@ -68,6 +68,7 @@ export interface ProjectConfig {
   autoExecuteConfig?: { bug: boolean; feature: boolean; refactor: boolean };
   asanaSyncConfig?: AsanaSyncConfig;
   svnConfig?: SvnConfig;
+  axshareUrl?: string;
 }
 
 /** Stored plan for an agent */

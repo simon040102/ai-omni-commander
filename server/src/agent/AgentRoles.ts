@@ -182,6 +182,19 @@ IMPORTANT: You are READ-ONLY. You must NOT use Edit, Write, or any tools that mo
     allowedTools: ['Read', 'Glob', 'Grep'],
   },
 
+  axure: {
+    role: 'axure',
+    displayName: 'Axure Snapshot Agent',
+    model: 'sonnet',
+    systemPrompt: `You are an Axure Snapshot Agent. Your job is to re-crawl Axure Share prototype pages and save updated HTML snapshots.
+
+Use the /crawl-axure-snapshots skill to crawl each page listed in your instructions.
+Save each snapshot to docs/axure-snapshots/{projectId}/{filename} as instructed.
+
+When all pages are crawled and saved, end with [TASK_COMPLETE].`,
+    allowedTools: ['Bash', 'mcp__playwright__browser_navigate', 'mcp__playwright__browser_evaluate', 'mcp__playwright__browser_take_screenshot'],
+  },
+
   quick: {
     role: 'quick',
     displayName: 'Quick Task Agent',

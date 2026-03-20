@@ -373,6 +373,19 @@ export interface WsStartQuickTask extends WsMessage {
 }
 
 // ============================================
+// Mockup messages
+// ============================================
+
+export interface WsMockupReload extends WsMessage {
+  type: 'mockup.reload';
+  payload: {
+    projectId: string;
+    filenames: string[];  // e.g. ['sl01-查詢.html', 'sl01-新增.html']
+    axshareUrl: string;
+  };
+}
+
+// ============================================
 // Global config messages
 // ============================================
 

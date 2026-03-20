@@ -242,16 +242,14 @@ export class AsanaSyncService {
       }
     }
 
-    // Broadcast final task list if anything was removed
-    if (removedTasks > 0) {
-      const finalTasks = getTasksByProject(projectId);
-      this.wsServer.broadcast({
-        type: 'task.list',
-        id: genId(),
-        timestamp: new Date().toISOString(),
-        payload: { projectId, tasks: finalTasks },
-      } as WsMessage);
-    }
+    // Always broadcast final task list so frontend stays in sync
+    const finalTasks = getTasksByProject(projectId);
+    this.wsServer.broadcast({
+      type: 'task.list',
+      id: genId(),
+      timestamp: new Date().toISOString(),
+      payload: { projectId, tasks: finalTasks },
+    } as WsMessage);
 
     const lastSyncAt = new Date().toISOString();
     this.lastSyncAt.set(projectId, lastSyncAt);

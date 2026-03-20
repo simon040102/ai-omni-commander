@@ -30,6 +30,8 @@ export class AgentProcess extends EventEmitter {
   get status(): AgentProcessStatus { return this._status; }
   get sessionId(): string | null { return this._sessionId; }
   get pid(): number | null { return this._pid; }
+  /** True if the underlying SDK query is still running (not yet finished/aborted) */
+  get isActive(): boolean { return this._query !== null; }
 
   /** Start a new Claude agent using the SDK */
   async spawn(prompt: string): Promise<void> {
