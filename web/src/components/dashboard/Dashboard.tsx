@@ -27,6 +27,7 @@ export function Dashboard({ onViewChange }: DashboardProps) {
   const [showPlanPanel, setShowPlanPanel] = useState(true);
   const [showSyncSettings, setShowSyncSettings] = useState(false);
   const [lastSyncAt, setLastSyncAt] = useState<string | null>(null);
+  const [isSyncing, setIsSyncing] = useState(false);
   const [adHocInput, setAdHocInput] = useState('');
   const [adHocTarget, setAdHocTarget] = useState<'frontend' | 'backend'>('backend');
 
@@ -44,21 +45,27 @@ export function Dashboard({ onViewChange }: DashboardProps) {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail as { lastSyncAt: string };
       setLastSyncAt(detail.lastSyncAt);
+      setIsSyncing(false);
     };
+    const errorHandler = () => setIsSyncing(false);
     window.addEventListener('omni:asana-sync', handler);
-    return () => window.removeEventListener('omni:asana-sync', handler);
+    window.addEventListener('omni:asana-error', errorHandler);
+    return () => {
+      window.removeEventListener('omni:asana-sync', handler);
+      window.removeEventListener('omni:asana-error', errorHandler);
+    };
   }, []);
 
   const handleSyncNow = useCallback(() => {
-    if (!currentProjectId || !client) return;
+    if (!currentProjectId || !client || isSyncing) return;
+    setIsSyncing(true);
     client.send({
       type: 'asana.syncNow',
       id: crypto.randomUUID(),
       timestamp: new Date().toISOString(),
       payload: { projectId: currentProjectId },
     });
-    addToast({ type: 'info', title: 'Syncing Asana tasks...' });
-  }, [currentProjectId, client, addToast]);
+  }, [currentProjectId, client, isSyncing]);
 
   const handleAdHocExecute = useCallback(() => {
     if (!currentProjectId || !client || !adHocInput.trim()) return;
@@ -189,10 +196,11 @@ export function Dashboard({ onViewChange }: DashboardProps) {
         <div className="flex items-center gap-2 px-3 py-2 bg-card border border-border rounded-lg flex-shrink-0">
           <button
             onClick={handleSyncNow}
-            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium bg-orange-500/10 text-orange-400 border border-orange-500/20 rounded-lg hover:bg-orange-500/20 transition-colors"
+            disabled={isSyncing}
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium bg-orange-500/10 text-orange-400 border border-orange-500/20 rounded-lg hover:bg-orange-500/20 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
           >
-            <IconRefresh className="w-3 h-3" />
-            Sync Now
+            <IconRefresh className={`w-3 h-3 ${isSyncing ? 'animate-spin' : ''}`} />
+            {isSyncing ? 'Syncing...' : 'Sync Now'}
           </button>
           <button
             onClick={() => setShowSyncSettings(true)}

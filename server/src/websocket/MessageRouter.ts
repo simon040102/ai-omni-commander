@@ -9,6 +9,7 @@ import type {
   WsTaskCreate, WsTaskDelete, WsTaskUpdate, WsTaskBulkDeleteBySource,
   WsWorkspaceScan, WsWorkspaceGenerateSkills,
   WsSvnBrowse, WsSvnPreview,
+  WsMockupReload,
   AgentRole,
 } from '@omni/shared';
 import type { SvnConfig } from '@omni/shared';
@@ -1250,6 +1251,38 @@ export function registerHandlers(
       timestamp: new Date().toISOString(),
       payload: { projects },
     } as WsMessage;
+  });
+
+  // MOCKUP.RELOAD — spawn axure agent to re-crawl selected pages
+  wsServer.registerHandler('mockup.reload', async (msg: WsMessage, _ws: WebSocket) => {
+    const { projectId, filenames, axshareUrl } = (msg as WsMockupReload).payload;
+    const project = getProject(projectId);
+    if (!project) return;
+
+    const fileList = filenames.map(f => `- ${f}`).join('\n');
+    const prompt = `Use the /crawl-axure-snapshots skill to re-crawl the following Axure snapshot pages.
+
+Axure Share base URL: ${axshareUrl}
+Project ID: ${projectId}
+Output directory: docs/axure-snapshots/${projectId}/
+
+Pages to re-crawl (filenames tell you the module and page type):
+${fileList}
+
+For each filename like "sl01-查詢.html":
+- Module code: sl01
+- Page type: 查詢
+- Construct the Axure URL using the base URL and page name pattern from the crawl-axure-snapshots skill
+- Save the cleaned HTML to docs/axure-snapshots/${projectId}/{filename}
+
+When all pages are saved, end with [TASK_COMPLETE].`;
+
+    await agentManager.startAgent({
+      projectId,
+      role: 'axure',
+      prompt,
+      workingDir: process.cwd(),
+    });
   });
 
   wsServer.setPostConnectionHandler((ws) => {

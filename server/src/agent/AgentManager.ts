@@ -22,11 +22,21 @@ const logger = createChildLogger('AgentManager');
 /**
  * Manages the full lifecycle of multiple Claude Code agent processes.
  */
+const INACTIVITY_NUDGE_MS = 5 * 60 * 1000; // 5 minutes
+const INACTIVITY_CHECK_INTERVAL_MS = 30 * 1000; // check every 30s
+const MAX_NUDGES = 2;
+const NUDGE_MESSAGE = '請繼續執行任務。如果你在等待什麼或遇到問題，請說明後繼續。';
+
 export class AgentManager {
   private processes = new Map<string, AgentProcess>();
   private progressDetector = new ProgressDetector();
   /** Agents currently in self-review phase (will complete after review finishes) */
   private reviewingAgents = new Set<string>();
+  /** Last output timestamp per agent (ms) */
+  private lastOutputAt = new Map<string, number>();
+  /** How many times each agent has been nudged */
+  private nudgeCount = new Map<string, number>();
+  private watchdogInterval: ReturnType<typeof setInterval>;
 
   constructor(
     private eventBus: EventBus,
@@ -34,6 +44,44 @@ export class AgentManager {
   ) {
     // Listen for contract changes to notify frontend agents
     this.eventBus.on(EventTypes.CONTRACT_UPDATED, (e) => this.onContractUpdated(e));
+    // Start inactivity watchdog
+    this.watchdogInterval = setInterval(() => this.runWatchdog(), INACTIVITY_CHECK_INTERVAL_MS);
+  }
+
+  private async runWatchdog(): Promise<void> {
+    if (this.processes.size === 0) return;
+    const now = Date.now();
+    for (const [agentId] of this.processes) {
+      const lastOut = this.lastOutputAt.get(agentId);
+      if (!lastOut) continue;
+      const idleMs = now - lastOut;
+      if (idleMs < INACTIVITY_NUDGE_MS) continue;
+
+      const nudges = this.nudgeCount.get(agentId) ?? 0;
+      if (nudges >= MAX_NUDGES) continue;
+
+      logger.warn({ agentId, idleMs: Math.round(idleMs / 1000) }, 'Agent inactive, sending nudge');
+      this.nudgeCount.set(agentId, nudges + 1);
+      // Reset timer so we don't nudge again immediately
+      this.lastOutputAt.set(agentId, now);
+
+      try {
+        await this.sendInputToAgent(agentId, NUDGE_MESSAGE);
+        // Emit system message so terminal shows the nudge
+        await this.eventBus.emit({
+          type: EventTypes.AGENT_OUTPUT,
+          source: agentId,
+          payload: {
+            agentId,
+            streamType: 'system',
+            content: `[WATCHDOG] Agent idle for ${Math.round(idleMs / 60000)} min — auto-nudge sent (${nudges + 1}/${MAX_NUDGES})`,
+          },
+          timestamp: new Date().toISOString(),
+        });
+      } catch (err) {
+        logger.error({ err, agentId }, 'Watchdog nudge failed');
+      }
+    }
   }
 
   /** Start an agent for a specific task */
@@ -92,6 +140,8 @@ export class AgentManager {
     this.wireProcessEvents(proc, agent.id, config.projectId, config.taskId || null);
 
     this.processes.set(agent.id, proc);
+    this.lastOutputAt.set(agent.id, Date.now());
+    this.nudgeCount.set(agent.id, 0);
 
     // Spawn the process
     await proc.spawn(config.prompt);
@@ -112,13 +162,32 @@ export class AgentManager {
     return agent.id;
   }
 
-  /** Stop a specific agent */
+  /** Clear watchdog tracking for an agent */
+  private clearWatchdog(agentId: string): void {
+    this.lastOutputAt.delete(agentId);
+    this.nudgeCount.delete(agentId);
+  }
+
+  /** Stop a specific agent.
+   * If the process is truly active, kills it. If the process already finished
+   * (stale 'running' status), just syncs state without a redundant kill attempt. */
   async stopAgent(agentId: string): Promise<void> {
     const proc = this.processes.get(agentId);
+    const wasActive = proc?.isActive ?? false;
+
     if (proc) {
-      await proc.stop();
+      if (wasActive) {
+        logger.info({ agentId }, 'Agent is active — stopping');
+        await proc.stop();
+      } else {
+        logger.info({ agentId }, 'Agent process exists but is inactive — syncing stale status');
+      }
       this.processes.delete(agentId);
+    } else {
+      logger.info({ agentId }, 'Agent not in process map — syncing stale status');
     }
+
+    this.clearWatchdog(agentId);
     updateAgent(agentId, { status: 'stopped', pid: null });
     await this.eventBus.emit({
       type: EventTypes.AGENT_STOPPED,
@@ -223,6 +292,8 @@ export class AgentManager {
 
     this.wireProcessEvents(newProc, agentId, agent.projectId, null);
     this.processes.set(agentId, newProc);
+    this.lastOutputAt.set(agentId, Date.now());
+    this.nudgeCount.set(agentId, 0);
 
     await newProc.spawn(prompt);
     logger.info({ agentId, role: agent.role }, 'Agent rerun with new prompt');
@@ -341,6 +412,8 @@ export class AgentManager {
     proc.on('output', (output: AgentOutputEvent & { isStreaming?: boolean; projectId?: string }) => {
       output.taskId = taskId;
       output.projectId = projectId;
+      // Update last-active timestamp for watchdog
+      this.lastOutputAt.set(agentId, Date.now());
 
       // Only persist non-streaming outputs to DB (streaming will be followed by full message)
       if (!output.isStreaming) {
@@ -518,6 +591,7 @@ export class AgentManager {
       logger.info({ agentId, taskId }, 'Self-review completed');
     }
 
+    this.clearWatchdog(agentId);
     updateAgent(agentId, {
       status: 'stopped',
       totalCostUsd: result.cost_usd,
@@ -622,6 +696,7 @@ export class AgentManager {
       return;
     }
 
+    this.clearWatchdog(agentId);
     updateAgent(agentId, { status: 'error' });
 
     if (taskId) {

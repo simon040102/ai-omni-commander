@@ -426,6 +426,7 @@ export function useWebSocket() {
           case 'asana.error':
             setAsanaError(payload['message'] as string);
             setAsanaLoading(false);
+            window.dispatchEvent(new CustomEvent('omni:asana-error'));
             addToast({
               type: 'error',
               title: 'Asana Error',

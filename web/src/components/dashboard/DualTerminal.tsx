@@ -62,24 +62,19 @@ export function DualTerminal({ focusAgentId }: DualTerminalProps) {
     }
   }
 
-  // Group agents by role, showing latest agent per role
-  const roleMap = new Map<string, typeof agents[0]>();
-  for (const agent of agents) {
-    const existing = roleMap.get(agent.role);
-    if (!existing || agent.status === 'running') {
-      roleMap.set(agent.role, agent);
-    }
-  }
+  // Latest review agent (if any)
+  const reviewAgent = [...agents]
+    .filter(a => a.role === 'review')
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
 
-  // Separate review agents from work agents
-  const reviewAgent = roleMap.get('review');
-  roleMap.delete('review');
+  // Latest 4 non-review agents, most recent first
+  const workAgents = [...agents]
+    .filter(a => a.role !== 'review')
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .slice(0, 4);
 
-  // Work agents (backend, frontend, master, etc.)
-  const workAgents = Array.from(roleMap.values());
-
-  // Determine grid columns based on count
-  const cols = workAgents.length <= 1 ? 1 : workAgents.length <= 2 ? 2 : 3;
+  // 1→1col, 2→2col, 3→2col, 4→2col (2×2 grid)
+  const cols = workAgents.length <= 1 ? 1 : 2;
 
   return (
     <div className="flex flex-col gap-3 h-full">
@@ -89,7 +84,12 @@ export function DualTerminal({ focusAgentId }: DualTerminalProps) {
         style={{ gridTemplateColumns: `repeat(${cols}, 1fr)` }}
       >
         {workAgents.length > 0 ? (
-          workAgents.map(agent => (
+          workAgents.map((agent, i) => (
+            <div
+              key={agent.id}
+              style={workAgents.length === 3 && i === 2 ? { gridColumn: '1 / -1' } : undefined}
+              className="min-h-0"
+            >
             <TerminalOutput
               key={agent.id}
               outputs={outputs[agent.id] || []}
@@ -105,6 +105,7 @@ export function DualTerminal({ focusAgentId }: DualTerminalProps) {
               onSendCommand={handleSendCommand}
               onAction={handleAgentAction}
             />
+            </div>
           ))
         ) : (
           <div className="flex items-center justify-center text-muted-foreground border border-border rounded-lg">

@@ -1,0 +1,175 @@
+import { useState, useEffect, useCallback } from 'react';
+import { useProjectStore } from '../../stores/projectStore';
+import { useWsStore } from '../../stores/wsStore';
+
+interface MockupFile {
+  filename: string;
+  updatedAt: string;
+}
+
+export function MockupView() {
+  const project = useProjectStore(s => s.projects.find(p => p.id === s.currentProjectId));
+  const client = useWsStore(s => s.client);
+
+  const [files, setFiles] = useState<MockupFile[]>([]);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [previewFile, setPreviewFile] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [reloading, setReloading] = useState(false);
+
+  const axshareUrl: string = (() => {
+    try { return JSON.parse(project?.configJson || '{}')?.axshareUrl || ''; } catch { return ''; }
+  })();
+
+  const fetchFiles = useCallback(async () => {
+    if (!project) return;
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/projects/${project.id}/mockups`);
+      const data = await res.json() as { files: MockupFile[] };
+      setFiles(data.files || []);
+    } finally {
+      setLoading(false);
+    }
+  }, [project]);
+
+  useEffect(() => { fetchFiles(); }, [fetchFiles]);
+
+  const toggleSelect = (filename: string) => {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(filename)) next.delete(filename); else next.add(filename);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    if (selected.size === files.length) {
+      setSelected(new Set());
+    } else {
+      setSelected(new Set(files.map(f => f.filename)));
+    }
+  };
+
+  const handleReload = () => {
+    if (!project || selected.size === 0 || !client) return;
+    if (!axshareUrl) { alert('請先在 Project Settings 設定 Axure Share URL'); return; }
+    setReloading(true);
+    client.send({
+      type: 'mockup.reload',
+      id: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+      payload: {
+        projectId: project.id,
+        filenames: [...selected],
+        axshareUrl,
+      },
+    });
+    // Optimistically reset reloading after a moment (agent will handle it)
+    setTimeout(() => setReloading(false), 2000);
+  };
+
+  const previewUrl = previewFile && project
+    ? `/api/projects/${project.id}/mockups/${encodeURIComponent(previewFile)}`
+    : null;
+
+  if (!project) return null;
+
+  return (
+    <div className="flex h-full gap-3">
+      {/* Left: file list */}
+      <div className="w-64 flex-shrink-0 flex flex-col gap-2">
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-foreground">Axure 原型畫面</h2>
+          <button
+            onClick={fetchFiles}
+            className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+            title="重新整理列表"
+          >
+            ↻
+          </button>
+        </div>
+
+        {!axshareUrl && (
+          <div className="text-[11px] text-yellow-500 bg-yellow-500/10 rounded px-2 py-1">
+            尚未設定 Axure Share URL（Project Settings）
+          </div>
+        )}
+
+        {loading ? (
+          <div className="text-xs text-muted-foreground">載入中...</div>
+        ) : files.length === 0 ? (
+          <div className="text-xs text-muted-foreground">
+            無 HTML 檔案<br />
+            <span className="text-[11px]">docs/axure-snapshots/{project.id}/</span>
+          </div>
+        ) : (
+          <>
+            <div className="flex items-center gap-2 px-1 py-0.5 text-xs text-muted-foreground border-b border-border pb-1">
+              <input
+                type="checkbox"
+                checked={selected.size === files.length && files.length > 0}
+                onChange={toggleSelectAll}
+                className="w-3 h-3"
+              />
+              <span>全選 ({files.length})</span>
+            </div>
+            <div className="flex-1 overflow-y-auto space-y-0.5">
+              {files.map(f => (
+                <div
+                  key={f.filename}
+                  className={`flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer text-xs transition-colors ${
+                    previewFile === f.filename
+                      ? 'bg-primary/10 text-primary'
+                      : 'hover:bg-muted text-foreground'
+                  }`}
+                  onClick={() => setPreviewFile(f.filename)}
+                >
+                  <input
+                    type="checkbox"
+                    checked={selected.has(f.filename)}
+                    onChange={(e) => { e.stopPropagation(); toggleSelect(f.filename); }}
+                    className="w-3 h-3 flex-shrink-0"
+                  />
+                  <div className="flex-1 min-w-0">
+                    <div className="truncate font-mono">{f.filename}</div>
+                    <div className="text-[10px] text-muted-foreground">
+                      {new Date(f.updatedAt).toLocaleDateString('zh-TW')}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+
+        {selected.size > 0 && (
+          <button
+            onClick={handleReload}
+            disabled={reloading || !axshareUrl}
+            className="mt-auto px-3 py-1.5 text-xs rounded bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors"
+          >
+            {reloading ? '派發 Agent...' : `Reload (${selected.size})`}
+          </button>
+        )}
+      </div>
+
+      {/* Right: preview */}
+      <div className="flex-1 border border-border rounded overflow-hidden bg-white">
+        {previewUrl ? (
+          <iframe
+            key={previewUrl}
+            src={previewUrl}
+            className="w-full h-full"
+            title={previewFile || ''}
+            sandbox="allow-same-origin"
+          />
+        ) : (
+          <div className="flex items-center justify-center h-full text-sm text-muted-foreground">
+            點選左側檔案預覽
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}

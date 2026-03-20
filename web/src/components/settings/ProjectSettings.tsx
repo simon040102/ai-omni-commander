@@ -31,6 +31,9 @@ export function ProjectSettings() {
   const [svnFrontendPath, setSvnFrontendPath] = useState('');
   const [svnBackendPath, setSvnBackendPath] = useState('');
 
+  // Axure Share URL
+  const [axshareUrl, setAxshareUrl] = useState('');
+
   // Parse existing config
   const existingConfig = useMemo(() => {
     if (!project?.configJson) return null;
@@ -49,6 +52,7 @@ export function ProjectSettings() {
       const svn = existingConfig?.svnConfig as SvnConfig | undefined;
       setSvnFrontendPath(svn?.frontendSpecPath || '');
       setSvnBackendPath(svn?.backendSpecPath || '');
+      setAxshareUrl(existingConfig?.axshareUrl || '');
     }
   }, [project, existingConfig]);
 
@@ -78,6 +82,7 @@ export function ProjectSettings() {
     const newConfig = {
       ...(existingConfig || {}),
       svnConfig,
+      axshareUrl: axshareUrl.trim() || undefined,
     };
 
     client.send({
@@ -97,7 +102,7 @@ export function ProjectSettings() {
 
     addToast({ type: 'success', title: 'Project settings saved' });
   }, [client, project, name, frontendPath, backendPath, asanaProjectGid, dbConnectionString,
-    svnFrontendPath, svnBackendPath, existingConfig, addToast]);
+    svnFrontendPath, svnBackendPath, axshareUrl, existingConfig, addToast]);
 
   if (!project) {
     return (
@@ -176,6 +181,31 @@ export function ProjectSettings() {
               value={svnBackendPath}
               onChange={(e) => setSvnBackendPath(e.target.value)}
               placeholder="https://svn01.example.com/svn/Project/2-SA/5-需求規格書(後端SPEC)"
+              className="w-full bg-muted border border-border rounded-md px-3 py-2 text-sm font-mono outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
+            />
+          </div>
+        </div>
+
+        {/* Axure Share */}
+        <div className="border border-border rounded-lg p-4 space-y-3">
+          <div className="flex items-center gap-2">
+            <svg className="w-4 h-4 text-purple-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+              <line x1="8" y1="21" x2="16" y2="21" />
+              <line x1="12" y1="17" x2="12" y2="21" />
+            </svg>
+            <h4 className="text-sm font-medium">Axure Share</h4>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Axure Share 原型的 base URL，供 Axure Agent 重新爬取頁面快照。
+          </p>
+          <div>
+            <label className="block text-xs text-muted-foreground mb-1">Axure Share URL</label>
+            <input
+              type="text"
+              value={axshareUrl}
+              onChange={(e) => setAxshareUrl(e.target.value)}
+              placeholder="https://xxxxxx.axshare.com"
               className="w-full bg-muted border border-border rounded-md px-3 py-2 text-sm font-mono outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
             />
           </div>
