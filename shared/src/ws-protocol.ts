@@ -165,6 +165,7 @@ export interface WsAddAgent extends WsMessage {
     workingDir?: string;
     useWorkspaceSkills?: boolean;
     superpowersFeatures?: string[];
+    useAxureContext?: boolean;
   };
 }
 

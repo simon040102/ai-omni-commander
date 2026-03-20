@@ -115,6 +115,7 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
   const [addAgentUseSkills, setAddAgentUseSkills] = useState(true);
   const [addAgentSuperpowers, setAddAgentSuperpowers] = useState(false);
   const [addAgentSpFeatures, setAddAgentSpFeatures] = useState<SuperpowersFeature[]>(['brainstorm', 'tdd', 'debugging']);
+  const [addAgentUseAxure, setAddAgentUseAxure] = useState(true);
   const [addAgentFiles, setAddAgentFiles] = useState<Array<{ file: File; docType: 'SA' | 'SD' }>>([]);
 
   // Check for focusAgentId from sessionStorage (from task execution navigation)
@@ -245,6 +246,7 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
         workingDir: effectiveWorkDir || undefined,
         useWorkspaceSkills: addAgentUseSkills,
         superpowersFeatures: addAgentSuperpowers ? addAgentSpFeatures : undefined,
+        useAxureContext: addAgentUseAxure,
       },
     });
     addToast({ type: 'info', title: 'Agent added', message: `Starting ${addAgentRole} agent (${addAgentModel})...` });
@@ -253,7 +255,7 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
     setAddAgentWorkDir('');
     setAddAgentWorkDirMode('auto');
     setAddAgentFiles([]);
-  }, [currentProjectId, client, addToast, addAgentRole, addAgentPrompt, addAgentModel, effectiveWorkDir, addAgentUseSkills, addAgentSuperpowers, addAgentSpFeatures, addAgentFiles]);
+  }, [currentProjectId, client, addToast, addAgentRole, addAgentPrompt, addAgentModel, effectiveWorkDir, addAgentUseSkills, addAgentSuperpowers, addAgentSpFeatures, addAgentUseAxure, addAgentFiles]);
 
   /* ─── Empty state ─── */
   if (!currentProjectId || !project) {
@@ -697,6 +699,8 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
               setAddAgentSuperpowers={setAddAgentSuperpowers}
               addAgentSpFeatures={addAgentSpFeatures}
               setAddAgentSpFeatures={setAddAgentSpFeatures}
+              addAgentUseAxure={addAgentUseAxure}
+              setAddAgentUseAxure={setAddAgentUseAxure}
               dbConnectionString={addAgentRole === 'backend' ? project?.dbConnectionString ?? undefined : undefined}
               files={addAgentFiles}
               setFiles={setAddAgentFiles}
@@ -706,6 +710,10 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
                   const config = JSON.parse(project.configJson);
                   return !!(config?.svnConfig?.frontendSpecPath || config?.svnConfig?.backendSpecPath);
                 } catch { return false; }
+              })()}
+              hasAxshareUrl={(() => {
+                if (!project?.configJson) return false;
+                try { return !!(JSON.parse(project.configJson)?.axshareUrl); } catch { return false; }
               })()}
               onStart={handleAddAgent}
               onCancel={() => {
@@ -765,10 +773,13 @@ interface AddAgentPanelProps {
   setAddAgentSuperpowers: (v: boolean) => void;
   addAgentSpFeatures: SuperpowersFeature[];
   setAddAgentSpFeatures: (f: SuperpowersFeature[]) => void;
+  addAgentUseAxure: boolean;
+  setAddAgentUseAxure: (v: boolean) => void;
   dbConnectionString?: string;
   files: Array<{ file: File; docType: 'SA' | 'SD' }>;
   setFiles: (files: Array<{ file: File; docType: 'SA' | 'SD' }>) => void;
   hasSvnConfig?: boolean;
+  hasAxshareUrl?: boolean;
   onStart: () => void;
   onCancel: () => void;
 }
@@ -783,9 +794,11 @@ function AddAgentPanel({
   addAgentUseSkills, setAddAgentUseSkills,
   addAgentSuperpowers, setAddAgentSuperpowers,
   addAgentSpFeatures, setAddAgentSpFeatures,
+  addAgentUseAxure, setAddAgentUseAxure,
   dbConnectionString,
   files, setFiles,
   hasSvnConfig,
+  hasAxshareUrl,
   onStart, onCancel,
 }: AddAgentPanelProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -1059,6 +1072,17 @@ function AddAgentPanel({
             />
             Superpowers Methodology
           </label>
+          {hasAxshareUrl && (
+            <label className="flex items-center gap-2.5 text-sm text-muted-foreground cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={addAgentUseAxure}
+                onChange={(e) => setAddAgentUseAxure(e.target.checked)}
+                className="rounded border-border accent-primary w-4 h-4"
+              />
+              使用 Axure 原型內容
+            </label>
+          )}
         </div>
 
         {addAgentSuperpowers && (
