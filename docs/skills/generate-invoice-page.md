@@ -1,7 +1,6 @@
 ---
 name: generate-invoice-page
-description: 根據 Axure prototype snapshot (.md) 和現有程式碼 pattern，生成 ofeinvoice_ui 的 React 頁面元件
-type: reference
+description: Use when generating React pages for the ofeinvoice_ui project from Axure snapshot specs. Covers snapshot interpretation, component mapping, API naming, layout rules, and special page patterns (query/manage/import/modal/multi-tab).
 ---
 
 # 生成發票平台 React 頁面
@@ -14,7 +13,17 @@ type: reference
 
 ## 如何讀懂 Axure Snapshot
 
-Snapshot 是 accessibility tree 格式的 YAML，對應到 UI 元素如下：
+Snapshot 是 accessibility tree 格式的 YAML（存放於 `docs/axure-snapshots/`），**已去除 Axure header/nav chrome**，直接從主內容開始：
+
+```yaml
+- generic [active] [ref=f5e1]:   ← 主內容根節點
+  - generic:
+    - paragraph: 查詢作業         ← 頁面標題
+    - paragraph: 所屬年度 *       ← 欄位 label（* = 必填）
+    - combobox:                   ← 下拉選單
+```
+
+對應到 UI 元素如下：
 
 | Snapshot 元素 | 意義 |
 |---|---|
@@ -28,18 +37,31 @@ Snapshot 是 accessibility tree 格式的 YAML，對應到 UI 元素如下：
 | `textbox: "關鍵字搜尋"` | placeholder 提示為模糊搜尋 |
 | `*` 在 label 後 | 必填欄位 |
 
-### Action ID 對照慣例
+### Action ID 判讀方式
 
-| Axure ID 位置 | 通常對應 |
+Action ID（`generic: "A1"`、`"B1"` 等）的意義**由周圍的 `paragraph` 文字決定**，不是固定規則：
+
+```yaml
+- generic:
+  - paragraph: 查詢      ← 這個 paragraph 才是按鈕名稱
+  - generic: A1          ← A1 只是 Axure 的編號，本身沒有語意
+```
+
+**判讀方式：** 找 ID 旁邊的 `paragraph` 文字，那就是按鈕的功能。
+不要靠 ID 猜功能，要靠文字確認。
+
+### 按鈕置底判斷
+
+Snapshot 不含 CSS 定位，但可從**頁面類型**和**按鈕在 tree 中的位置**推斷：
+
+| 情況 | 使用方式 |
 |---|---|
-| 查詢區的 A1/B1 | 查詢按鈕 |
-| 查詢區的 A2/B2 | 清除按鈕 |
-| 表格操作的 D1/C1 | 新增按鈕 |
-| 表格操作的 D2/C2 | 刪除按鈕 |
-| 詳細頁的 A1 | 儲存按鈕 |
-| 詳細頁的 A2/A3 | 返回按鈕 |
-| 匯入頁的 A1 | 匯入結果查詢 |
-| 匯入頁的 A2 | 匯入執行 |
+| 詳細頁（新增/編輯/檢視） | `<FloatBtnBox>` 置底（固定專案慣例） |
+| 匯入頁 | `<FloatBtnBox>` 置底 |
+| 查詢頁的查詢/清除按鈕 | inline，放在 `<div className="btn-box">` 裡 |
+| 查詢頁的新增/刪除按鈕 | 表格上方 `<div className="tb-btn-group">` |
+
+輔助線索：按鈕群出現在 **tree 末尾（所有欄位之後）** → 置底；夾在欄位中間 → inline。
 
 ## 專案元件對照
 
@@ -238,6 +260,37 @@ Read docs/axure-snapshots/{模組}-檢視.md
 - `btn-box` 為查詢按鈕區 class
 - `pager-setting` 為分頁設定區 class
 
+## 版面排列規則（md prop）
+
+欄位的 `md` prop 決定 Bootstrap grid 寬度。格式為 2 位數字串：
+
+```
+md="24"  → label 欄 col-md-2 + input 欄 col-md-4 = 共 6 columns（半行寬）
+md="210" → label 欄 col-md-2 + input 欄 col-md-10 = 共 12 columns（整行寬）
+```
+
+**標準排列（查詢頁 / 詳細頁）：**
+- 每個 `<Form.Group as={Row} className="form-group">` 為一橫列
+- 每列放 **2 個** `md="24"` 欄位（6 + 6 = 12 columns，兩欄並排）
+- 若某列只有 1 個欄位，仍使用 `md="24"`（靠左半行）
+
+**對照 Axure snapshot 決定分組：**
+- snapshot 中同一視覺「行」的欄位 → 放進同一個 `Form.Group`
+- snapshot 每行通常 2 個欄位（左右並排）→ 2 個 `md="24"` per Form.Group
+- 特寬欄位（如 textarea、備註）→ `md="210"` 獨立一行
+
+**範例：Axure 顯示 4 個欄位（2 列 × 2 欄）→ 2 個 Form.Group：**
+```tsx
+<Form.Group as={Row} className="form-group">
+  <SelectController md="24" label="所屬年度" ... />
+  <SelectController md="24" label="期數" ... />
+</Form.Group>
+<Form.Group as={Row} className="form-group">
+  <InputController md="24" label="字軌" ... />
+  <SelectController md="24" label="發票格式" ... />
+</Form.Group>
+```
+
 ## 範例：SB01 查詢頁查詢條件 → 程式碼對照
 
 **Snapshot：**
@@ -275,16 +328,52 @@ combobox: 全部/07.../08...  → classList
 ## 特殊情況
 
 ### 查詢頁沒有新增/刪除按鈕
-某些模組（SB02、SB03、SB07）查詢頁只有查詢功能，沒有 checkbox 和操作按鈕。
+SB02、SB03、SB07、SB09、SB10 查詢頁只有查詢功能，無 checkbox 和操作按鈕。
+
+### 「新增&修改」合一頁
+SB05、SB09、SB10 的 Axure 把新增和修改標示為同一頁（`-新增&修改`），對應程式碼為同一個 `Manage.tsx`，用 `type` 區分。
 
 ### 多步驟 Tab 頁（SB07）
-SB07 詳細頁為多 Tab：步驟1~6，各 Tab 為獨立元件放在 `Tab/` 子目錄。
+SB07 詳細頁為多 Tab：步驟1~6（一般設定/銷項設定/進項設定/申報設定/通知設定/發票簿冊），各 Tab 為獨立元件放在 `Tab/` 子目錄。
 
 ### 彈窗（Modal）
 部分操作（SB04 配號、SB08 簿冊、SB09 新增年度）使用 Modal 而非跳頁。Modal 元件放在同目錄。
 
-### 「新增&修改」合一頁
-SB05、SB09、SB10 的 Axure 把新增和修改標示為同一頁（`-新增&修改`），對應程式碼為同一個 `Manage.tsx`，用 `type` 區分。
+### 營業人統編 Picker（SB06、SB07、SB08、SB09、SB10）
+多個模組有 `textbox: 70789607（茂林光電科技股份有限公司）` + search icon + Authorize 按鈕。這是一個複合元件（統編輸入框 + 搜尋）：
+```tsx
+<div className="input-group">
+  <InputController label="營業人統編" name="taxId" required methods={methods} />
+  <Button variant="outline-secondary" onClick={onSearchCompany}>
+    <SearchIcon />
+  </Button>
+</div>
+```
+通常搭配 company picker modal 或 autocomplete。
+
+### SB08 複雜查詢（多維篩選）
+SB08 有 BU、所屬年度、期數、發票簿類別、是否外部轉入、簿冊別、使用群組共 7 個查詢條件，表格欄位 13 個。善用 snapshot 中的 `combobox option` 列表確認所有選項。
+
+### SB09 開關帳（12月份 × 3欄矩陣）
+SB09 詳細頁是 12 個月 × 3 欄（銷項/進項/是否已申報）的矩陣表單，搭配提醒文字說明開關帳條件。用 table 或 grid 佈局，而非標準 Form.Group。
+
+### SB10 不合邏輯統編（多個文字輸入）
+SB10 詳細頁有約 20 個統編輸入框（分 5 列 × 4 欄），建議用陣列 state 管理：`unlogicTaxIds: string[]`。
+
+## SB 模組快速對照
+
+| 模組 | 頁面 | 特殊說明 |
+|------|------|---------|
+| SB01 | 查詢、新增、檢視、匯入 | 標準 CRUD + 匯入 |
+| SB02 | 查詢、編輯、檢視 | 無新增刪除，僅編輯 |
+| SB03 | 查詢（+ 匯入客服用、檢視） | 查詢無操作按鈕 |
+| SB04 | 查詢、配號設定 | 配號用 Modal，分有下層/單一公司 |
+| SB05 | 查詢、新增修改、檢視 | 有 `新增&修改` 合一頁 |
+| SB06 | 查詢、新增、修改、檢視 | 含 AR Type/ARCM Type/名單設定 |
+| SB07 | 查詢、詳細（多 Tab） | 6個Tab，統編Picker，無新增刪除 |
+| SB08 | 查詢 | 7個查詢條件，13欄表格，統編Picker |
+| SB09 | 查詢、新增修改 | 12月×3欄矩陣，新增年度用Modal |
+| SB10 | 查詢、新增修改 | ~20個統編輸入框，陣列管理 |
 
 ## 輸出目標路徑
 
