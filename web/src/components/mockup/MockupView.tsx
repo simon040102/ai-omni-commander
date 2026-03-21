@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useProjectStore } from '../../stores/projectStore';
 import { useWsStore } from '../../stores/wsStore';
-import type { Agent } from '@omni/shared';
 
 interface MockupFile {
   filename: string;
@@ -10,8 +9,11 @@ interface MockupFile {
 
 export function MockupView() {
   const project = useProjectStore(s => s.projects.find(p => p.id === s.currentProjectId));
-  const axureAgent: Agent | undefined = useProjectStore(s =>
+  const axureAgent = useProjectStore(s =>
     s.agents.find(a => a.projectId === s.currentProjectId && a.role === 'axure' && ['starting', 'running'].includes(a.status))
+  );
+  const erroredAxureAgent = useProjectStore(s =>
+    s.agents.find(a => a.projectId === s.currentProjectId && a.role === 'axure' && a.status === 'error')
   );
   const client = useWsStore(s => s.client);
 
@@ -240,6 +242,24 @@ export function MockupView() {
             className="mt-auto px-3 py-1.5 text-xs rounded bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors"
           >
             停止爬取
+          </button>
+        ) : erroredAxureAgent && axshareUrl ? (
+          <button
+            onClick={() => {
+              if (!client) return;
+              setCrawlingAll(true);
+              client.send({
+                type: 'mockup.crawlAll',
+                id: crypto.randomUUID(),
+                timestamp: new Date().toISOString(),
+                payload: { projectId: project.id, axshareUrl, existingFiles: files.map(f => f.filename) },
+              });
+              setTimeout(() => setCrawlingAll(false), 2000);
+            }}
+            disabled={crawlingAll}
+            className="mt-auto px-3 py-1.5 text-xs rounded bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50 transition-colors"
+          >
+            {crawlingAll ? '派發 Agent...' : '繼續爬取（上次中斷）'}
           </button>
         ) : selected.size > 0 ? (
           <button
