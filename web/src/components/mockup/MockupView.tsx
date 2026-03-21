@@ -198,6 +198,7 @@ export function MockupView() {
                   <div key={code} className="mb-1">
                     {groups.size > 1 && (
                       <div className="flex items-center gap-1.5 px-2 py-0.5 select-none">
+                        <span className="text-xs text-muted-foreground cursor-pointer" onClick={toggleCollapse}>{isCollapsed ? '▶' : '▼'}</span>
                         <input
                           type="checkbox"
                           checked={groupFiles.every(f => selected.has(f.filename))}
@@ -212,7 +213,6 @@ export function MockupView() {
                           className="w-3 h-3 flex-shrink-0"
                         />
                         <div className="flex items-center gap-1 flex-1 cursor-pointer" onClick={toggleCollapse}>
-                          <span className="text-xs text-muted-foreground">{isCollapsed ? '▶' : '▼'}</span>
                           <span className="text-xs font-bold text-muted-foreground uppercase tracking-wide">{code}</span>
                           <span className="text-xs text-muted-foreground">({groupFiles.length})</span>
                         </div>
