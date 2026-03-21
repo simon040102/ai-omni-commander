@@ -308,6 +308,17 @@ export function registerHandlers(
   wsServer.registerHandler('agent.resume', async (msg: WsMessage, ws: WebSocket) => {
     const { payload } = msg as WsAgentResume;
     try {
+      const agentForRoleCheck = getAgent(payload.agentId);
+      if (agentForRoleCheck?.role === 'axure') {
+        logger.warn({ agentId: payload.agentId }, 'Axure agent cannot be resumed — Playwright MCP sessions are ephemeral');
+        wsServer.send(ws, {
+          type: 'error',
+          id: genId(),
+          timestamp: new Date().toISOString(),
+          payload: { code: 'agent.resume_failed', message: 'Axure agent 無法 resume（Playwright MCP session 不可恢復）。請使用 MockupView 的「繼續爬取」按鈕重新派發。' },
+        } as WsMessage);
+        return;
+      }
       await agentManager.resumeAgent(payload.agentId, payload.prompt);
       logger.info({ agentId: payload.agentId }, 'Agent resumed via WS command');
     } catch (err) {
