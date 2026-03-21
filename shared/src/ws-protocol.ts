@@ -386,6 +386,15 @@ export interface WsMockupReload extends WsMessage {
   };
 }
 
+export interface WsMockupCrawlAll extends WsMessage {
+  type: 'mockup.crawlAll';
+  payload: {
+    projectId: string;
+    axshareUrl: string;
+    existingFiles?: string[];  // already-crawled filenames to skip
+  };
+}
+
 // ============================================
 // Global config messages
 // ============================================

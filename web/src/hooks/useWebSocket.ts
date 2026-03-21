@@ -54,9 +54,16 @@ export function useWebSocket() {
         const payload = msg['payload'] as Record<string, unknown>;
 
         switch (type) {
-          case 'projects.list':
-            setProjects(payload['projects'] as Parameters<typeof setProjects>[0]);
+          case 'projects.list': {
+            const incomingProjects = payload['projects'] as Parameters<typeof setProjects>[0];
+            setProjects(incomingProjects);
+            // Restore previously selected project after page refresh
+            const savedId = useProjectStore.getState().currentProjectId;
+            if (savedId && incomingProjects.some(p => p.id === savedId)) {
+              client.send({ type: 'project.getState', payload: { projectId: savedId } });
+            }
             break;
+          }
 
           case 'project.state':
             // Clear all cached outputs on reconnect — fresh outputs will be loaded via project.agentOutputs

@@ -129,9 +129,11 @@ interface ProjectState {
   clearProjectActivity: (projectId: string) => void;
 }
 
+const STORAGE_KEY = 'omni_current_project_id';
+
 export const useProjectStore = create<ProjectState>((set) => ({
   projects: [],
-  currentProjectId: null,
+  currentProjectId: localStorage.getItem(STORAGE_KEY),
   tasks: [],
   agents: [],
   dependencies: [],
@@ -153,6 +155,9 @@ export const useProjectStore = create<ProjectState>((set) => ({
     // Clear activity indicator when switching to a project
     const newActivity = new Set(state.projectsWithActivity);
     if (id) newActivity.delete(id);
+    // Persist selection across page refreshes
+    if (id) localStorage.setItem(STORAGE_KEY, id);
+    else localStorage.removeItem(STORAGE_KEY);
     // Clear project-scoped state when switching projects
     return { currentProjectId: id, projectsWithActivity: newActivity, documents: [], plans: [] };
   }),
