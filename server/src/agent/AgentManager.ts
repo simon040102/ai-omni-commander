@@ -359,6 +359,25 @@ export class AgentManager {
     // If process exists and stdin is writable, try direct write
     if (proc && proc.sendInput(text)) return true;
 
+    // Axure agents use Playwright MCP which cannot survive session resume.
+    // Their sessions are ephemeral — only allow input while the process is actively running.
+    const agentForRoleCheck = getAgent(agentId);
+    if (agentForRoleCheck?.role === 'axure') {
+      logger.warn({ agentId }, 'Axure agent is not running — cannot resume (Playwright MCP sessions are ephemeral)');
+      await this.eventBus.emit({
+        type: 'agent.output',
+        source: agentId,
+        payload: {
+          agentId,
+          projectId: agentForRoleCheck.projectId,
+          streamType: 'system',
+          content: '[SYSTEM] Axure agent 已停止，無法 resume（Playwright MCP session 不可恢復）。請使用 MockupView 的「繼續爬取」按鈕重新派發。',
+        },
+        timestamp: new Date().toISOString(),
+      });
+      return false;
+    }
+
     // Get session ID from process or database
     let sessionId = proc?.sessionId;
     logger.info({ agentId, sessionIdFromProc: sessionId }, 'Checking sessionId from process');
