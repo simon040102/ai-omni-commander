@@ -10,6 +10,7 @@ import type {
   WsWorkspaceScan, WsWorkspaceGenerateSkills,
   WsSvnBrowse, WsSvnPreview,
   WsMockupReload,
+  WsMockupCrawlAll,
   AgentRole,
 } from '@omni/shared';
 import type { SvnConfig } from '@omni/shared';
@@ -37,6 +38,8 @@ import { loadSuperpowersPrompt } from '../skills/superpowers/index.js';
 import type { SuperpowersFeature } from '@omni/shared';
 import type { QuickModeHandler } from '../orchestrator/QuickModeHandler.js';
 import type { DocumentParser } from '../documents/DocumentParser.js';
+import { mkdirSync } from 'node:fs';
+import { join, dirname } from 'node:path';
 
 const logger = createChildLogger('MessageRouter');
 
@@ -80,6 +83,12 @@ export function registerHandlers(
       configJson,
     });
     logger.info({ projectId: project.id, name: project.name }, 'Project created');
+
+    // Auto-create axure-snapshots directory for the new project
+    try {
+      const snapshotsDir = join(dirname(getConfig().dbPath), '..', 'docs', 'axure-snapshots', project.id);
+      mkdirSync(snapshotsDir, { recursive: true });
+    } catch { /* non-critical */ }
 
     // Broadcast updated project list to ALL clients
     const allProjects = listProjects();
@@ -407,13 +416,21 @@ export function registerHandlers(
           nodePath.default.dirname(getConfig().dbPath), '..', 'docs', 'axure-snapshots', payload.projectId,
         );
         if (nodeFs.default.existsSync(snapshotsDir)) {
-          const htmlFiles = nodeFs.default.readdirSync(snapshotsDir).filter(f => f.endsWith('.html'));
+          const htmlFiles = nodeFs.default.readdirSync(snapshotsDir).filter(f => f.endsWith('.html')).sort();
           if (htmlFiles.length > 0) {
-            const sections = htmlFiles.map(f => {
-              const content = nodeFs.default.readFileSync(nodePath.default.join(snapshotsDir, f), 'utf-8');
-              return `### ${f}\n\`\`\`html\n${content}\n\`\`\``;
-            });
-            parts.push(`## Axure 原型 HTML 快照\n以下為此專案的 UI 規格快照，請參考這些內容了解畫面佈局與互動：\n\n${sections.join('\n\n')}`);
+            // Group by function code (leading alphanumeric prefix before first '-')
+            const groups = new Map<string, string[]>();
+            for (const f of htmlFiles) {
+              const code = f.match(/^([a-zA-Z0-9]+)-/)?.[1]?.toUpperCase() ?? 'OTHER';
+              if (!groups.has(code)) groups.set(code, []);
+              groups.get(code)!.push(nodePath.default.join(snapshotsDir, f).replace(/\\/g, '/'));
+            }
+            const lines: string[] = [];
+            for (const [code, paths] of groups) {
+              lines.push(`**${code}**`);
+              for (const p of paths) lines.push(`  - ${p}`);
+            }
+            parts.push(`## Axure 原型 HTML 快照\n需要了解某功能的 UI 規格時，請用 Read tool 讀取對應的 HTML 檔案：\n\n${lines.join('\n')}`);
           }
         }
       }
@@ -1281,6 +1298,8 @@ export function registerHandlers(
     const fileList = filenames.map(f => `- ${f}`).join('\n');
     const prompt = `Use the /crawl-axure-snapshots skill to re-crawl the following Axure snapshot pages.
 
+IMPORTANT: Use ONLY mcp__playwright__browser_navigate and mcp__playwright__browser_evaluate. Do NOT use browser_take_screenshot or browser_resize — the workflow is pure JS coordinate analysis, no screenshots needed. Do NOT run playwright via Node.js scripts or npm/npx.
+
 Axure Share base URL: ${axshareUrl}
 Project ID: ${projectId}
 Output directory: docs/axure-snapshots/${projectId}/
@@ -1288,11 +1307,18 @@ Output directory: docs/axure-snapshots/${projectId}/
 Pages to re-crawl (filenames tell you the module and page type):
 ${fileList}
 
-For each filename like "sl01-查詢.html":
-- Module code: sl01
-- Page type: 查詢
-- Construct the Axure URL using the base URL and page name pattern from the crawl-axure-snapshots skill
-- Save the cleaned HTML to docs/axure-snapshots/${projectId}/{filename}
+For each filename like "sb01-查詢.html" (module: sb01, page type: 查詢):
+1. browser_close → close any existing browser
+2. browser_navigate → direct .html URL for the page
+3. browser_evaluate → hide chrome elements
+4. browser_evaluate → JS Step 1: field labels sorted by y coordinate
+5. browser_evaluate → JS Step 2: x coordinates for same-row fields
+6. browser_evaluate → JS Step 3: input/select/textarea types, options, defaults
+7. browser_evaluate → JS Step 3.5: large custom components (height > 80px, non-standard tags)
+8. Write semantic HTML from JS data, save with Write tool to docs/axure-snapshots/${projectId}/{filename}
+9. browser_evaluate → JS Step 4: verify buttons
+
+Browser stuck rule: if the browser fails or hangs 3 times in total (across all pages), stop immediately and end with [TASK_COMPLETE] noting which pages were completed.
 
 When all pages are saved, end with [TASK_COMPLETE].`;
 
@@ -1300,7 +1326,52 @@ When all pages are saved, end with [TASK_COMPLETE].`;
       projectId,
       role: 'axure',
       prompt,
-      workingDir: process.cwd(),
+      workingDir: getConfig().projectRoot,
+    });
+  });
+
+  // MOCKUP.CRAWL_ALL — initial crawl: fetch sitemap then crawl all pages
+  wsServer.registerHandler('mockup.crawlAll', async (msg: WsMessage, _ws: WebSocket) => {
+    const { projectId, axshareUrl, existingFiles } = (msg as WsMockupCrawlAll).payload;
+    const project = getProject(projectId);
+    if (!project) return;
+
+    const skipSection = existingFiles && existingFiles.length > 0
+      ? `\nAlready crawled (SKIP these):\n${existingFiles.map(f => `- ${f}`).join('\n')}\n`
+      : '';
+
+    const prompt = `Use the /crawl-axure-snapshots skill to crawl ALL pages from this Axure Share project.
+
+IMPORTANT: Use ONLY mcp__playwright__browser_navigate and mcp__playwright__browser_evaluate (Playwright MCP tools). Do NOT use browser_take_screenshot or browser_resize — the workflow is pure JS coordinate analysis, no screenshots needed. Do NOT run playwright via Node.js scripts or npm/npx.
+
+Axure Share URL: ${axshareUrl}
+Project ID: ${projectId}
+Output directory: docs/axure-snapshots/${projectId}/${skipSection}
+
+Workflow per page (Method A from the skill — pure JS, no screenshots):
+1. browser_close → close any existing browser
+2. browser_navigate → direct .html URL for the page (preferred over shell URL)
+3. browser_evaluate → hide chrome elements
+4. browser_evaluate → JS Step 1: get all field labels sorted by y coordinate
+5. browser_evaluate → JS Step 2: get x coordinates for fields that appear to be on the same row
+6. browser_evaluate → JS Step 3: get input/select/textarea types, options, default values
+7. browser_evaluate → JS Step 3.5: detect large custom components (WYSIWYG editors, file widgets) by height > 80px filter
+8. Write semantic HTML based on the JS coordinate data (NOT from screenshots)
+9. Write tool → save to docs/axure-snapshots/${projectId}/{module_code}-{page_type}.html
+10. browser_evaluate → JS Step 4: verify button list matches HTML
+
+To get all page names: navigate to the Axure Share base URL and run:
+  () => { const flat = []; const walk = (nodes) => nodes.forEach(n => { flat.push({name: n.pageName, id: n.id, url: n.url}); if (n.children) walk(n.children); }); walk(window.$axure.document.sitemap.rootNodes); return flat; }
+
+Browser stuck rule: if the browser fails or hangs 3 times in total (across all pages), stop immediately and end with [TASK_COMPLETE] noting which pages were completed.
+
+When all pages are saved, end with [TASK_COMPLETE].`;
+
+    await agentManager.startAgent({
+      projectId,
+      role: 'axure',
+      prompt,
+      workingDir: getConfig().projectRoot,
     });
   });
 

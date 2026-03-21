@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useProjectStore } from '../../stores/projectStore';
 import { useWsStore } from '../../stores/wsStore';
+import type { Agent } from '@omni/shared';
 
 interface MockupFile {
   filename: string;
@@ -9,6 +10,9 @@ interface MockupFile {
 
 export function MockupView() {
   const project = useProjectStore(s => s.projects.find(p => p.id === s.currentProjectId));
+  const axureAgent: Agent | undefined = useProjectStore(s =>
+    s.agents.find(a => a.projectId === s.currentProjectId && a.role === 'axure' && ['starting', 'running'].includes(a.status))
+  );
   const client = useWsStore(s => s.client);
 
   const [files, setFiles] = useState<MockupFile[]>([]);
@@ -16,6 +20,7 @@ export function MockupView() {
   const [previewFile, setPreviewFile] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [reloading, setReloading] = useState(false);
+  const [crawlingAll, setCrawlingAll] = useState(false);
 
   const axshareUrl: string = (() => {
     try { return JSON.parse(project?.configJson || '{}')?.axshareUrl || ''; } catch { return ''; }
@@ -34,6 +39,13 @@ export function MockupView() {
   }, [project]);
 
   useEffect(() => { fetchFiles(); }, [fetchFiles]);
+
+  // Auto-refresh while axure agent is running
+  useEffect(() => {
+    if (!axureAgent) return;
+    const interval = setInterval(fetchFiles, 5000);
+    return () => clearInterval(interval);
+  }, [axureAgent, fetchFiles]);
 
   const toggleSelect = (filename: string) => {
     setSelected(prev => {
@@ -99,9 +111,47 @@ export function MockupView() {
         {loading ? (
           <div className="text-xs text-muted-foreground">載入中...</div>
         ) : files.length === 0 ? (
-          <div className="text-xs text-muted-foreground">
-            無 HTML 檔案<br />
-            <span className="text-[11px]">docs/axure-snapshots/{project.id}/</span>
+          <div className="flex flex-col gap-2">
+            <div className="text-xs text-muted-foreground">
+              無 HTML 檔案<br />
+              <span className="text-[11px]">docs/axure-snapshots/{project.id}/</span>
+            </div>
+            {axshareUrl && (
+              axureAgent ? (
+                <button
+                  onClick={() => {
+                    if (!client) return;
+                    client.send({
+                      type: 'agent.action',
+                      id: crypto.randomUUID(),
+                      timestamp: new Date().toISOString(),
+                      payload: { action: 'stop', agentId: axureAgent.id },
+                    });
+                  }}
+                  className="px-3 py-1.5 text-xs rounded bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors"
+                >
+                  停止爬取
+                </button>
+              ) : (
+                <button
+                  onClick={() => {
+                    if (!client) return;
+                    setCrawlingAll(true);
+                    client.send({
+                      type: 'mockup.crawlAll',
+                      id: crypto.randomUUID(),
+                      timestamp: new Date().toISOString(),
+                      payload: { projectId: project.id, axshareUrl, existingFiles: files.map(f => f.filename) },
+                    });
+                    setTimeout(() => setCrawlingAll(false), 2000);
+                  }}
+                  disabled={crawlingAll}
+                  className="px-3 py-1.5 text-xs rounded bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                >
+                  {crawlingAll ? '派發 Agent...' : '爬取全部頁面'}
+                </button>
+              )
+            )}
           </div>
         ) : (
           <>
@@ -114,36 +164,84 @@ export function MockupView() {
               />
               <span>全選 ({files.length})</span>
             </div>
-            <div className="flex-1 overflow-y-auto space-y-0.5">
-              {files.map(f => (
-                <div
-                  key={f.filename}
-                  className={`flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer text-xs transition-colors ${
-                    previewFile === f.filename
-                      ? 'bg-primary/10 text-primary'
-                      : 'hover:bg-muted text-foreground'
-                  }`}
-                  onClick={() => setPreviewFile(f.filename)}
-                >
-                  <input
-                    type="checkbox"
-                    checked={selected.has(f.filename)}
-                    onChange={(e) => { e.stopPropagation(); toggleSelect(f.filename); }}
-                    className="w-3 h-3 flex-shrink-0"
-                  />
-                  <div className="flex-1 min-w-0">
-                    <div className="truncate font-mono">{f.filename}</div>
-                    <div className="text-[10px] text-muted-foreground">
-                      {new Date(f.updatedAt).toLocaleDateString('zh-TW')}
-                    </div>
+            <div className="flex-1 overflow-y-auto">
+              {(() => {
+                // Group by function code (leading alphanumeric prefix before first '-')
+                const groups = new Map<string, MockupFile[]>();
+                for (const f of files) {
+                  const code = f.filename.match(/^([a-zA-Z0-9]+)-/)?.[1]?.toUpperCase() ?? '';
+                  const key = code || f.filename;
+                  if (!groups.has(key)) groups.set(key, []);
+                  groups.get(key)!.push(f);
+                }
+                return [...groups.entries()].map(([code, groupFiles]) => (
+                  <div key={code} className="mb-1">
+                    {groups.size > 1 && (
+                      <div
+                        className="flex items-center gap-1.5 px-2 py-0.5 cursor-pointer select-none"
+                        onClick={() => {
+                          const allSelected = groupFiles.every(f => selected.has(f.filename));
+                          setSelected(prev => {
+                            const next = new Set(prev);
+                            groupFiles.forEach(f => allSelected ? next.delete(f.filename) : next.add(f.filename));
+                            return next;
+                          });
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={groupFiles.every(f => selected.has(f.filename))}
+                          onChange={() => {}}
+                          className="w-3 h-3 flex-shrink-0"
+                        />
+                        <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-wide">{code}</span>
+                        <span className="text-[10px] text-muted-foreground">({groupFiles.length})</span>
+                      </div>
+                    )}
+                    {groupFiles.map(f => (
+                      <div
+                        key={f.filename}
+                        className={`flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer text-xs transition-colors ${
+                          previewFile === f.filename ? 'bg-primary/10 text-primary' : 'hover:bg-muted text-foreground'
+                        } ${groups.size > 1 ? 'pl-5' : ''}`}
+                        onClick={() => setPreviewFile(f.filename)}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={selected.has(f.filename)}
+                          onChange={(e) => { e.stopPropagation(); toggleSelect(f.filename); }}
+                          className="w-3 h-3 flex-shrink-0"
+                        />
+                        <div className="flex-1 min-w-0">
+                          <div className="truncate font-mono">
+                            {f.filename.replace(/^[a-zA-Z0-9]+-/, '')}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
                   </div>
-                </div>
-              ))}
+                ));
+              })()}
             </div>
           </>
         )}
 
-        {selected.size > 0 && (
+        {axureAgent ? (
+          <button
+            onClick={() => {
+              if (!client) return;
+              client.send({
+                type: 'agent.action',
+                id: crypto.randomUUID(),
+                timestamp: new Date().toISOString(),
+                payload: { action: 'stop', agentId: axureAgent.id },
+              });
+            }}
+            className="mt-auto px-3 py-1.5 text-xs rounded bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors"
+          >
+            停止爬取
+          </button>
+        ) : selected.size > 0 ? (
           <button
             onClick={handleReload}
             disabled={reloading || !axshareUrl}
@@ -151,7 +249,25 @@ export function MockupView() {
           >
             {reloading ? '派發 Agent...' : `Reload (${selected.size})`}
           </button>
-        )}
+        ) : axshareUrl ? (
+          <button
+            onClick={() => {
+              if (!client) return;
+              setCrawlingAll(true);
+              client.send({
+                type: 'mockup.crawlAll',
+                id: crypto.randomUUID(),
+                timestamp: new Date().toISOString(),
+                payload: { projectId: project.id, axshareUrl, existingFiles: files.map(f => f.filename) },
+              });
+              setTimeout(() => setCrawlingAll(false), 2000);
+            }}
+            disabled={crawlingAll}
+            className="mt-auto px-3 py-1.5 text-xs rounded bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors"
+          >
+            {crawlingAll ? '派發 Agent...' : '爬取全部頁面'}
+          </button>
+        ) : null}
       </div>
 
       {/* Right: preview */}

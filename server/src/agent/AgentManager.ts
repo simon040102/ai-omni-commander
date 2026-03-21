@@ -184,7 +184,18 @@ export class AgentManager {
       }
       this.processes.delete(agentId);
     } else {
-      logger.info({ agentId }, 'Agent not in process map — syncing stale status');
+      // Process not in map (e.g. after server restart) — try kill by PID from DB
+      const agent = getAgent(agentId);
+      if (agent?.pid) {
+        try {
+          process.kill(agent.pid, 'SIGTERM');
+          logger.info({ agentId, pid: agent.pid }, 'Killed orphaned agent process by PID');
+        } catch {
+          logger.info({ agentId, pid: agent.pid }, 'Agent PID not found (already exited)');
+        }
+      } else {
+        logger.info({ agentId }, 'Agent not in process map — syncing stale status');
+      }
     }
 
     this.clearWatchdog(agentId);

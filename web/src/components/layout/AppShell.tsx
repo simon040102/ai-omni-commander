@@ -12,8 +12,13 @@ interface AppShellProps {
   children: (view: View, onViewChange: (v: View) => void) => React.ReactNode;
 }
 
+const VIEW_STORAGE_KEY = 'omni_current_view';
+
 export function AppShell({ children }: AppShellProps) {
-  const [currentView, setCurrentView] = useState<View>('home');
+  const [currentView, setCurrentView] = useState<View>(() => {
+    const saved = localStorage.getItem(VIEW_STORAGE_KEY) as View | null;
+    return saved ?? 'home';
+  });
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const agents = useProjectStore(s => s.agents);
   const hasAutoSwitched = useRef(false);
@@ -23,6 +28,7 @@ export function AppShell({ children }: AppShellProps) {
   const handleViewChange = (view: View) => {
     userHasNavigated.current = true;
     setCurrentView(view);
+    localStorage.setItem(VIEW_STORAGE_KEY, view);
   };
 
   // Initialize WebSocket connection
