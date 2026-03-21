@@ -116,7 +116,7 @@ export function MockupView() {
         </div>
 
         {!axshareUrl && (
-          <div className="text-[11px] text-yellow-500 bg-yellow-500/10 rounded px-2 py-1">
+          <div className="text-sm text-yellow-500 bg-yellow-500/10 rounded px-2 py-1">
             尚未設定 Axure Share URL（Project Settings）
           </div>
         )}
@@ -127,7 +127,7 @@ export function MockupView() {
           <div className="flex flex-col gap-2">
             <div className="text-xs text-muted-foreground">
               無 HTML 檔案<br />
-              <span className="text-[11px]">docs/axure-snapshots/{project.id}/</span>
+              <span className="text-sm">docs/axure-snapshots/{project.id}/</span>
             </div>
             {axshareUrl && (
               axureAgent ? (
@@ -212,9 +212,9 @@ export function MockupView() {
                           className="w-3 h-3 flex-shrink-0"
                         />
                         <div className="flex items-center gap-1 flex-1 cursor-pointer" onClick={toggleCollapse}>
-                          <span className="text-[10px] text-muted-foreground">{isCollapsed ? '▶' : '▼'}</span>
-                          <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-wide">{code}</span>
-                          <span className="text-[10px] text-muted-foreground">({groupFiles.length})</span>
+                          <span className="text-xs text-muted-foreground">{isCollapsed ? '▶' : '▼'}</span>
+                          <span className="text-xs font-bold text-muted-foreground uppercase tracking-wide">{code}</span>
+                          <span className="text-xs text-muted-foreground">({groupFiles.length})</span>
                         </div>
                       </div>
                     )}
