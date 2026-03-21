@@ -1318,6 +1318,10 @@ For each filename like "sb01-查詢.html" (module: sb01, page type: 查詢):
 8. Write semantic HTML from JS data, save with Write tool to docs/axure-snapshots/${projectId}/{filename}
 9. browser_evaluate → JS Step 4: verify buttons
 
+Context compaction recovery: if your context was compacted and you are unsure which pages remain, run:
+  Bash: ls docs/axure-snapshots/${projectId}/
+Then compare with the full sitemap page list and continue with the pages not yet saved.
+
 Browser stuck rule: if the browser fails or hangs 3 times in total (across all pages), stop immediately and end with [TASK_COMPLETE] noting which pages were completed.
 
 When all pages are saved, end with [TASK_COMPLETE].`;
@@ -1362,6 +1366,10 @@ Workflow per page (Method A from the skill — pure JS, no screenshots):
 
 To get all page names: navigate to the Axure Share base URL and run:
   () => { const flat = []; const walk = (nodes) => nodes.forEach(n => { flat.push({name: n.pageName, id: n.id, url: n.url}); if (n.children) walk(n.children); }); walk(window.$axure.document.sitemap.rootNodes); return flat; }
+
+Context compaction recovery: if your context was compacted and you are unsure which pages remain, run:
+  Bash: ls docs/axure-snapshots/${projectId}/
+Then compare with the full sitemap page list and continue with the pages not yet saved.
 
 Browser stuck rule: if the browser fails or hangs 3 times in total (across all pages), stop immediately and end with [TASK_COMPLETE] noting which pages were completed.
 
