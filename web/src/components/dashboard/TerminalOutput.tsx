@@ -535,14 +535,20 @@ export function TerminalOutput({ outputs, title, role, status, agentId, projectI
 
       {/* Command input */}
       {agentId && onSendCommand && (() => {
-        // Allow sending to running, starting, or stopped agents (stopped agents can be resumed)
-        const canSend = status === 'running' || status === 'starting' || status === 'stopped';
+        // Axure agents use Playwright MCP which can't survive session resume —
+        // only allow input while actively running; use UI buttons for restart.
+        const isAxure = role === 'axure';
+        const canSend = isAxure
+          ? (status === 'running' || status === 'starting')
+          : (status === 'running' || status === 'starting' || status === 'stopped');
         const isRunning = status === 'running' || status === 'starting';
         const placeholder = isRunning
           ? 'Send instruction to agent... (Ctrl+V to paste images)'
-          : status === 'stopped'
-            ? 'Send to resume agent session...'
-            : 'Agent is not available';
+          : isAxure
+            ? '爬取完成或出錯請使用 MockupView 的按鈕繼續'
+            : status === 'stopped'
+              ? 'Send to resume agent session...'
+              : 'Agent is not available';
 
         const handleSubmit = (e: React.FormEvent) => {
           e.preventDefault();
