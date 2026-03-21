@@ -23,6 +23,7 @@ export function MockupView() {
   const [loading, setLoading] = useState(false);
   const [reloading, setReloading] = useState(false);
   const [crawlingAll, setCrawlingAll] = useState(false);
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
 
   const axshareUrl: string = (() => {
     try { return JSON.parse(project?.configJson || '{}')?.axshareUrl || ''; } catch { return ''; }
@@ -34,7 +35,17 @@ export function MockupView() {
     try {
       const res = await fetch(`/api/projects/${project.id}/mockups`);
       const data = await res.json() as { files: MockupFile[] };
-      setFiles(data.files || []);
+      const newFiles: MockupFile[] = data.files || [];
+      setFiles(newFiles);
+      // Collapse any newly appeared group codes by default
+      setCollapsedGroups(prev => {
+        const next = new Set(prev);
+        newFiles.forEach(f => {
+          const code = f.filename.match(/^([a-zA-Z0-9]+)-/)?.[1]?.toUpperCase() ?? f.filename;
+          if (!next.has(code)) next.add(code);
+        });
+        return next;
+      });
     } finally {
       setLoading(false);
     }
@@ -176,31 +187,38 @@ export function MockupView() {
                   if (!groups.has(key)) groups.set(key, []);
                   groups.get(key)!.push(f);
                 }
-                return [...groups.entries()].map(([code, groupFiles]) => (
+                return [...groups.entries()].map(([code, groupFiles]) => {
+                  const isCollapsed = collapsedGroups.has(code);
+                  const toggleCollapse = () => setCollapsedGroups(prev => {
+                    const next = new Set(prev);
+                    next.has(code) ? next.delete(code) : next.add(code);
+                    return next;
+                  });
+                  return (
                   <div key={code} className="mb-1">
                     {groups.size > 1 && (
-                      <div
-                        className="flex items-center gap-1.5 px-2 py-0.5 cursor-pointer select-none"
-                        onClick={() => {
-                          const allSelected = groupFiles.every(f => selected.has(f.filename));
-                          setSelected(prev => {
-                            const next = new Set(prev);
-                            groupFiles.forEach(f => allSelected ? next.delete(f.filename) : next.add(f.filename));
-                            return next;
-                          });
-                        }}
-                      >
+                      <div className="flex items-center gap-1.5 px-2 py-0.5 select-none">
                         <input
                           type="checkbox"
                           checked={groupFiles.every(f => selected.has(f.filename))}
-                          onChange={() => {}}
+                          onChange={() => {
+                            const allSelected = groupFiles.every(f => selected.has(f.filename));
+                            setSelected(prev => {
+                              const next = new Set(prev);
+                              groupFiles.forEach(f => allSelected ? next.delete(f.filename) : next.add(f.filename));
+                              return next;
+                            });
+                          }}
                           className="w-3 h-3 flex-shrink-0"
                         />
-                        <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-wide">{code}</span>
-                        <span className="text-[10px] text-muted-foreground">({groupFiles.length})</span>
+                        <div className="flex items-center gap-1 flex-1 cursor-pointer" onClick={toggleCollapse}>
+                          <span className="text-[10px] text-muted-foreground">{isCollapsed ? '▶' : '▼'}</span>
+                          <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-wide">{code}</span>
+                          <span className="text-[10px] text-muted-foreground">({groupFiles.length})</span>
+                        </div>
                       </div>
                     )}
-                    {groupFiles.map(f => (
+                    {!isCollapsed && groupFiles.map(f => (
                       <div
                         key={f.filename}
                         className={`flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer text-xs transition-colors ${
@@ -222,7 +240,7 @@ export function MockupView() {
                       </div>
                     ))}
                   </div>
-                ));
+                )});
               })()}
             </div>
           </>
