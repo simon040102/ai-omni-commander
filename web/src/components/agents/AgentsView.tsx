@@ -502,7 +502,7 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
               const agentOutputs = outputs[agent.id] || [];
               const toolCalls = agentOutputs.filter(o => o.streamType === 'tool_use').length;
               const agentProgress = progress[agent.id];
-              const canResume = agent.status === 'error' && agent.sessionId;
+              const canResume = agent.status === 'error' && agent.sessionId && agent.role !== 'axure';
 
               return (
                 <div
