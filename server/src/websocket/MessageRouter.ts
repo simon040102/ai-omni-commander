@@ -150,7 +150,7 @@ export function registerHandlers(
     const specHandler = orchestrator.getSpecHandler();
     await specHandler.uploadDocument(
       payload.projectId, payload.filename, payload.content, payload.fileType,
-      payload.docType, payload.taskId, payload.agentId,
+      payload.docType, payload.taskId, payload.agentId, payload.executionRunId,
     );
 
     const docs = specHandler.getDocumentParser().getDocuments(payload.projectId);
@@ -184,6 +184,7 @@ export function registerHandlers(
       role: payload.role,
       mockupFiles: payload.mockupFiles,
       testOptions: payload.testOptions,
+      executionRunId: payload.executionRunId,
     });
   });
 

@@ -44,6 +44,7 @@ export interface WsUploadDocument extends WsMessage {
     docType?: DocType;
     taskId?: string; // If set, file is stored in per-task subfolder
     agentId?: string; // If set, file is stored in per-agent subfolder
+    executionRunId?: string; // If set, file is scoped to this execution run (nested under task subfolder)
   };
 }
 
@@ -70,6 +71,7 @@ export interface WsStartExecution extends WsMessage {
     role?: string;
     mockupFiles?: string[];
     testOptions?: TestOptions;
+    executionRunId?: string; // Scopes task attachments to this execution run only
   };
 }
 

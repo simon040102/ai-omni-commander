@@ -226,7 +226,7 @@ export function TaskList({ selectedModel }: TaskListProps) {
     });
   }, [currentProjectId, client]);
 
-  const handleExecuteTask = useCallback((taskId: string, modelOverride?: string, mockupFiles?: string[], testOptions?: TestOptions) => {
+  const handleExecuteTask = useCallback((taskId: string, modelOverride?: string, mockupFiles?: string[], testOptions?: TestOptions, executionRunId?: string) => {
     if (!currentProjectId || !client) return;
     const model = modelOverride || selectedModel;
 
@@ -240,6 +240,7 @@ export function TaskList({ selectedModel }: TaskListProps) {
         model,
         ...(mockupFiles && mockupFiles.length > 0 ? { mockupFiles } : {}),
         ...(testOptions ? { testOptions } : {}),
+        ...(executionRunId ? { executionRunId } : {}),
       },
     });
 
@@ -247,7 +248,7 @@ export function TaskList({ selectedModel }: TaskListProps) {
     setExpandedTaskId(null);
   }, [currentProjectId, client, selectedModel, addToast]);
 
-  const handleUploadImage = useCallback((taskId: string, file: File) => {
+  const handleUploadImage = useCallback((taskId: string, file: File, executionRunId?: string) => {
     if (!currentProjectId || !client) return;
 
     const reader = new FileReader();
@@ -264,6 +265,7 @@ export function TaskList({ selectedModel }: TaskListProps) {
           content: base64,
           fileType: file.type || 'image/png',
           docType: 'SD',
+          ...(executionRunId ? { executionRunId } : {}),
         },
       });
       addToast({ type: 'success', title: 'Image uploaded', message: file.name });
@@ -271,7 +273,7 @@ export function TaskList({ selectedModel }: TaskListProps) {
     reader.readAsDataURL(file);
   }, [currentProjectId, client, addToast]);
 
-  const handleUploadDoc = useCallback((taskId: string, file: File, docType: 'SA' | 'SD') => {
+  const handleUploadDoc = useCallback((taskId: string, file: File, docType: 'SA' | 'SD', executionRunId?: string) => {
     if (!currentProjectId || !client) return;
 
     const reader = new FileReader();
@@ -288,6 +290,7 @@ export function TaskList({ selectedModel }: TaskListProps) {
           content: base64,
           fileType: file.type || 'application/octet-stream',
           docType,
+          ...(executionRunId ? { executionRunId } : {}),
         },
       });
       addToast({ type: 'success', title: `${docType} document uploaded`, message: file.name });
@@ -715,12 +718,12 @@ interface SvnPreviewFile {
 function TaskRow({ task, expandedTaskId, onExecute, onDelete, onToggleExpand, onUpdate, onUploadDoc, onUploadImage, hasSvnConfig, onBrowseSvn }: {
   task: Task;
   expandedTaskId: string | null;
-  onExecute: (id: string, model?: string, mockupFiles?: string[], testOptions?: TestOptions) => void;
+  onExecute: (id: string, model?: string, mockupFiles?: string[], testOptions?: TestOptions, executionRunId?: string) => void;
   onDelete: (id: string) => void;
   onToggleExpand: (id: string) => void;
   onUpdate: (id: string, updates: { description?: string | null; label?: string; taskType?: TaskType }) => void;
-  onUploadDoc: (taskId: string, file: File, docType: 'SA' | 'SD') => void;
-  onUploadImage: (taskId: string, file: File) => void;
+  onUploadDoc: (taskId: string, file: File, docType: 'SA' | 'SD', executionRunId?: string) => void;
+  onUploadImage: (taskId: string, file: File, executionRunId?: string) => void;
   hasSvnConfig?: boolean;
   onBrowseSvn?: (specType: 'frontend' | 'backend', onSelect: (url: string) => void) => void;
 }) {
@@ -919,11 +922,11 @@ function TaskRow({ task, expandedTaskId, onExecute, onDelete, onToggleExpand, on
 function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvnConfig, onBrowseSvn, onExecute, svnPreviewFiles, svnPreviewLoading, svnPreviewError, onAddSvnFile, onRemoveSvnFile, onReloadSvn }: {
   task: Task;
   onUpdate: (id: string, updates: { description?: string | null; label?: string; taskType?: TaskType }) => void;
-  onUploadDoc: (taskId: string, file: File, docType: 'SA' | 'SD') => void;
-  onUploadImage: (taskId: string, file: File) => void;
+  onUploadDoc: (taskId: string, file: File, docType: 'SA' | 'SD', executionRunId?: string) => void;
+  onUploadImage: (taskId: string, file: File, executionRunId?: string) => void;
   hasSvnConfig?: boolean;
   onBrowseSvn?: (specType: 'frontend' | 'backend') => void;
-  onExecute?: (id: string, model?: string, mockupFiles?: string[], testOptions?: TestOptions) => void;
+  onExecute?: (id: string, model?: string, mockupFiles?: string[], testOptions?: TestOptions, executionRunId?: string) => void;
   svnPreviewFiles: SvnPreviewFile[];
   svnPreviewLoading: boolean;
   svnPreviewError: string;
@@ -940,6 +943,9 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
     frontend: { smokeTest: true, e2eSpec: false, useRealApi: false },
     backend: { unitTests: true, apiSmokeTest: false, apiContract: false },
   }));
+  // Each time the task panel is opened, generate a fresh execution run ID.
+  // All file uploads within this session are scoped to this ID.
+  const [executionRunId] = useState(() => crypto.randomUUID());
   const currentProjectId = useProjectStore(s => s.currentProjectId);
   const [editingDesc, setEditingDesc] = useState(false);
   const [descDraft, setDescDraft] = useState(task.description || '');
@@ -987,8 +993,8 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
       setPastedImages(prev => [...prev, { name: file.name, dataUrl: reader.result as string }]);
     };
     reader.readAsDataURL(file);
-    // Upload to server
-    onUploadImage(task.id, file);
+    // Upload to server, scoped to this execution run
+    onUploadImage(task.id, file, executionRunId);
   };
 
   const handleDescPaste = (e: React.ClipboardEvent) => {
@@ -1174,7 +1180,7 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
             <input ref={frontendUploadRef} type="file" accept=".pdf,.doc,.docx,.md,.txt" className="hidden" onChange={e => {
               const file = e.target.files?.[0];
               if (file) {
-                onUploadDoc(task.id, file, 'SA');
+                onUploadDoc(task.id, file, 'SA', executionRunId);
                 setLocalUploadedFiles(prev => [...prev, { filename: file.name, docType: 'SA' }]);
               }
               e.target.value = '';
@@ -1182,7 +1188,7 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
             <input ref={backendUploadRef} type="file" accept=".pdf,.doc,.docx,.md,.txt" className="hidden" onChange={e => {
               const file = e.target.files?.[0];
               if (file) {
-                onUploadDoc(task.id, file, 'SD');
+                onUploadDoc(task.id, file, 'SD', executionRunId);
                 setLocalUploadedFiles(prev => [...prev, { filename: file.name, docType: 'SD' }]);
               }
               e.target.value = '';
@@ -1348,7 +1354,7 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
             if (docType === 'image') {
               handleImageUpload(file);
             } else {
-              onUploadDoc(task.id, file, docType);
+              onUploadDoc(task.id, file, docType, executionRunId);
             }
           }
           e.target.value = '';
@@ -1436,7 +1442,7 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
         </div>
         {onExecute && task.status === 'completed' && (
           <button
-            onClick={() => onExecute(task.id, undefined, [...mockupChecked], testOptions)}
+            onClick={() => onExecute(task.id, undefined, [...mockupChecked], testOptions, executionRunId)}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground text-xs font-medium transition-colors"
           >
             <IconRefresh className="w-3.5 h-3.5" />
@@ -1461,7 +1467,7 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
               </button>
             ))}
             <button
-              onClick={() => onExecute(task.id, execModel, [...mockupChecked], testOptions)}
+              onClick={() => onExecute(task.id, execModel, [...mockupChecked], testOptions, executionRunId)}
               className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-green-600 text-white hover:bg-green-500 font-semibold text-sm transition-colors whitespace-nowrap shadow-sm"
             >
               <IconPlay className="w-4 h-4" />
