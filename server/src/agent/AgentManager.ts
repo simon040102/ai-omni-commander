@@ -7,7 +7,7 @@ import { EventTypes } from '@omni/shared';
 import { AgentProcess } from './AgentProcess.js';
 import { getAgentRoleConfig } from './AgentRoles.js';
 import { ProgressDetector } from './ProgressDetector.js';
-import { createAgent, updateAgent, getAgent, getAgentsByRole, getAgentsByProject } from '../db/queries/agents.js';
+import { createAgent, updateAgent, getAgent, getAgentsByRole, getAgentsByProject, getRunningAgents } from '../db/queries/agents.js';
 import { getProject, updateProject } from '../db/queries/projects.js';
 import { updateTask, getTask } from '../db/queries/tasks.js';
 import { logAgentOutput, createIntervention, clearAgentOutputs, getAgentOutputs } from '../db/queries/events.js';
@@ -22,10 +22,14 @@ const logger = createChildLogger('AgentManager');
 /**
  * Manages the full lifecycle of multiple Claude Code agent processes.
  */
-const INACTIVITY_NUDGE_MS = 5 * 60 * 1000; // 5 minutes
+const INACTIVITY_NUDGE_MS = 3 * 60 * 1000; // 3 minutes of no output → nudge
 const INACTIVITY_CHECK_INTERVAL_MS = 30 * 1000; // check every 30s
-const MAX_NUDGES = 2;
+const MAX_NUDGES = 5; // nudge up to 5 times, then force-fail
 const NUDGE_MESSAGE = '請繼續執行任務。如果你在等待什麼或遇到問題，請說明後繼續。';
+
+/** When agent exits mid-task, auto-resume this many times before accepting completion */
+const MAX_AUTO_RESUMES = 3;
+const AUTO_RESUME_MESSAGE = '請繼續執行任務，直到所有工作都完成為止。';
 
 export class AgentManager {
   private processes = new Map<string, AgentProcess>();
@@ -36,6 +40,10 @@ export class AgentManager {
   private lastOutputAt = new Map<string, number>();
   /** How many times each agent has been nudged */
   private nudgeCount = new Map<string, number>();
+  /** How many times each agent has been auto-resumed after exiting mid-task */
+  private autoResumeCount = new Map<string, number>();
+  /** Agents that have explicitly signaled task completion via [TASK_COMPLETE] */
+  private taskDoneAgents = new Set<string>();
   private watchdogInterval: ReturnType<typeof setInterval>;
 
   constructor(
@@ -49,6 +57,48 @@ export class AgentManager {
   }
 
   private async runWatchdog(): Promise<void> {
+    // --- Zombie check: DB says running but no process exists → auto-resume ---
+    const runningInDb = getRunningAgents();
+    for (const agent of runningInDb) {
+      if (this.processes.has(agent.id)) continue;
+      logger.warn({ agentId: agent.id, status: agent.status }, 'Zombie agent detected — auto-resuming');
+      try {
+        await this.eventBus.emit({
+          type: EventTypes.AGENT_OUTPUT,
+          source: agent.id,
+          payload: {
+            agentId: agent.id,
+            projectId: agent.projectId,
+            streamType: 'system',
+            content: '[WATCHDOG] Agent process 已消失，自動嘗試繼續執行...',
+          },
+          timestamp: new Date().toISOString(),
+        });
+        await this.resumeAgent(agent.id, AUTO_RESUME_MESSAGE);
+      } catch (err) {
+        logger.error({ err, agentId: agent.id }, 'Zombie auto-resume failed — marking stopped');
+        updateAgent(agent.id, { status: 'stopped', pid: null });
+        if (agent.currentTaskId) updateTask(agent.currentTaskId, { status: 'failed' });
+        await this.eventBus.emit({
+          type: EventTypes.AGENT_OUTPUT,
+          source: agent.id,
+          payload: {
+            agentId: agent.id,
+            projectId: agent.projectId,
+            streamType: 'system',
+            content: '[WATCHDOG] 自動重啟失敗，已標記停止。請手動重新執行任務。',
+          },
+          timestamp: new Date().toISOString(),
+        });
+        await this.eventBus.emit({
+          type: 'agent.statusChange',
+          source: agent.id,
+          payload: { agentId: agent.id, previousStatus: agent.status, newStatus: 'stopped' },
+          timestamp: new Date().toISOString(),
+        });
+      }
+    }
+
     if (this.processes.size === 0) return;
     const now = Date.now();
     for (const [agentId] of this.processes) {
@@ -58,9 +108,33 @@ export class AgentManager {
       if (idleMs < INACTIVITY_NUDGE_MS) continue;
 
       const nudges = this.nudgeCount.get(agentId) ?? 0;
-      if (nudges >= MAX_NUDGES) continue;
 
-      logger.warn({ agentId, idleMs: Math.round(idleMs / 1000) }, 'Agent inactive, sending nudge');
+      // Exceeded max nudges → force-stop and mark failed
+      if (nudges >= MAX_NUDGES) {
+        logger.error({ agentId, nudges }, 'Agent exceeded max nudges — force-stopping as failed');
+        try {
+          const agent = getAgent(agentId);
+          await this.eventBus.emit({
+            type: EventTypes.AGENT_OUTPUT,
+            source: agentId,
+            payload: {
+              agentId,
+              projectId: agent?.projectId,
+              streamType: 'system',
+              content: `[WATCHDOG] Agent 連續無回應超過 ${MAX_NUDGES} 次，已強制停止並標記為 failed。請手動重新執行。`,
+            },
+            timestamp: new Date().toISOString(),
+          });
+          await this.stopAgent(agentId);
+          if (agent?.currentTaskId) updateTask(agent.currentTaskId, { status: 'failed' });
+          updateAgent(agentId, { status: 'error' });
+        } catch (err) {
+          logger.error({ err, agentId }, 'Watchdog force-stop failed');
+        }
+        continue;
+      }
+
+      logger.warn({ agentId, idleMs: Math.round(idleMs / 1000), nudge: nudges + 1 }, 'Agent inactive, sending nudge');
       this.nudgeCount.set(agentId, nudges + 1);
       // Reset timer so we don't nudge again immediately
       this.lastOutputAt.set(agentId, now);
@@ -68,13 +142,15 @@ export class AgentManager {
       try {
         await this.sendInputToAgent(agentId, NUDGE_MESSAGE);
         // Emit system message so terminal shows the nudge
+        const agent = getAgent(agentId);
         await this.eventBus.emit({
           type: EventTypes.AGENT_OUTPUT,
           source: agentId,
           payload: {
             agentId,
+            projectId: agent?.projectId,
             streamType: 'system',
-            content: `[WATCHDOG] Agent idle for ${Math.round(idleMs / 60000)} min — auto-nudge sent (${nudges + 1}/${MAX_NUDGES})`,
+            content: `[WATCHDOG] Agent 無回應 ${Math.round(idleMs / 60000)} 分鐘 — 自動戳一下 (${nudges + 1}/${MAX_NUDGES})`,
           },
           timestamp: new Date().toISOString(),
         });
@@ -142,6 +218,7 @@ export class AgentManager {
     this.processes.set(agent.id, proc);
     this.lastOutputAt.set(agent.id, Date.now());
     this.nudgeCount.set(agent.id, 0);
+    this.autoResumeCount.set(agent.id, 0);
 
     // Spawn the process
     await proc.spawn(config.prompt);
@@ -166,6 +243,8 @@ export class AgentManager {
   private clearWatchdog(agentId: string): void {
     this.lastOutputAt.delete(agentId);
     this.nudgeCount.delete(agentId);
+    this.autoResumeCount.delete(agentId);
+    this.taskDoneAgents.delete(agentId);
   }
 
   /** Stop a specific agent.
@@ -546,6 +625,39 @@ export class AgentManager {
   ): Promise<void> {
     this.progressDetector.clear(agentId);
 
+    // --- Auto-resume: if task-based and not errored, resume a few times before accepting completion ---
+    if (taskId && !result.is_error && !this.reviewingAgents.has(agentId) && !this.taskDoneAgents.has(agentId)) {
+      const resumes = this.autoResumeCount.get(agentId) ?? 0;
+      if (resumes < MAX_AUTO_RESUMES) {
+        this.autoResumeCount.set(agentId, resumes + 1);
+        logger.info({ agentId, taskId, resume: resumes + 1, maxResumes: MAX_AUTO_RESUMES },
+          'Agent exited mid-task — auto-resuming');
+        try {
+          await this.eventBus.emit({
+            type: EventTypes.AGENT_OUTPUT,
+            source: agentId,
+            payload: {
+              agentId,
+              projectId,
+              streamType: 'system',
+              content: `[AUTO-RESUME ${resumes + 1}/${MAX_AUTO_RESUMES}] Agent 自行停止，自動繼續執行...`,
+            },
+            timestamp: new Date().toISOString(),
+          });
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          this.processes.delete(agentId);
+          await this.resumeAgent(agentId, AUTO_RESUME_MESSAGE);
+        } catch (err) {
+          logger.error({ err, agentId }, 'Auto-resume failed, proceeding to completion');
+          this.autoResumeCount.delete(agentId);
+          // fall through to normal completion
+        }
+        return;
+      }
+      // All auto-resumes exhausted — proceed to self-review / completion
+      this.autoResumeCount.delete(agentId);
+    }
+
     // --- Self-review: intercept first completion to trigger review ---
     const agent = getAgent(agentId);
     const shouldSelfReview = taskId
@@ -748,6 +860,12 @@ export class AgentManager {
   }
 
   private checkMarkers(agentId: string, projectId: string, taskId: string | null, content: string): void {
+    // [TASK_COMPLETE] — agent explicitly signals it's done; skip auto-resume
+    if (/(?:^|\n)\s*\[TASK_COMPLETE\]/.test(content)) {
+      this.taskDoneAgents.add(agentId);
+      logger.info({ agentId, taskId }, '[TASK_COMPLETE] marker detected — auto-resume disabled');
+    }
+
     // Only match [NEEDS_HUMAN] when it appears as a standalone marker,
     // not when it's embedded in instructional text (e.g. "請加上 [NEEDS_HUMAN]")
     // Match: line starts with it, or it's preceded by whitespace/newline only

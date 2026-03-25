@@ -225,7 +225,7 @@ export function TaskList({ selectedModel }: TaskListProps) {
     });
   }, [currentProjectId, client]);
 
-  const handleExecuteTask = useCallback((taskId: string, modelOverride?: string) => {
+  const handleExecuteTask = useCallback((taskId: string, modelOverride?: string, mockupFiles?: string[]) => {
     if (!currentProjectId || !client) return;
     const model = modelOverride || selectedModel;
 
@@ -237,6 +237,7 @@ export function TaskList({ selectedModel }: TaskListProps) {
         projectId: currentProjectId,
         taskId,
         model,
+        ...(mockupFiles && mockupFiles.length > 0 ? { mockupFiles } : {}),
       },
     });
 
@@ -712,7 +713,7 @@ interface SvnPreviewFile {
 function TaskRow({ task, expandedTaskId, onExecute, onDelete, onToggleExpand, onUpdate, onUploadDoc, onUploadImage, hasSvnConfig, onBrowseSvn }: {
   task: Task;
   expandedTaskId: string | null;
-  onExecute: (id: string, model?: string) => void;
+  onExecute: (id: string, model?: string, mockupFiles?: string[]) => void;
   onDelete: (id: string) => void;
   onToggleExpand: (id: string) => void;
   onUpdate: (id: string, updates: { description?: string | null; label?: string; taskType?: TaskType }) => void;
@@ -920,7 +921,7 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
   onUploadImage: (taskId: string, file: File) => void;
   hasSvnConfig?: boolean;
   onBrowseSvn?: (specType: 'frontend' | 'backend') => void;
-  onExecute?: (id: string, model?: string) => void;
+  onExecute?: (id: string, model?: string, mockupFiles?: string[]) => void;
   svnPreviewFiles: SvnPreviewFile[];
   svnPreviewLoading: boolean;
   svnPreviewError: string;
@@ -939,6 +940,34 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
   const [pastedImages, setPastedImages] = useState<Array<{ name: string; dataUrl: string }>>([]);
   const saInputRef = useRef<HTMLInputElement>(null);
   const imgInputRef = useRef<HTMLInputElement>(null);
+  const frontendUploadRef = useRef<HTMLInputElement>(null);
+  const backendUploadRef = useRef<HTMLInputElement>(null);
+  const [localUploadedFiles, setLocalUploadedFiles] = useState<Array<{ filename: string; docType: 'SA' | 'SD' }>>([]);
+
+  // Mockup discovery state
+  const [mockupCode, setMockupCode] = useState(() => {
+    const m = task.parentName?.match(/^[A-Za-z]+\d+/);
+    return m ? m[0].toUpperCase() : '';
+  });
+  const [mockupResults, setMockupResults] = useState<Array<{ filename: string; fullPath: string }>>([]);
+  const [mockupSearching, setMockupSearching] = useState(false);
+  const [mockupChecked, setMockupChecked] = useState<Set<string>>(new Set());
+
+  const handleMockupSearch = useCallback(async () => {
+    if (!mockupCode || !currentProjectId) return;
+    setMockupSearching(true);
+    try {
+      const res = await fetch(`/api/projects/${currentProjectId}/mockups?code=${encodeURIComponent(mockupCode)}`);
+      const data = await res.json();
+      const files: Array<{ filename: string; fullPath: string }> = data.files || [];
+      setMockupResults(files);
+      setMockupChecked(new Set(files.map(f => f.fullPath)));
+    } catch {
+      setMockupResults([]);
+    } finally {
+      setMockupSearching(false);
+    }
+  }, [mockupCode, currentProjectId]);
 
   const saveDesc = () => {
     onUpdate(task.id, { description: descDraft.trim() || null });
@@ -1101,18 +1130,57 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
                 <IconRefresh className={`w-3.5 h-3.5 ${svnPreviewLoading ? 'animate-spin' : ''}`} />
               </button>
             )}
-            <button
-              onClick={() => onBrowseSvn?.('frontend')}
-              className="px-2.5 py-1 text-xs font-medium rounded border border-blue-500/30 text-blue-400 hover:bg-blue-500/10 transition-colors ml-auto"
-            >
-              + 前端
-            </button>
-            <button
-              onClick={() => onBrowseSvn?.('backend')}
-              className="px-2.5 py-1 text-xs font-medium rounded border border-orange-500/30 text-orange-400 hover:bg-orange-500/10 transition-colors"
-            >
-              + 後端
-            </button>
+            {/* 前端 split button: SVN | 手動上傳 */}
+            <div className="flex items-center ml-auto rounded border border-blue-500/30 overflow-hidden">
+              <button
+                onClick={() => onBrowseSvn?.('frontend')}
+                className="px-2.5 py-1 text-xs font-medium text-blue-400 hover:bg-blue-500/10 transition-colors"
+              >
+                + 前端
+              </button>
+              <div className="w-px bg-blue-500/20 self-stretch" />
+              <button
+                onClick={() => frontendUploadRef.current?.click()}
+                className="px-1.5 py-1 text-blue-400 hover:bg-blue-500/10 transition-colors"
+                title="手動上傳前端規格 (SA)"
+              >
+                <IconUpload className="w-3 h-3" />
+              </button>
+            </div>
+            {/* 後端 split button: SVN | 手動上傳 */}
+            <div className="flex items-center rounded border border-orange-500/30 overflow-hidden">
+              <button
+                onClick={() => onBrowseSvn?.('backend')}
+                className="px-2.5 py-1 text-xs font-medium text-orange-400 hover:bg-orange-500/10 transition-colors"
+              >
+                + 後端
+              </button>
+              <div className="w-px bg-orange-500/20 self-stretch" />
+              <button
+                onClick={() => backendUploadRef.current?.click()}
+                className="px-1.5 py-1 text-orange-400 hover:bg-orange-500/10 transition-colors"
+                title="手動上傳後端規格 (SD)"
+              >
+                <IconUpload className="w-3 h-3" />
+              </button>
+            </div>
+            {/* Hidden file inputs for manual upload */}
+            <input ref={frontendUploadRef} type="file" accept=".pdf,.doc,.docx,.md,.txt" className="hidden" onChange={e => {
+              const file = e.target.files?.[0];
+              if (file) {
+                onUploadDoc(task.id, file, 'SA');
+                setLocalUploadedFiles(prev => [...prev, { filename: file.name, docType: 'SA' }]);
+              }
+              e.target.value = '';
+            }} />
+            <input ref={backendUploadRef} type="file" accept=".pdf,.doc,.docx,.md,.txt" className="hidden" onChange={e => {
+              const file = e.target.files?.[0];
+              if (file) {
+                onUploadDoc(task.id, file, 'SD');
+                setLocalUploadedFiles(prev => [...prev, { filename: file.name, docType: 'SD' }]);
+              }
+              e.target.value = '';
+            }} />
           </div>
           {svnPreviewLoading ? (
             <div className="flex items-center gap-2 py-2">
@@ -1153,8 +1221,53 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
                   )}
                 </div>
               ))}
+              {/* Locally uploaded files */}
+              {localUploadedFiles.map((f, i) => (
+                <div key={`upload-${i}`} className="flex items-center gap-2.5 text-sm group">
+                  <span className={`px-2 py-0.5 rounded text-[10px] font-medium flex-shrink-0 ${
+                    f.docType === 'SA' ? 'bg-blue-500/100/15 text-blue-400' : 'bg-orange-500/100/15 text-orange-400'
+                  }`}>
+                    {f.docType === 'SA' ? '前端' : '後端'}
+                  </span>
+                  <IconCheck className="w-4 h-4 text-green-400 flex-shrink-0" />
+                  <span className="text-foreground/80 truncate flex-1">{f.filename}</span>
+                  <span className="px-1.5 py-0.5 rounded text-[10px] bg-purple-500/15 text-purple-400 flex-shrink-0">已上傳</span>
+                  <button
+                    onClick={() => setLocalUploadedFiles(prev => prev.filter((_, j) => j !== i))}
+                    className="p-1 rounded text-muted-foreground/70 hover:text-red-400 hover:bg-red-500/10 transition-colors opacity-0 group-hover:opacity-100"
+                    title="移除"
+                  >
+                    <IconTrash className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              ))}
               <p className="text-xs text-muted-foreground mt-1.5">
-                以上 {svnPreviewFiles.length} 份文件將於執行時自動下載並注入 Agent context。
+                以上 {svnPreviewFiles.length + localUploadedFiles.length} 份文件將於執行時自動下載並注入 Agent context。
+              </p>
+            </div>
+          ) : localUploadedFiles.length > 0 ? (
+            <div className="space-y-1.5">
+              {localUploadedFiles.map((f, i) => (
+                <div key={`upload-${i}`} className="flex items-center gap-2.5 text-sm group">
+                  <span className={`px-2 py-0.5 rounded text-[10px] font-medium flex-shrink-0 ${
+                    f.docType === 'SA' ? 'bg-blue-500/100/15 text-blue-400' : 'bg-orange-500/100/15 text-orange-400'
+                  }`}>
+                    {f.docType === 'SA' ? '前端' : '後端'}
+                  </span>
+                  <IconCheck className="w-4 h-4 text-green-400 flex-shrink-0" />
+                  <span className="text-foreground/80 truncate flex-1">{f.filename}</span>
+                  <span className="px-1.5 py-0.5 rounded text-[10px] bg-purple-500/15 text-purple-400 flex-shrink-0">已上傳</span>
+                  <button
+                    onClick={() => setLocalUploadedFiles(prev => prev.filter((_, j) => j !== i))}
+                    className="p-1 rounded text-muted-foreground/70 hover:text-red-400 hover:bg-red-500/10 transition-colors opacity-0 group-hover:opacity-100"
+                    title="移除"
+                  >
+                    <IconTrash className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              ))}
+              <p className="text-xs text-muted-foreground mt-1.5">
+                以上 {localUploadedFiles.length} 份文件將於執行時注入 Agent context。
               </p>
             </div>
           ) : (
@@ -1162,6 +1275,61 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
           )}
         </div>
       )}
+
+      {/* Mockup auto-discovery */}
+      <div>
+        <div className="flex items-center gap-2 mb-2">
+          <span className="text-xs text-muted-foreground font-semibold">Mockup 參考畫面</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <input
+            type="text"
+            value={mockupCode}
+            onChange={e => setMockupCode(e.target.value.toUpperCase())}
+            onKeyDown={e => { if (e.key === 'Enter') handleMockupSearch(); }}
+            placeholder="功能代號 e.g. SM26"
+            className="flex-1 bg-background/50 border border-border rounded px-2 py-1 text-xs outline-none focus:border-primary"
+          />
+          <button
+            onClick={handleMockupSearch}
+            disabled={!mockupCode || mockupSearching}
+            className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded border border-border text-muted-foreground hover:text-foreground hover:border-primary/50 transition-colors disabled:opacity-40"
+          >
+            {mockupSearching ? <IconRefresh className="w-3 h-3 animate-spin" /> : <IconRefresh className="w-3 h-3" />}
+            搜尋
+          </button>
+        </div>
+        {mockupResults.length > 0 && (
+          <div className="mt-2 space-y-1">
+            {mockupResults.map(f => {
+              const checked = mockupChecked.has(f.fullPath);
+              return (
+                <label key={f.fullPath} className="flex items-center gap-2 cursor-pointer group">
+                  <div
+                    className={`w-4 h-4 rounded border flex-shrink-0 flex items-center justify-center transition-colors ${
+                      checked ? 'border-primary bg-primary' : 'border-border'
+                    }`}
+                    onClick={() => setMockupChecked(prev => {
+                      const next = new Set(prev);
+                      if (next.has(f.fullPath)) next.delete(f.fullPath); else next.add(f.fullPath);
+                      return next;
+                    })}
+                  >
+                    {checked && <IconCheck className="w-2.5 h-2.5 text-white" />}
+                  </div>
+                  <span className="text-xs text-foreground/80 truncate group-hover:text-foreground">{f.filename}</span>
+                </label>
+              );
+            })}
+            <p className="text-[10px] text-muted-foreground mt-1">
+              已勾選 {mockupChecked.size}/{mockupResults.length} 份 Mockup，執行時注入 Agent context。
+            </p>
+          </div>
+        )}
+        {mockupResults.length === 0 && !mockupSearching && mockupCode && (
+          <p className="text-xs text-muted-foreground italic mt-1">輸入代號後按搜尋</p>
+        )}
+      </div>
 
       {/* Document Upload (auto-detect SA/SD) */}
       <div>
@@ -1207,7 +1375,7 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
         </div>
         {onExecute && task.status === 'completed' && (
           <button
-            onClick={() => onExecute(task.id)}
+            onClick={() => onExecute(task.id, undefined, [...mockupChecked])}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground text-xs font-medium transition-colors"
           >
             <IconRefresh className="w-3.5 h-3.5" />
@@ -1232,7 +1400,7 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
               </button>
             ))}
             <button
-              onClick={() => onExecute(task.id, execModel)}
+              onClick={() => onExecute(task.id, execModel, [...mockupChecked])}
               className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-green-600 text-white hover:bg-green-500 font-semibold text-sm transition-colors whitespace-nowrap shadow-sm"
             >
               <IconPlay className="w-4 h-4" />

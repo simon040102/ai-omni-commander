@@ -55,6 +55,7 @@ export interface WsStartExecution extends WsMessage {
     requirement?: string;
     model?: string;
     role?: string;
+    mockupFiles?: string[];
   };
 }
 
@@ -166,6 +167,7 @@ export interface WsAddAgent extends WsMessage {
     useWorkspaceSkills?: boolean;
     superpowersFeatures?: string[];
     useAxureContext?: boolean;
+    mockupFiles?: string[]; // absolute paths of selected mockup HTML files
   };
 }
 

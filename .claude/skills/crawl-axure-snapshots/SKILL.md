@@ -108,7 +108,9 @@ https://{share_id}.axshare.com/?id=null&p={encoded_page_name}
       text.includes('發票平台') ||
       (text.includes('Close') && text.includes('首頁')) ||
       text.includes('個人資料維護') ||
-      ((cls.includes('_形状') || cls.includes('box_1')) && !text.trim())
+      ((cls.includes('_形状') || cls.includes('box_1')) && !text.trim()) ||
+      // 系統選單 nav（含「首頁」「個人設定區」等系統層級項目）
+      (text.includes('首頁') && text.includes('個人設定區'))
     ) el.style.display = 'none';
   });
 }
@@ -141,7 +143,9 @@ https://{share_id}.axshare.com/?id=null&p={encoded_page_name}
       text.includes('發票平台') ||
       (text.includes('Close') && text.includes('首頁')) ||
       text.includes('個人資料維護') ||
-      ((cls.includes('_形状') || cls.includes('box_1')) && !text.trim())
+      ((cls.includes('_形状') || cls.includes('box_1')) && !text.trim()) ||
+      // 系統選單 nav（含「首頁」「個人設定區」等系統層級項目）
+      (text.includes('首頁') && text.includes('個人設定區'))
     ) el.remove();
   });
 
@@ -382,7 +386,8 @@ https://{share_id}.axshare.com/?id=null&p={encoded_page_name}
 ---
 
 **手寫語意 HTML 規則：**
-- 用真實 HTML 語意元素：`<form>`, `<select>`, `<input>`, `<table>`, `<button>`, `<nav>`
+- **排除系統選單 nav**：含「首頁」「個人設定區」等系統層級項目的 `<nav>` 是應用外殼，不屬於頁面規格，**不寫入 HTML**
+- 用真實 HTML 語意元素：`<form>`, `<select>`, `<input>`, `<table>`, `<button>`
 - **每個獨立欄位（label+input）必須包在 `<div>` 內**，確保各占一行（`<label>` 預設 inline，不包就全擠一行）
 - 兩欄並排的欄位用 `<table><tr><td>` 表示左右關係
 - `<select>` 的 `<option>` 只保留看到的選項，預選值加 `selected`
