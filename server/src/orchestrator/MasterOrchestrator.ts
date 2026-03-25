@@ -29,6 +29,7 @@ export class MasterOrchestrator {
       requirement?: string;
       model?: string;
       role?: string;
+      mockupFiles?: string[];
     },
   ): Promise<void> {
     const project = getProject(projectId);
@@ -38,7 +39,7 @@ export class MasterOrchestrator {
 
     if (opts?.taskId) {
       // Execute a specific task
-      await this.pipeline.executeTask(opts.taskId, opts.model);
+      await this.pipeline.executeTask(opts.taskId, opts.model, opts.mockupFiles);
     } else if (opts?.requirement) {
       // Ad-hoc execution
       await this.pipeline.executeAdHoc(projectId, opts.requirement, opts.model, opts.role);

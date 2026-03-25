@@ -182,6 +182,7 @@ export function registerHandlers(
       requirement: payload.requirement,
       model: payload.model,
       role: payload.role,
+      mockupFiles: payload.mockupFiles,
     });
   });
 
@@ -421,28 +422,41 @@ export function registerHandlers(
 
       // Inject Axure HTML snapshots if requested
       if (payload.useAxureContext !== false) {
-        const nodeFs = await import('node:fs');
         const nodePath = await import('node:path');
-        const snapshotsDir = nodePath.default.join(
-          nodePath.default.dirname(getConfig().dbPath), '..', 'docs', 'axure-snapshots', payload.projectId,
-        );
-        if (nodeFs.default.existsSync(snapshotsDir)) {
-          const htmlFiles = nodeFs.default.readdirSync(snapshotsDir).filter(f => f.endsWith('.html')).sort();
-          if (htmlFiles.length > 0) {
-            // Group by function code (leading alphanumeric prefix before first '-')
-            const groups = new Map<string, string[]>();
-            for (const f of htmlFiles) {
-              const code = f.match(/^([a-zA-Z0-9]+)-/)?.[1]?.toUpperCase() ?? 'OTHER';
-              if (!groups.has(code)) groups.set(code, []);
-              groups.get(code)!.push(nodePath.default.join(snapshotsDir, f).replace(/\\/g, '/'));
-            }
-            const lines: string[] = [];
-            for (const [code, paths] of groups) {
-              lines.push(`**${code}**`);
-              for (const p of paths) lines.push(`  - ${p}`);
-            }
-            parts.push(`## Axure 原型 HTML 快照\n需要了解某功能的 UI 規格時，請用 Read tool 讀取對應的 HTML 檔案：\n\n${lines.join('\n')}`);
+        let filePaths: string[] = [];
+
+        if (payload.mockupFiles && payload.mockupFiles.length > 0) {
+          // Use explicitly selected files from the client
+          filePaths = payload.mockupFiles;
+        } else {
+          // Fallback: scan all files in the project's snapshots dir
+          const nodeFs = await import('node:fs');
+          const snapshotsDir = nodePath.default.join(
+            nodePath.default.dirname(getConfig().dbPath), '..', 'docs', 'axure-snapshots', payload.projectId,
+          );
+          if (nodeFs.default.existsSync(snapshotsDir)) {
+            filePaths = nodeFs.default.readdirSync(snapshotsDir)
+              .filter((f: string) => f.endsWith('.html'))
+              .sort()
+              .map((f: string) => nodePath.default.join(snapshotsDir, f).replace(/\\/g, '/'));
           }
+        }
+
+        if (filePaths.length > 0) {
+          // Group by function code (leading alphanumeric prefix before first '-')
+          const groups = new Map<string, string[]>();
+          for (const p of filePaths) {
+            const filename = p.split('/').pop() ?? p;
+            const code = filename.match(/^([a-zA-Z0-9]+)-/)?.[1]?.toUpperCase() ?? 'OTHER';
+            if (!groups.has(code)) groups.set(code, []);
+            groups.get(code)!.push(p);
+          }
+          const lines: string[] = [];
+          for (const [code, paths] of groups) {
+            lines.push(`**${code}**`);
+            for (const p of paths) lines.push(`  - ${p}`);
+          }
+          parts.push(`## Axure 原型 HTML 快照\n需要了解某功能的 UI 規格時，請用 Read tool 讀取對應的 HTML 檔案：\n\n${lines.join('\n')}`);
         }
       }
 

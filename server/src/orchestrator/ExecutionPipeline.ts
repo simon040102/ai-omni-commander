@@ -42,9 +42,15 @@ export class ExecutionPipeline {
   /**
    * Execute a specific task from the task list.
    */
-  async executeTask(taskId: string, model?: string): Promise<string> {
+  async executeTask(taskId: string, model?: string, mockupFiles?: string[]): Promise<string> {
     const task = getTask(taskId);
     if (!task) throw new Error(`Task ${taskId} not found`);
+
+    // Guard: prevent duplicate spawning if already running
+    if (task.status === 'in_progress' || task.status === 'assigned') {
+      logger.warn({ taskId, status: task.status }, 'Task already running — skipping duplicate spawn');
+      return '';
+    }
 
     const project = getProject(task.projectId);
     if (!project) throw new Error(`Project ${task.projectId} not found`);
@@ -107,6 +113,7 @@ export class ExecutionPipeline {
       dbConnectionString: project.dbConnectionString,
       taskAttachments,
       svnDocuments,
+      mockupFiles,
     });
 
     // Resolve working directory
@@ -237,8 +244,9 @@ export class ExecutionPipeline {
     taskType: TaskType;
     specResult?: SpecResult | null;
     dbConnectionString?: string | null;
-    taskAttachments?: Array<{ filename: string; filePath: string }>;
+    taskAttachments?: Array<{ filename: string; filePath: string; docType?: string }>;
     svnDocuments?: Array<{ documentId: string; filename: string; filePath: string; parsedText: string | null; docType: string | null }>;
+    mockupFiles?: string[];
   }): string {
     const parts: string[] = [];
 
@@ -274,6 +282,11 @@ export class ExecutionPipeline {
       parts.push(this.buildAttachmentsSection(opts.taskAttachments));
     }
 
+    // Layer 2.9: Mockup / Axure HTML snapshots
+    if (opts.mockupFiles && opts.mockupFiles.length > 0) {
+      parts.push(this.buildMockupSection(opts.mockupFiles));
+    }
+
     // Layer 3: Task prompt
     const taskPrompt = this.buildTaskPrompt(opts.taskTitle, opts.taskDescription, opts.taskType);
     parts.push(taskPrompt);
@@ -285,9 +298,13 @@ export class ExecutionPipeline {
    * Get documents/images associated with a specific task.
    * Checks the task's dedicated subfolder first, then falls back to legacy [task:id] prefix.
    */
-  private getTaskAttachments(projectId: string, taskId: string): Array<{ filename: string; filePath: string }> {
+  private getTaskAttachments(projectId: string, taskId: string): Array<{ filename: string; filePath: string; docType?: string }> {
     const task = getTask(taskId);
     const uploadDir = this.documentParser.getUploadDir();
+
+    // Build a lookup map from filePath → docType using DB records
+    const allDocs = this.documentParser.getDocuments(projectId);
+    const docTypeByPath = new Map(allDocs.map(d => [d.filePath, d.docType]));
 
     // New: read from {uploadDir}/{projectId}/{functionCode}_{taskId8}/ subfolder
     const code = task?.parentName || null;
@@ -298,27 +315,50 @@ export class ExecutionPipeline {
         const entries = fs.readdirSync(taskDir);
         return entries
           .filter(e => !fs.statSync(path.join(taskDir, e)).isDirectory())
-          .map(e => ({ filename: e, filePath: path.join(taskDir, e) }));
+          .map(e => {
+            const filePath = path.join(taskDir, e);
+            return { filename: e, filePath, docType: docTypeByPath.get(filePath) };
+          });
       } catch { /* fall through */ }
     }
 
     // Fallback: legacy [task:id] prefix in flat project folder
     const prefix = `[task:${taskId}]`;
-    const docs = this.documentParser.getDocuments(projectId);
-    return docs
+    return allDocs
       .filter(d => d.filename.startsWith(prefix))
-      .map(d => ({ filename: d.filename, filePath: d.filePath }));
+      .map(d => ({ filename: d.filename, filePath: d.filePath, docType: d.docType }));
   }
 
   /**
    * Build the task attachments section (images, documents uploaded per task).
+   * Documents with SA/SD docType are shown as spec files, not generic attachments.
    */
-  private buildAttachmentsSection(attachments: Array<{ filename: string; filePath: string }>): string {
+  private buildAttachmentsSection(attachments: Array<{ filename: string; filePath: string; docType?: string }>): string {
     const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'];
     const images = attachments.filter(a => IMAGE_EXTS.some(ext => a.filename.toLowerCase().endsWith(ext)));
-    const docs = attachments.filter(a => !IMAGE_EXTS.some(ext => a.filename.toLowerCase().endsWith(ext)));
+    const specDocs = attachments.filter(a =>
+      !IMAGE_EXTS.some(ext => a.filename.toLowerCase().endsWith(ext)) &&
+      (a.docType === 'SA' || a.docType === 'SD')
+    );
+    const otherDocs = attachments.filter(a =>
+      !IMAGE_EXTS.some(ext => a.filename.toLowerCase().endsWith(ext)) &&
+      a.docType !== 'SA' && a.docType !== 'SD'
+    );
 
     const lines: string[] = ['## 任務附件'];
+
+    if (specDocs.length > 0) {
+      lines.push('');
+      lines.push('### 規格文件（手動上傳）');
+      lines.push('');
+      lines.push('以下規格文件由使用者指定，請使用 Read 工具閱讀，**這是主要的實作依據**：');
+      lines.push('');
+      for (const doc of specDocs) {
+        const cleanName = doc.filename.replace(/\[task:[^\]]+\]\s*/, '').replace(/^[a-f0-9-]+-/, '');
+        const tag = doc.docType === 'SA' ? '[SA 前端規格]' : '[SD 後端規格]';
+        lines.push(`- **${tag} ${cleanName}**: 請用 Read tool 讀取 \`${doc.filePath.replace(/\\/g, '/')}\``);
+      }
+    }
 
     if (images.length > 0) {
       lines.push('');
@@ -332,16 +372,31 @@ export class ExecutionPipeline {
       }
     }
 
-    if (docs.length > 0) {
+    if (otherDocs.length > 0) {
       lines.push('');
-      lines.push('### 附件文件');
+      lines.push('### 其他附件');
       lines.push('');
-      for (const doc of docs) {
+      for (const doc of otherDocs) {
         const cleanName = doc.filename.replace(/\[task:[^\]]+\]\s*/, '');
         lines.push(`- **${cleanName}**: \`${doc.filePath.replace(/\\/g, '/')}\``);
       }
     }
 
+    return lines.join('\n');
+  }
+
+  /**
+   * Build prompt section for Axure mockup HTML snapshots selected by the user.
+   */
+  private buildMockupSection(filePaths: string[]): string {
+    const lines: string[] = ['## Mockup 參考畫面（Axure 原型，僅供參考）', ''];
+    lines.push('以下是本次任務對應的 UI Mockup HTML 截圖，**僅供視覺參考，實作依據以 SA 規格文件為準**。');
+    lines.push('必要時才使用 Read 工具閱讀這些檔案（例如需要確認欄位名稱、按鈕位置等畫面細節）：');
+    lines.push('');
+    for (const fp of filePaths) {
+      const filename = fp.split(/[\\/]/).pop() || fp;
+      lines.push(`- **${filename}**: \`${fp.replace(/\\/g, '/')}\``);
+    }
     return lines.join('\n');
   }
 

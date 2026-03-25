@@ -117,6 +117,7 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
   const [addAgentSpFeatures, setAddAgentSpFeatures] = useState<SuperpowersFeature[]>(['brainstorm', 'tdd', 'debugging']);
   const [addAgentUseAxure, setAddAgentUseAxure] = useState(true);
   const [addAgentFiles, setAddAgentFiles] = useState<Array<{ file: File; docType: 'SA' | 'SD' }>>([]);
+  const [addAgentMockupFiles, setAddAgentMockupFiles] = useState<string[]>([]);
 
   // Check for focusAgentId from sessionStorage (from task execution navigation)
   useEffect(() => {
@@ -247,6 +248,7 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
         useWorkspaceSkills: addAgentUseSkills,
         superpowersFeatures: addAgentSuperpowers ? addAgentSpFeatures : undefined,
         useAxureContext: addAgentUseAxure,
+        mockupFiles: addAgentMockupFiles.length > 0 ? addAgentMockupFiles : undefined,
       },
     });
     addToast({ type: 'info', title: 'Agent added', message: `Starting ${addAgentRole} agent (${addAgentModel})...` });
@@ -255,7 +257,8 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
     setAddAgentWorkDir('');
     setAddAgentWorkDirMode('auto');
     setAddAgentFiles([]);
-  }, [currentProjectId, client, addToast, addAgentRole, addAgentPrompt, addAgentModel, effectiveWorkDir, addAgentUseSkills, addAgentSuperpowers, addAgentSpFeatures, addAgentUseAxure, addAgentFiles]);
+    setAddAgentMockupFiles([]);
+  }, [currentProjectId, client, addToast, addAgentRole, addAgentPrompt, addAgentModel, effectiveWorkDir, addAgentUseSkills, addAgentSuperpowers, addAgentSpFeatures, addAgentUseAxure, addAgentFiles, addAgentMockupFiles]);
 
   /* ─── Empty state ─── */
   if (!currentProjectId || !project) {
@@ -704,6 +707,9 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
               dbConnectionString={addAgentRole === 'backend' ? project?.dbConnectionString ?? undefined : undefined}
               files={addAgentFiles}
               setFiles={setAddAgentFiles}
+              projectId={currentProjectId}
+              mockupFiles={addAgentMockupFiles}
+              setMockupFiles={setAddAgentMockupFiles}
               hasSvnConfig={(() => {
                 if (!project?.configJson) return false;
                 try {
@@ -778,6 +784,9 @@ interface AddAgentPanelProps {
   dbConnectionString?: string;
   files: Array<{ file: File; docType: 'SA' | 'SD' }>;
   setFiles: (files: Array<{ file: File; docType: 'SA' | 'SD' }>) => void;
+  projectId: string;
+  mockupFiles: string[];
+  setMockupFiles: (f: string[]) => void;
   hasSvnConfig?: boolean;
   hasAxshareUrl?: boolean;
   onStart: () => void;
@@ -797,24 +806,47 @@ function AddAgentPanel({
   addAgentUseAxure, setAddAgentUseAxure,
   dbConnectionString,
   files, setFiles,
+  projectId,
+  mockupFiles, setMockupFiles,
   hasSvnConfig,
   hasAxshareUrl,
   onStart, onCancel,
 }: AddAgentPanelProps) {
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const [specUrl, setSpecUrl] = useState('');
   const [backendSpecUrl, setBackendSpecUrl] = useState('');
   const [showSvnBrowser, setShowSvnBrowser] = useState<'frontend' | 'backend' | false>(false);
+  const [frontendTab, setFrontendTab] = useState<'svn' | 'upload'>('svn');
+  const [backendTab, setBackendTab] = useState<'svn' | 'upload'>('svn');
+  const frontendFileInputRef = useRef<HTMLInputElement>(null);
+  const backendFileInputRef = useRef<HTMLInputElement>(null);
+  const [mockupCode, setMockupCode] = useState('');
+  const [mockupResults, setMockupResults] = useState<Array<{ filename: string; fullPath: string }>>([]);
+  const [mockupSearching, setMockupSearching] = useState(false);
+  const [mockupChecked, setMockupChecked] = useState<Set<string>>(new Set());
 
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const selected = e.target.files;
-    if (!selected) return;
-    const newFiles = Array.from(selected).map(f => ({
-      file: f,
-      docType: f.name.toLowerCase().includes('sa') ? 'SA' as const : 'SD' as const,
-    }));
-    setFiles([...files, ...newFiles]);
-    e.target.value = '';
+  const handleMockupSearch = async () => {
+    if (!mockupCode.trim() || !projectId) return;
+    setMockupSearching(true);
+    try {
+      const res = await fetch(`/api/projects/${projectId}/mockups?code=${encodeURIComponent(mockupCode.trim())}`);
+      const data = await res.json() as { files: Array<{ filename: string; fullPath: string }> };
+      setMockupResults(data.files);
+      const allChecked = new Set(data.files.map(f => f.filename));
+      setMockupChecked(allChecked);
+      setMockupFiles(data.files.map(f => f.fullPath));
+    } catch {
+      setMockupResults([]);
+    } finally {
+      setMockupSearching(false);
+    }
+  };
+
+  const toggleMockup = (file: { filename: string; fullPath: string }) => {
+    const next = new Set(mockupChecked);
+    if (next.has(file.filename)) next.delete(file.filename);
+    else next.add(file.filename);
+    setMockupChecked(next);
+    setMockupFiles(mockupResults.filter(f => next.has(f.filename)).map(f => f.fullPath));
   };
 
   return (
@@ -939,58 +971,130 @@ function AddAgentPanel({
         {/* Spec Source — Frontend */}
         {hasSvnConfig && (
           <div>
-            <label className="block text-sm font-medium text-muted-foreground mb-2">前端 Spec Source</label>
-            <div className="flex gap-1.5">
-              <input
-                type="text"
-                value={specUrl}
-                onChange={(e) => setSpecUrl(e.target.value)}
-                placeholder="前端 spec URL / path"
-                className="flex-1 bg-muted border border-border rounded-lg px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-blue-500/50 focus:border-blue-500"
-              />
-              <button
-                type="button"
-                onClick={() => setShowSvnBrowser('frontend')}
-                className="px-3 py-2 text-sm font-medium rounded-lg border border-blue-500/30 text-blue-400 hover:bg-blue-500/10 transition-colors flex-shrink-0"
-                title="Browse frontend SVN specs"
-              >
-                SVN
-              </button>
-              {specUrl && (
-                <button type="button" onClick={() => setSpecUrl('')} className="px-1 text-muted-foreground hover:text-red-400 transition-colors">
-                  <IconX className="w-4 h-4" />
-                </button>
-              )}
+            <div className="flex items-center justify-between mb-2">
+              <label className="text-sm font-medium text-muted-foreground">前端 Spec Source</label>
+              <div className="flex gap-0.5 bg-muted rounded-md p-0.5">
+                {(['svn', 'upload'] as const).map(t => (
+                  <button key={t} type="button" onClick={() => setFrontendTab(t)}
+                    className={`px-2.5 py-1 text-xs font-medium rounded transition-colors ${
+                      frontendTab === t ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
+                    }`}
+                  >{t === 'svn' ? 'SVN' : '上傳'}</button>
+                ))}
+              </div>
             </div>
+            {frontendTab === 'svn' ? (
+              <div className="flex gap-1.5">
+                <input type="text" value={specUrl} onChange={(e) => setSpecUrl(e.target.value)}
+                  placeholder="前端 spec URL / path"
+                  className="flex-1 bg-muted border border-border rounded-lg px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-blue-500/50 focus:border-blue-500"
+                />
+                <button type="button" onClick={() => setShowSvnBrowser('frontend')}
+                  className="px-3 py-2 text-sm font-medium rounded-lg border border-blue-500/30 text-blue-400 hover:bg-blue-500/10 transition-colors flex-shrink-0"
+                  title="Browse frontend SVN specs"
+                >SVN</button>
+                {specUrl && (
+                  <button type="button" onClick={() => setSpecUrl('')} className="px-1 text-muted-foreground hover:text-red-400 transition-colors">
+                    <IconX className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+            ) : (
+              <div>
+                <input ref={frontendFileInputRef} type="file" multiple accept=".pdf,.md,.txt,.docx"
+                  onChange={(e) => {
+                    const selected = e.target.files;
+                    if (!selected) return;
+                    setFiles([...files, ...Array.from(selected).map(f => ({ file: f, docType: 'SA' as const }))]);
+                    e.target.value = '';
+                  }}
+                  className="hidden"
+                />
+                <button onClick={() => frontendFileInputRef.current?.click()}
+                  className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium border border-dashed border-blue-500/30 rounded-lg text-blue-400 hover:bg-blue-500/5 transition-colors"
+                >
+                  <IconUpload className="w-4 h-4" />上傳 SA 文件
+                </button>
+                {files.filter(f => f.docType === 'SA').length > 0 && (
+                  <div className="mt-2 space-y-1">
+                    {files.map((f, i) => f.docType !== 'SA' ? null : (
+                      <div key={i} className="flex items-center gap-2 px-3 py-1.5 bg-muted/50 rounded-lg text-sm">
+                        <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400">SA</span>
+                        <span className="text-foreground truncate flex-1">{f.file.name}</span>
+                        <button onClick={() => setFiles(files.filter((_, j) => j !== i))} className="p-0.5 text-muted-foreground hover:text-red-400 transition-colors">
+                          <IconX className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 
         {/* Spec Source — Backend */}
         {hasSvnConfig && (
           <div>
-            <label className="block text-sm font-medium text-muted-foreground mb-2">後端 Spec Source</label>
-            <div className="flex gap-1.5">
-              <input
-                type="text"
-                value={backendSpecUrl}
-                onChange={(e) => setBackendSpecUrl(e.target.value)}
-                placeholder="後端 spec URL / path"
-                className="flex-1 bg-muted border border-border rounded-lg px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-orange-500/50 focus:border-orange-500"
-              />
-              <button
-                type="button"
-                onClick={() => setShowSvnBrowser('backend')}
-                className="px-3 py-2 text-sm font-medium rounded-lg border border-orange-500/30 text-orange-400 hover:bg-orange-500/10 transition-colors flex-shrink-0"
-                title="Browse backend SVN specs"
-              >
-                SVN
-              </button>
-              {backendSpecUrl && (
-                <button type="button" onClick={() => setBackendSpecUrl('')} className="px-1 text-muted-foreground hover:text-red-400 transition-colors">
-                  <IconX className="w-4 h-4" />
-                </button>
-              )}
+            <div className="flex items-center justify-between mb-2">
+              <label className="text-sm font-medium text-muted-foreground">後端 Spec Source</label>
+              <div className="flex gap-0.5 bg-muted rounded-md p-0.5">
+                {(['svn', 'upload'] as const).map(t => (
+                  <button key={t} type="button" onClick={() => setBackendTab(t)}
+                    className={`px-2.5 py-1 text-xs font-medium rounded transition-colors ${
+                      backendTab === t ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
+                    }`}
+                  >{t === 'svn' ? 'SVN' : '上傳'}</button>
+                ))}
+              </div>
             </div>
+            {backendTab === 'svn' ? (
+              <div className="flex gap-1.5">
+                <input type="text" value={backendSpecUrl} onChange={(e) => setBackendSpecUrl(e.target.value)}
+                  placeholder="後端 spec URL / path"
+                  className="flex-1 bg-muted border border-border rounded-lg px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-purple-500/50 focus:border-purple-500"
+                />
+                <button type="button" onClick={() => setShowSvnBrowser('backend')}
+                  className="px-3 py-2 text-sm font-medium rounded-lg border border-purple-500/30 text-purple-400 hover:bg-purple-500/10 transition-colors flex-shrink-0"
+                  title="Browse backend SVN specs"
+                >SVN</button>
+                {backendSpecUrl && (
+                  <button type="button" onClick={() => setBackendSpecUrl('')} className="px-1 text-muted-foreground hover:text-red-400 transition-colors">
+                    <IconX className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+            ) : (
+              <div>
+                <input ref={backendFileInputRef} type="file" multiple accept=".pdf,.md,.txt,.docx"
+                  onChange={(e) => {
+                    const selected = e.target.files;
+                    if (!selected) return;
+                    setFiles([...files, ...Array.from(selected).map(f => ({ file: f, docType: 'SD' as const }))]);
+                    e.target.value = '';
+                  }}
+                  className="hidden"
+                />
+                <button onClick={() => backendFileInputRef.current?.click()}
+                  className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium border border-dashed border-purple-500/30 rounded-lg text-purple-400 hover:bg-purple-500/5 transition-colors"
+                >
+                  <IconUpload className="w-4 h-4" />上傳 SD 文件
+                </button>
+                {files.filter(f => f.docType === 'SD').length > 0 && (
+                  <div className="mt-2 space-y-1">
+                    {files.map((f, i) => f.docType !== 'SD' ? null : (
+                      <div key={i} className="flex items-center gap-2 px-3 py-1.5 bg-muted/50 rounded-lg text-sm">
+                        <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-400">SD</span>
+                        <span className="text-foreground truncate flex-1">{f.file.name}</span>
+                        <button onClick={() => setFiles(files.filter((_, j) => j !== i))} className="p-0.5 text-muted-foreground hover:text-red-400 transition-colors">
+                          <IconX className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 
@@ -998,57 +1102,43 @@ function AddAgentPanel({
         {!hasSvnConfig && (
           <div>
             <label className="block text-sm font-medium text-muted-foreground mb-2">Spec Source</label>
-            <input
-              type="text"
-              value={specUrl}
-              onChange={(e) => setSpecUrl(e.target.value)}
+            <input type="text" value={specUrl} onChange={(e) => setSpecUrl(e.target.value)}
               placeholder="HTTP URL / local path"
               className="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-primary/50 focus:border-primary"
             />
           </div>
         )}
 
-        {/* Spec / Document upload */}
+        {/* Mockup 參考畫面 */}
         <div>
-          <label className="block text-sm font-medium text-muted-foreground mb-2">Documents (SA/SD)</label>
-          <input
-            ref={fileInputRef}
-            type="file"
-            multiple
-            accept=".pdf,.md,.txt,.docx,.png,.jpg,.jpeg"
-            onChange={handleFileSelect}
-            className="hidden"
-          />
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium border border-dashed border-border rounded-lg text-muted-foreground hover:text-foreground hover:border-primary/50 hover:bg-primary/5 transition-colors"
-          >
-            <IconUpload className="w-4 h-4" />
-            Upload Files
-          </button>
-          {files.length > 0 && (
-            <div className="mt-2 space-y-1">
-              {files.map((f, i) => (
-                <div key={i} className="flex items-center gap-2 px-3 py-1.5 bg-muted/50 rounded-lg text-sm">
-                  <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
-                    f.docType === 'SA' ? 'bg-blue-500/15 text-blue-400' : 'bg-green-500/15 text-green-400'
-                  }`}>
-                    {f.docType}
-                  </span>
-                  <span className="text-foreground truncate flex-1">{f.file.name}</span>
-                  <button
-                    onClick={() => {
-                      const updated = [...files];
-                      updated.splice(i, 1);
-                      setFiles(updated);
-                    }}
-                    className="p-0.5 text-muted-foreground hover:text-red-400 transition-colors"
-                  >
-                    <IconX className="w-3.5 h-3.5" />
-                  </button>
-                </div>
+          <label className="block text-sm font-medium text-muted-foreground mb-2">Mockup 參考畫面</label>
+          <div className="flex gap-1.5">
+            <input type="text" value={mockupCode} onChange={(e) => setMockupCode(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleMockupSearch()}
+              placeholder="功能代號 e.g. SM26"
+              className="flex-1 bg-muted border border-border rounded-lg px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-primary/50 focus:border-primary"
+            />
+            <button type="button" onClick={handleMockupSearch}
+              disabled={!mockupCode.trim() || mockupSearching}
+              className="px-3 py-2 text-sm font-medium rounded-lg border border-border text-muted-foreground hover:text-foreground hover:border-primary/50 transition-colors disabled:opacity-40"
+            >{mockupSearching ? '...' : '搜尋'}</button>
+          </div>
+          {mockupResults.length > 0 && (
+            <div className="mt-2 space-y-1 max-h-48 overflow-y-auto">
+              {mockupResults.map((f) => (
+                <label key={f.filename}
+                  className="flex items-center gap-2 px-3 py-1.5 bg-muted/50 rounded-lg text-sm cursor-pointer hover:bg-muted transition-colors"
+                >
+                  <input type="checkbox" checked={mockupChecked.has(f.filename)} onChange={() => toggleMockup(f)}
+                    className="rounded border-border accent-primary w-3.5 h-3.5 flex-shrink-0"
+                  />
+                  <span className="text-foreground truncate">{f.filename}</span>
+                </label>
               ))}
             </div>
+          )}
+          {mockupResults.length === 0 && mockupCode && !mockupSearching && (
+            <p className="mt-1 text-xs text-muted-foreground">No mockup files found for &quot;{mockupCode}&quot;</p>
           )}
         </div>
 

@@ -240,15 +240,23 @@ async function main() {
 
   app.get('/api/projects/:id/mockups', (req, res) => {
     const dir = path.join(SNAPSHOTS_DIR, req.params['id']);
+    const codeFilter = (req.query['code'] as string | undefined)?.toLowerCase().trim();
     try {
       if (!fs.existsSync(dir)) { res.json({ files: [] }); return; }
-      const files = fs.readdirSync(dir)
+      let files = fs.readdirSync(dir)
         .filter(f => f.endsWith('.html'))
         .map(f => {
           const stat = fs.statSync(path.join(dir, f));
-          return { filename: f, updatedAt: stat.mtime.toISOString() };
+          return {
+            filename: f,
+            fullPath: path.join(dir, f).replace(/\\/g, '/'),
+            updatedAt: stat.mtime.toISOString(),
+          };
         })
         .sort((a, b) => a.filename.localeCompare(b.filename));
+      if (codeFilter) {
+        files = files.filter(f => f.filename.toLowerCase().startsWith(codeFilter + '-'));
+      }
       res.json({ files });
     } catch {
       res.status(400).json({ error: 'Cannot read mockup directory' });

@@ -87,6 +87,15 @@ export function updateAgent(id: string, data: Partial<{
   db.prepare(`UPDATE agents SET ${sets.join(', ')} WHERE id = ?`).run(...values);
 }
 
+/** Return all agents whose status is still running/starting/reviewing (should have an active process) */
+export function getRunningAgents(): Agent[] {
+  const db = getDb();
+  const rows = db.prepare(
+    `SELECT * FROM agents WHERE status IN ('running', 'starting', 'reviewing')`,
+  ).all() as Record<string, unknown>[];
+  return rows.map(mapAgent);
+}
+
 export function deleteAgent(id: string): void {
   const db = getDb();
   const del = db.transaction(() => {
