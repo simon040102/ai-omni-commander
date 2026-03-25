@@ -1,6 +1,6 @@
 import path from 'node:path';
 import fs from 'node:fs';
-import type { AgentRole, SuperpowersFeature, TaskType, ProjectConfig } from '@omni/shared';
+import type { AgentRole, SuperpowersFeature, TaskType, ProjectConfig, TestOptions } from '@omni/shared';
 import type { AgentManager } from '../agent/AgentManager.js';
 import type { EventBus } from '../eventbus/EventBus.js';
 import type { DocumentParser } from '../documents/DocumentParser.js';
@@ -42,7 +42,7 @@ export class ExecutionPipeline {
   /**
    * Execute a specific task from the task list.
    */
-  async executeTask(taskId: string, model?: string, mockupFiles?: string[]): Promise<string> {
+  async executeTask(taskId: string, model?: string, mockupFiles?: string[], testOptions?: TestOptions): Promise<string> {
     const task = getTask(taskId);
     if (!task) throw new Error(`Task ${taskId} not found`);
 
@@ -114,6 +114,7 @@ export class ExecutionPipeline {
       taskAttachments,
       svnDocuments,
       mockupFiles,
+      testOptions,
     });
 
     // Resolve working directory
@@ -247,6 +248,7 @@ export class ExecutionPipeline {
     taskAttachments?: Array<{ filename: string; filePath: string; docType?: string }>;
     svnDocuments?: Array<{ documentId: string; filename: string; filePath: string; parsedText: string | null; docType: string | null }>;
     mockupFiles?: string[];
+    testOptions?: TestOptions;
   }): string {
     const parts: string[] = [];
 
@@ -288,7 +290,7 @@ export class ExecutionPipeline {
     }
 
     // Layer 3: Task prompt
-    const taskPrompt = this.buildTaskPrompt(opts.taskTitle, opts.taskDescription, opts.taskType);
+    const taskPrompt = this.buildTaskPrompt(opts.taskTitle, opts.taskDescription, opts.taskType, opts.role, opts.testOptions);
     parts.push(taskPrompt);
 
     return parts.join('\n\n---\n\n');
@@ -531,7 +533,7 @@ ${connectionString}
   /**
    * Build the task-specific prompt section.
    */
-  private buildTaskPrompt(title: string, description: string, taskType: TaskType): string {
+  private buildTaskPrompt(title: string, description: string, taskType: TaskType, role?: string, testOptions?: TestOptions): string {
     const typeLabels: Record<TaskType, string> = {
       bug: 'Bug Fix',
       feature: 'New Feature',
@@ -589,10 +591,69 @@ ${strategies[taskType]}
 
 ## 完成標準
 
-- 完成任務後，如果專案有測試，請執行測試確保通過
-- 如果是前端專案，請執行 build 確保成功
-- 確認完成後，在回應末尾加上 [TASK_COMPLETE]
+${this.buildCompletionCriteria(role, testOptions)}
 - 如果遇到需要人工決策的問題，請加上 [NEEDS_HUMAN] 並說明原因`;
+  }
+
+  private buildCompletionCriteria(role?: string, testOptions?: TestOptions): string {
+    if (role === 'frontend') {
+      const opts = testOptions?.frontend;
+      const lines: string[] = [
+        '- 開發完成後，執行 build 指令（例如 npm run build / pnpm build），確保零錯誤',
+      ];
+      const apiMode = opts?.useRealApi ? '真實後端 API' : 'mock 資料（USE_MOCK=true）';
+      if (opts?.smokeTest) {
+        lines.push(
+          `- Build 成功後，若工作目錄有\`.claude/skills/validate-output/SKILL.md\`，` +
+          `**必須**呼叫該 skill 執行 playwright-mcp smoke test（使用 ${apiMode}），確認頁面渲染正常、無 JS 錯誤`,
+          '- validate-output 失敗時，嘗試修復錯誤後重新執行；無法修復則加上 [NEEDS_HUMAN]',
+        );
+      }
+      if (opts?.e2eSpec) {
+        const mockNote = opts?.useRealApi
+          ? '測試使用真實 API（USE_MOCK=false），確認後端服務已啟動'
+          : '測試使用 mock 資料（USE_MOCK=true），不需要後端服務';
+        lines.push(
+          `- ${opts?.smokeTest ? 'Smoke test 通過後，' : ''}若 \`e2e/templates/\` 存在，` +
+          `依照 \`e2e/templates/module-spec.template.ts\` 格式，為本次開發的模組在 \`e2e/\` 目錄撰寫 E2E spec 檔案（同時建立對應的 mock-data JSON）`,
+          `- E2E spec 預設執行方式：${mockNote}`,
+        );
+      }
+      lines.push('- 所有步驟完成後，在回應末尾加上 [TASK_COMPLETE]');
+      return lines.join('\n');
+    }
+
+    if (role === 'backend') {
+      const opts = testOptions?.backend;
+      const lines: string[] = [
+        '- 開發完成後，執行 build 指令，確保零錯誤',
+      ];
+      if (opts?.unitTests) {
+        lines.push(
+          '- 撰寫每個端點/模組的單元測試，執行所有測試（例如 npm test / pnpm test），確保全數通過',
+          '- 在所有測試通過之前，**不要**標記 [TASK_COMPLETE]',
+        );
+      }
+      if (opts?.apiSmokeTest) {
+        lines.push(
+          '- Build 成功後，若工作目錄有 `.claude/skills/validate-api/SKILL.md`，' +
+          '**必須**呼叫該 skill 執行 API smoke test，確認端點回應正常',
+          '- validate-api 失敗時，嘗試修復錯誤後重新執行；無法修復則加上 [NEEDS_HUMAN]',
+        );
+      }
+      if (opts?.apiContract) {
+        lines.push(
+          '- 將本次開發的端點合約寫入 `.ai_context/api-contracts/{module}.json`（如目錄不存在請建立）',
+        );
+      }
+      lines.push('- 所有步驟完成後，在回應末尾加上 [TASK_COMPLETE]');
+      return lines.join('\n');
+    }
+
+    // Default for other roles
+    return `- 完成任務後，如果專案有測試，請執行測試確保通過
+- 如果是前端專案，請執行 build 確保成功
+- 確認完成後，在回應末尾加上 [TASK_COMPLETE]`;
   }
 
   /**
