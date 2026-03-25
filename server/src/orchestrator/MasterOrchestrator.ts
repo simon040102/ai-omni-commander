@@ -1,6 +1,7 @@
 import type { SpecModeHandler } from './SpecModeHandler.js';
 import type { CreativeModeHandler } from './CreativeModeHandler.js';
 import type { ExecutionPipeline } from './ExecutionPipeline.js';
+import type { TestOptions } from '@omni/shared';
 import { getProject } from '../db/queries/projects.js';
 import { createChildLogger } from '../utils/logger.js';
 
@@ -30,6 +31,7 @@ export class MasterOrchestrator {
       model?: string;
       role?: string;
       mockupFiles?: string[];
+      testOptions?: TestOptions;
     },
   ): Promise<void> {
     const project = getProject(projectId);
@@ -39,13 +41,13 @@ export class MasterOrchestrator {
 
     if (opts?.taskId) {
       // Execute a specific task
-      await this.pipeline.executeTask(opts.taskId, opts.model, opts.mockupFiles);
+      await this.pipeline.executeTask(opts.taskId, opts.model, opts.mockupFiles, opts.testOptions);
     } else if (opts?.requirement) {
       // Ad-hoc execution
       await this.pipeline.executeAdHoc(projectId, opts.requirement, opts.model, opts.role);
     } else {
       // Legacy: spec mode execution with documents
-      await this.specHandler.execute(projectId, undefined, opts?.model);
+      await this.specHandler.execute(projectId, undefined, opts?.model, undefined, opts?.testOptions);
     }
   }
 

@@ -183,6 +183,7 @@ export function registerHandlers(
       model: payload.model,
       role: payload.role,
       mockupFiles: payload.mockupFiles,
+      testOptions: payload.testOptions,
     });
   });
 

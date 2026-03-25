@@ -1,4 +1,4 @@
-import type { DocType, Workspace, AgentRole, SuperpowersConfig, SuperpowersFeature } from '@omni/shared';
+import type { DocType, Workspace, AgentRole, SuperpowersConfig, SuperpowersFeature, TestOptions } from '@omni/shared';
 import type { AgentManager } from '../agent/AgentManager.js';
 import type { TaskDispatcher } from './TaskDispatcher.js';
 import type { ContextSync } from '../eventbus/ContextSync.js';
@@ -99,7 +99,7 @@ export class SpecModeHandler {
   }
 
   /** Start execution: spawn one agent per workspace with appropriate documents */
-  async execute(projectId: string, requirement?: string, model?: string, debugMode?: boolean): Promise<void> {
+  async execute(projectId: string, requirement?: string, model?: string, debugMode?: boolean, testOptions?: TestOptions): Promise<void> {
     const project = getProject(projectId);
     if (!project) throw new Error(`Project ${projectId} not found`);
 
@@ -156,7 +156,7 @@ export class SpecModeHandler {
       // Inject specs to workspace before starting agent (long-term memory)
       await this.injectSpecsToWorkspace(ws, finalDocs);
 
-      const prompt = this.buildWorkspacePrompt(ws, finalDocs, role, requirement, superpowers, debugMode);
+      const prompt = this.buildWorkspacePrompt(ws, finalDocs, role, requirement, superpowers, debugMode, testOptions);
 
       // Reuse existing agent for this role if available, otherwise create new
       const existingAgents = getAgentsByRole(projectId, resolvedRole);
@@ -185,7 +185,7 @@ export class SpecModeHandler {
   }
 
   /** Build the prompt for a workspace agent */
-  private buildWorkspacePrompt(workspace: Workspace, docs: ParsedDocument[], role: string, requirement?: string, superpowers?: SuperpowersConfig, debugMode?: boolean): string {
+  private buildWorkspacePrompt(workspace: Workspace, docs: ParsedDocument[], role: string, requirement?: string, superpowers?: SuperpowersConfig, debugMode?: boolean, testOptions?: TestOptions): string {
     const docLines = docs.map(d => {
       const typeTag = `[${d.docType}] `;
       const isPdf = d.filename.toLowerCase().endsWith('.pdf');
@@ -258,7 +258,7 @@ ${docLines.join('\n')}
 
 計劃書產出後，按照計劃逐步修改程式碼。嚴格遵循現有專案的架構風格和技能設定中的規範。
 
-${this.getCompletionCriteria(role)}
+${this.getCompletionCriteria(role, testOptions)}
 
 - 如需人工協助請加上 [NEEDS_HUMAN]`;
     }
@@ -296,27 +296,66 @@ ${docLines.join('\n')}
 
 計劃書產出後，按照計劃逐步實作。嚴格遵循技能設定中的規範（程式碼風格、框架慣例、檔案結構等）。
 
-${this.getCompletionCriteria(role)}
+${this.getCompletionCriteria(role, testOptions)}
 
 - 如需人工協助請加上 [NEEDS_HUMAN]`;
   }
 
   /** Get role-specific completion criteria */
-  private getCompletionCriteria(role: string): string {
+  private getCompletionCriteria(role: string, testOptions?: TestOptions): string {
     if (role === 'frontend') {
-      return `### 完成標準（前端）
-- 開發完成後，執行專案的 build 指令（例如 npm run build / pnpm build）
-- 確保 build 成功、零錯誤
-- 你**不需要**撰寫或執行測試，只需確保能成功 build
-- Build 成功後請在回應末尾加上 [TASK_COMPLETE]`;
+      const opts = testOptions?.frontend;
+      const lines: string[] = [
+        '### 完成標準（前端）',
+        '- 開發完成後，執行 build 指令（例如 npm run build / pnpm build），確保零錯誤',
+      ];
+      const apiMode = opts?.useRealApi ? '真實後端 API' : 'mock 資料（USE_MOCK=true）';
+      if (opts?.smokeTest) {
+        lines.push(
+          `- Build 成功後，若工作目錄有\`.claude/skills/validate-output/SKILL.md\`，` +
+          `**必須**呼叫該 skill 執行 playwright-mcp smoke test（使用 ${apiMode}），確認頁面渲染正常、無 JS 錯誤`,
+          '- validate-output 失敗時，嘗試修復錯誤後重新執行；無法修復則加上 [NEEDS_HUMAN]',
+        );
+      }
+      if (opts?.e2eSpec) {
+        const mockNote = opts?.useRealApi
+          ? '測試使用真實 API（USE_MOCK=false），確認後端服務已啟動'
+          : '測試使用 mock 資料（USE_MOCK=true），不需要後端服務';
+        lines.push(
+          `- ${opts?.smokeTest ? 'Smoke test 通過後，' : ''}若 \`e2e/templates/\` 存在，` +
+          `依照 \`e2e/templates/module-spec.template.ts\` 格式，為本次開發的模組在 \`e2e/\` 目錄撰寫 E2E spec 檔案（同時建立對應的 mock-data JSON）`,
+          `- E2E spec 預設執行方式：${mockNote}`,
+        );
+      }
+      lines.push('- 所有步驟完成後，在回應末尾加上 [TASK_COMPLETE]');
+      return lines.join('\n');
     }
     if (role === 'backend') {
-      return `### 完成標準（後端）
-- 開發完成後，撰寫每個端點/模組的單元測試
-- 執行所有測試（例如 npm test / pnpm test）
-- 確保所有測試通過、零失敗
-- 在所有測試通過之前，**不要**標記 [TASK_COMPLETE]
-- 所有測試通過後請在回應末尾加上 [TASK_COMPLETE]`;
+      const opts = testOptions?.backend;
+      const lines: string[] = [
+        '### 完成標準（後端）',
+        '- 開發完成後，執行 build 指令，確保零錯誤',
+      ];
+      if (opts?.unitTests) {
+        lines.push(
+          '- 撰寫每個端點/模組的單元測試，執行所有測試（例如 npm test / pnpm test），確保全數通過',
+          '- 在所有測試通過之前，**不要**標記 [TASK_COMPLETE]',
+        );
+      }
+      if (opts?.apiSmokeTest) {
+        lines.push(
+          '- Build 成功後，若工作目錄有 `.claude/skills/validate-api/SKILL.md`，' +
+          '**必須**呼叫該 skill 執行 API smoke test，確認端點回應正常',
+          '- validate-api 失敗時，嘗試修復錯誤後重新執行；無法修復則加上 [NEEDS_HUMAN]',
+        );
+      }
+      if (opts?.apiContract) {
+        lines.push(
+          '- 將本次開發的端點合約寫入 `.ai_context/api-contracts/{module}.json`（如目錄不存在請建立）',
+        );
+      }
+      lines.push('- 所有步驟完成後，在回應末尾加上 [TASK_COMPLETE]');
+      return lines.join('\n');
     }
     // Default for other roles
     return `- 完成後請在回應末尾加上 [TASK_COMPLETE]`;

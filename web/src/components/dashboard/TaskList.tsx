@@ -6,6 +6,7 @@ import { AsanaImportDrawer } from './AsanaImportDrawer';
 import { SvnBrowser } from './SvnBrowser';
 import { IconPlus, IconPlay, IconTrash, IconX, IconChevronDown, IconChevronRight, IconAsana, IconDocument, IconExternalLink, IconUpload, IconCheck, IconRefresh } from '../ui/Icons';
 import type { TaskType, Task } from '../../stores/projectStore';
+import type { TestOptions } from '@omni/shared';
 
 const TASK_TYPE_COLORS: Record<TaskType, string> = {
   bug: 'bg-red-500/100/20 text-red-400',
@@ -225,7 +226,7 @@ export function TaskList({ selectedModel }: TaskListProps) {
     });
   }, [currentProjectId, client]);
 
-  const handleExecuteTask = useCallback((taskId: string, modelOverride?: string, mockupFiles?: string[]) => {
+  const handleExecuteTask = useCallback((taskId: string, modelOverride?: string, mockupFiles?: string[], testOptions?: TestOptions) => {
     if (!currentProjectId || !client) return;
     const model = modelOverride || selectedModel;
 
@@ -238,6 +239,7 @@ export function TaskList({ selectedModel }: TaskListProps) {
         taskId,
         model,
         ...(mockupFiles && mockupFiles.length > 0 ? { mockupFiles } : {}),
+        ...(testOptions ? { testOptions } : {}),
       },
     });
 
@@ -713,7 +715,7 @@ interface SvnPreviewFile {
 function TaskRow({ task, expandedTaskId, onExecute, onDelete, onToggleExpand, onUpdate, onUploadDoc, onUploadImage, hasSvnConfig, onBrowseSvn }: {
   task: Task;
   expandedTaskId: string | null;
-  onExecute: (id: string, model?: string, mockupFiles?: string[]) => void;
+  onExecute: (id: string, model?: string, mockupFiles?: string[], testOptions?: TestOptions) => void;
   onDelete: (id: string) => void;
   onToggleExpand: (id: string) => void;
   onUpdate: (id: string, updates: { description?: string | null; label?: string; taskType?: TaskType }) => void;
@@ -921,7 +923,7 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
   onUploadImage: (taskId: string, file: File) => void;
   hasSvnConfig?: boolean;
   onBrowseSvn?: (specType: 'frontend' | 'backend') => void;
-  onExecute?: (id: string, model?: string, mockupFiles?: string[]) => void;
+  onExecute?: (id: string, model?: string, mockupFiles?: string[], testOptions?: TestOptions) => void;
   svnPreviewFiles: SvnPreviewFile[];
   svnPreviewLoading: boolean;
   svnPreviewError: string;
@@ -934,6 +936,10 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
   const isAsana = task.source === 'asana';
   const client = useWsStore(s => s.client);
   const [execModel, setExecModel] = useState<string>(task.preferredModel || 'sonnet');
+  const [testOptions, setTestOptions] = useState<TestOptions>(() => ({
+    frontend: { smokeTest: true, e2eSpec: false, useRealApi: false },
+    backend: { unitTests: true, apiSmokeTest: false, apiContract: false },
+  }));
   const currentProjectId = useProjectStore(s => s.currentProjectId);
   const [editingDesc, setEditingDesc] = useState(false);
   const [descDraft, setDescDraft] = useState(task.description || '');
@@ -1356,6 +1362,61 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
         </button>
       </div>
 
+      {/* Test options (per-role checkboxes) */}
+      {onExecute && task.status !== 'in_progress' && task.status !== 'assigned' && (task.label === 'frontend' || task.label === 'backend') && (
+        <div className="pt-2 border-t border-border/50 mt-2">
+          <div className="text-[10px] text-muted-foreground font-medium mb-1.5 uppercase tracking-wide">測試選項</div>
+          {task.label === 'frontend' && (
+            <div className="flex flex-wrap gap-x-4 gap-y-1">
+              {([
+                { key: 'smokeTest', label: 'Smoke Test' },
+                { key: 'e2eSpec', label: '產出 E2E Spec' },
+              ] as const).map(({ key, label }) => (
+                <label key={key} className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={testOptions.frontend[key]}
+                    onChange={e => setTestOptions(prev => ({ ...prev, frontend: { ...prev.frontend, [key]: e.target.checked } }))}
+                    className="w-3 h-3 accent-blue-500"
+                  />
+                  {label}
+                </label>
+              ))}
+              {(testOptions.frontend.smokeTest || testOptions.frontend.e2eSpec) && (
+                <label className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground cursor-pointer select-none ml-2 pl-2 border-l border-border/50">
+                  <input
+                    type="checkbox"
+                    checked={testOptions.frontend.useRealApi}
+                    onChange={e => setTestOptions(prev => ({ ...prev, frontend: { ...prev.frontend, useRealApi: e.target.checked } }))}
+                    className="w-3 h-3 accent-green-500"
+                  />
+                  使用真實 API（後端已完成）
+                </label>
+              )}
+            </div>
+          )}
+          {task.label === 'backend' && (
+            <div className="flex flex-wrap gap-x-4 gap-y-1">
+              {([
+                { key: 'unitTests', label: '單元測試' },
+                { key: 'apiSmokeTest', label: 'API Smoke Test' },
+                { key: 'apiContract', label: '產出 API 合約' },
+              ] as const).map(({ key, label }) => (
+                <label key={key} className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={testOptions.backend[key]}
+                    onChange={e => setTestOptions(prev => ({ ...prev, backend: { ...prev.backend, [key]: e.target.checked } }))}
+                    className="w-3 h-3 accent-purple-500"
+                  />
+                  {label}
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Asana reference + Execute button row */}
       <div className="flex items-center justify-between pt-2 border-t border-border/50 mt-2">
         <div className="flex items-center gap-2">
@@ -1375,7 +1436,7 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
         </div>
         {onExecute && task.status === 'completed' && (
           <button
-            onClick={() => onExecute(task.id, undefined, [...mockupChecked])}
+            onClick={() => onExecute(task.id, undefined, [...mockupChecked], testOptions)}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground text-xs font-medium transition-colors"
           >
             <IconRefresh className="w-3.5 h-3.5" />
@@ -1400,7 +1461,7 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
               </button>
             ))}
             <button
-              onClick={() => onExecute(task.id, execModel, [...mockupChecked])}
+              onClick={() => onExecute(task.id, execModel, [...mockupChecked], testOptions)}
               className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-green-600 text-white hover:bg-green-500 font-semibold text-sm transition-colors whitespace-nowrap shadow-sm"
             >
               <IconPlay className="w-4 h-4" />

@@ -47,6 +47,19 @@ export interface WsUploadDocument extends WsMessage {
   };
 }
 
+export interface TestOptions {
+  frontend: {
+    smokeTest: boolean;   // validate-output skill smoke test
+    e2eSpec: boolean;     // write E2E spec file
+    useRealApi: boolean;  // false = mock data, true = real backend API
+  };
+  backend: {
+    unitTests: boolean;   // write and run unit tests
+    apiSmokeTest: boolean; // validate-api skill smoke test
+    apiContract: boolean;  // write API contract to .ai_context/
+  };
+}
+
 export interface WsStartExecution extends WsMessage {
   type: 'project.startExecution';
   payload: {
@@ -56,6 +69,7 @@ export interface WsStartExecution extends WsMessage {
     model?: string;
     role?: string;
     mockupFiles?: string[];
+    testOptions?: TestOptions;
   };
 }
 
