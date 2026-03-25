@@ -42,7 +42,7 @@ export class ExecutionPipeline {
   /**
    * Execute a specific task from the task list.
    */
-  async executeTask(taskId: string, model?: string, mockupFiles?: string[], testOptions?: TestOptions): Promise<string> {
+  async executeTask(taskId: string, model?: string, mockupFiles?: string[], testOptions?: TestOptions, executionRunId?: string): Promise<string> {
     const task = getTask(taskId);
     if (!task) throw new Error(`Task ${taskId} not found`);
 
@@ -90,8 +90,8 @@ export class ExecutionPipeline {
       }
     }
 
-    // Find task-associated attachments (documents with [task:id] prefix)
-    const taskAttachments = this.getTaskAttachments(task.projectId, taskId);
+    // Find task-associated attachments scoped to this execution run
+    const taskAttachments = this.getTaskAttachments(task.projectId, taskId, executionRunId);
 
     // Get SVN-bound documents for this task, filtered by role:
     // Frontend agent → SA + SD, Backend agent → SD only
@@ -298,9 +298,10 @@ export class ExecutionPipeline {
 
   /**
    * Get documents/images associated with a specific task.
-   * Checks the task's dedicated subfolder first, then falls back to legacy [task:id] prefix.
+   * If executionRunId is provided, only returns files from that execution's subfolder.
+   * Otherwise falls back to legacy [task:id] prefix in the project folder.
    */
-  private getTaskAttachments(projectId: string, taskId: string): Array<{ filename: string; filePath: string; docType?: string }> {
+  private getTaskAttachments(projectId: string, taskId: string, executionRunId?: string): Array<{ filename: string; filePath: string; docType?: string }> {
     const task = getTask(taskId);
     const uploadDir = this.documentParser.getUploadDir();
 
@@ -308,20 +309,24 @@ export class ExecutionPipeline {
     const allDocs = this.documentParser.getDocuments(projectId);
     const docTypeByPath = new Map(allDocs.map(d => [d.filePath, d.docType]));
 
-    // New: read from {uploadDir}/{projectId}/{functionCode}_{taskId8}/ subfolder
     const code = task?.parentName || null;
-    const subFolder = code ? `${code}_${taskId.slice(0, 8)}` : `task_${taskId.slice(0, 8)}`;
-    const taskDir = path.join(uploadDir, projectId, subFolder);
-    if (fs.existsSync(taskDir)) {
-      try {
-        const entries = fs.readdirSync(taskDir);
-        return entries
-          .filter(e => !fs.statSync(path.join(taskDir, e)).isDirectory())
-          .map(e => {
-            const filePath = path.join(taskDir, e);
-            return { filename: e, filePath, docType: docTypeByPath.get(filePath) };
-          });
-      } catch { /* fall through */ }
+    const taskBase = code ? `${code}_${taskId.slice(0, 8)}` : `task_${taskId.slice(0, 8)}`;
+
+    // Option 2: scope to executionRunId subfolder only
+    if (executionRunId) {
+      const runDir = path.join(uploadDir, projectId, taskBase, executionRunId);
+      if (fs.existsSync(runDir)) {
+        try {
+          const entries = fs.readdirSync(runDir);
+          return entries
+            .filter(e => !fs.statSync(path.join(runDir, e)).isDirectory())
+            .map(e => {
+              const filePath = path.join(runDir, e);
+              return { filename: e, filePath, docType: docTypeByPath.get(filePath) };
+            });
+        } catch { /* fall through */ }
+      }
+      return []; // executionRunId given but no files uploaded → return empty
     }
 
     // Fallback: legacy [task:id] prefix in flat project folder

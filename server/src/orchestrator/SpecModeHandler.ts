@@ -51,6 +51,7 @@ export class SpecModeHandler {
     docType?: DocType,
     taskId?: string,
     agentId?: string,
+    executionRunId?: string,
   ): Promise<void> {
     let subFolder: string | undefined;
     if (agentId) {
@@ -58,7 +59,8 @@ export class SpecModeHandler {
     } else if (taskId) {
       const task = getTask(taskId);
       const code = task?.parentName || null;
-      subFolder = code ? `${code}_${taskId.slice(0, 8)}` : `task_${taskId.slice(0, 8)}`;
+      const taskBase = code ? `${code}_${taskId.slice(0, 8)}` : `task_${taskId.slice(0, 8)}`;
+      subFolder = executionRunId ? `${taskBase}/${executionRunId}` : taskBase;
     }
     await this.documentParser.saveAndParse(projectId, filename, content, fileType, docType || 'SD', { subFolder });
     logger.info({ projectId, filename, docType: docType || 'SD', subFolder }, 'Document uploaded');
