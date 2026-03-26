@@ -9,6 +9,64 @@ export interface AgentOutput {
   timestamp: string;
 }
 
+export interface FlowStep {
+  n: number;
+  label: string;
+  status: 'pending' | 'active' | 'done';
+}
+
+export interface AgentFlowPlan {
+  steps: FlowStep[];
+}
+
+/** Parse flow markers from a text chunk and return updated plan */
+function applyFlowMarkers(text: string, current: AgentFlowPlan | null): AgentFlowPlan | null {
+  let plan = current;
+
+  // [FLOW_PLAN]\n1. ...\n2. ...\n[/FLOW_PLAN]
+  const planMatch = /\[FLOW_PLAN\]([\s\S]*?)\[\/FLOW_PLAN\]/g.exec(text);
+  if (planMatch) {
+    const lines = planMatch[1].trim().split('\n');
+    const steps: FlowStep[] = [];
+    for (const line of lines) {
+      const m = /^\s*(\d+)[.)]\s+(.+)/.exec(line.trim());
+      if (m) steps.push({ n: parseInt(m[1]), label: m[2].trim(), status: 'pending' });
+    }
+    if (steps.length > 0) plan = { steps };
+  }
+
+  if (!plan) return null;
+
+  // [STEP:N] — mark step N active, previous steps done
+  const stepMatches = [...text.matchAll(/\[STEP:(\d+)\]/g)];
+  for (const m of stepMatches) {
+    const n = parseInt(m[1]);
+    plan = {
+      steps: plan.steps.map(s =>
+        s.n === n ? { ...s, status: 'active' }
+        : s.n < n ? { ...s, status: 'done' }
+        : s
+      ),
+    };
+  }
+
+  // [STEP_DONE:N] — mark step N done
+  const doneMatches = [...text.matchAll(/\[STEP_DONE:(\d+)\]/g)];
+  for (const m of doneMatches) {
+    const n = parseInt(m[1]);
+    plan = {
+      steps: plan.steps.map(s => s.n === n ? { ...s, status: 'done' } : s),
+    };
+  }
+
+  // [TASK_COMPLETE] — mark all steps done
+  if (text.includes('[TASK_COMPLETE]')) {
+    plan = { steps: plan.steps.map(s => ({ ...s, status: 'done' })) };
+  }
+
+  return plan;
+}
+
 export interface AgentProgress {
   agentId: string;
   completedSteps: number;
@@ -31,6 +89,9 @@ interface AgentStoreState {
 
   /** Map of agentId -> progress info */
   progress: Record<string, AgentProgress>;
+
+  /** Map of agentId -> parsed flow plan from [FLOW_PLAN] markers */
+  flowPlans: Record<string, AgentFlowPlan>;
 
   /** Append output to an agent's buffer */
   appendOutput: (agentId: string, output: AgentOutput) => void;
@@ -85,16 +146,21 @@ export const useAgentStore = create<AgentStoreState>()(
       commandInputs: {},
       streamingBuffers: {},
       progress: {},
+      flowPlans: {},
 
       appendOutput: (agentId, output) => set((state) => {
         const existing = state.outputs[agentId] || [];
         const updated = [...existing, output];
-        // Trim to max lines
         const trimmed = updated.length > MAX_OUTPUT_LINES
           ? updated.slice(-MAX_OUTPUT_LINES)
           : updated;
+        // Parse flow markers from text output
+        const updatedFlow = output.streamType === 'text'
+          ? applyFlowMarkers(output.content, state.flowPlans[agentId] ?? null)
+          : null;
         return {
           outputs: { ...state.outputs, [agentId]: trimmed },
+          ...(updatedFlow && { flowPlans: { ...state.flowPlans, [agentId]: updatedFlow } }),
         };
       }),
 
@@ -159,14 +225,24 @@ export const useAgentStore = create<AgentStoreState>()(
         const trimmed = outputs.length > MAX_OUTPUT_LINES
           ? outputs.slice(-MAX_OUTPUT_LINES)
           : outputs;
+        // Re-parse flow plan from all historical outputs
+        let flow: AgentFlowPlan | null = null;
+        for (const o of trimmed) {
+          if (o.streamType === 'text') flow = applyFlowMarkers(o.content, flow);
+        }
         return {
           outputs: { ...state.outputs, [agentId]: trimmed },
+          ...(flow && { flowPlans: { ...state.flowPlans, [agentId]: flow } }),
         };
       }),
 
-      clearOutputs: (agentId) => set((state) => ({
-        outputs: { ...state.outputs, [agentId]: [] },
-      })),
+      clearOutputs: (agentId) => set((state) => {
+        const { [agentId]: _f, ...restFlow } = state.flowPlans;
+        return {
+          outputs: { ...state.outputs, [agentId]: [] },
+          flowPlans: restFlow,
+        };
+      }),
 
       setCommandInput: (agentId, value) => set((state) => ({
         commandInputs: { ...state.commandInputs, [agentId]: value },
@@ -181,7 +257,7 @@ export const useAgentStore = create<AgentStoreState>()(
         return { progress: rest };
       }),
 
-      clearAll: () => set({ outputs: {}, commandInputs: {}, streamingBuffers: {}, progress: {} }),
+      clearAll: () => set({ outputs: {}, commandInputs: {}, streamingBuffers: {}, progress: {}, flowPlans: {} }),
     }),
     {
       name: 'omni-agent-store',
