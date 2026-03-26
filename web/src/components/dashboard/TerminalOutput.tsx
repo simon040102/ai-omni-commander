@@ -397,10 +397,10 @@ export function TerminalOutput({ outputs, title, role, status, agentId, projectI
           {/* Flow plan toggle */}
           <button
             onClick={() => setShowFlow(!showFlow)}
-            className={`px-2 py-1 rounded text-[11px] font-medium transition-colors ${
+            className={`px-2 py-1 rounded text-[11px] font-medium transition-colors border ${
               showFlow
-                ? 'bg-emerald-500/15 text-emerald-400'
-                : 'text-muted-foreground/60 hover:text-muted-foreground hover:bg-muted'
+                ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30'
+                : 'text-muted-foreground hover:text-foreground hover:bg-muted border-border/50'
             }`}
             title="Toggle flow plan"
           >
