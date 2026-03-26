@@ -47,6 +47,13 @@ export interface Agent {
   updatedAt: string;
 }
 
+export interface McpStdioServerConfig {
+  type?: 'stdio';
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+}
+
 export interface AgentSpawnConfig {
   workingDir: string;
   systemPrompt?: string;
@@ -54,6 +61,7 @@ export interface AgentSpawnConfig {
   allowedTools?: string[];
   sessionId?: string;
   useWorkspaceSkills?: boolean; // Whether to load CLAUDE.md/.claude/ from workspace (default: true)
+  mcpServers?: Record<string, McpStdioServerConfig>; // Extra MCP servers to load (bypasses .mcp.json approval requirement)
 }
 
 export interface AgentStartConfig {

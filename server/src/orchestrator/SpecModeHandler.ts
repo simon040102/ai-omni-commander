@@ -326,7 +326,7 @@ ${this.getCompletionCriteria(role, testOptions)}
         lines.push(
           `- ${opts?.smokeTest ? 'Smoke test 通過後，' : ''}若 \`e2e/templates/\` 存在，` +
           `依照 \`e2e/templates/module-spec.template.ts\` 格式，為本次開發的模組在 \`e2e/\` 目錄撰寫 E2E spec 檔案（同時建立對應的 mock-data JSON）`,
-          `- E2E spec 預設執行方式：${mockNote}`,
+          `- E2E spec 執行方式（${mockNote}）：從 spec 檔案名稱取出模組代碼（如 \`e2e/sm29.spec.ts\` → \`sm29\`），以 \`SMOKE=1 TEST_MODULE={模組代碼} npx playwright test e2e/{模組代碼}.spec.ts --project=chromium --no-deps\` 執行，截圖會自動存到 \`docs/smoke-tests/{模組代碼}/\``,
         );
       }
       lines.push('- 所有步驟完成後，在回應末尾加上 [TASK_COMPLETE]');

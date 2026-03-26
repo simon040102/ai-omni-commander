@@ -74,12 +74,12 @@ export class ExecutionPipeline {
         logger.warn({ err, taskId, specUrl: task.specUrl }, 'Failed to fetch spec content');
       }
     }
-    // Auto-fetch SVN spec documents:
+    // Auto-fetch SVN spec documents (skip for testing tasks — no spec reading needed):
     // Priority 1: use parentName (from Asana parent task, e.g. "OV0101")
     // Priority 2: extract function code from task title (e.g. "IC01 修改發票查詢" → "IC01")
     let svnDocIds: string[] = [];
     const functionCode = task.parentName || extractFunctionCode(task.title);
-    if (functionCode && projectConfig?.svnConfig && this.svnSpecService) {
+    if (task.taskType !== 'testing' && functionCode && projectConfig?.svnConfig && this.svnSpecService) {
       try {
         svnDocIds = await this.svnSpecService.fetchSpecsForTask(
           task.projectId, taskId, functionCode, projectConfig.svnConfig, task.label,
@@ -543,6 +543,7 @@ ${connectionString}
       bug: 'Bug Fix',
       feature: 'New Feature',
       refactor: 'Refactor',
+      testing: 'Testing',
       other: 'Task',
     };
 
@@ -572,6 +573,13 @@ ${connectionString}
 3. **制定重構計劃**：規劃重構步驟，確保每步都可驗證
 4. **逐步重構**：按計劃進行重構，每步都確保功能正常
 5. **驗證重構**：執行測試或手動驗證，確保行為不變`,
+
+      testing: `## 測試策略
+
+1. **確認測試範圍**：根據任務描述，確認要測試的功能模組
+2. **執行 smoke test**：使用 validate-output skill，直接用 MCP browser 工具驗證頁面
+3. **執行 E2E spec**：如果有 .spec.ts，執行 npx playwright test
+4. **記錄結果**：產生測試報告到 docs/smoke-tests/`,
 
       other: `## 執行策略
 
@@ -606,22 +614,44 @@ ${this.buildCompletionCriteria(role, testOptions)}
       const lines: string[] = [
         '- 開發完成後，執行 build 指令（例如 npm run build / pnpm build），確保零錯誤',
       ];
-      const apiMode = opts?.useRealApi ? '真實後端 API' : 'mock 資料（USE_MOCK=true）';
+      const runMock = opts?.useMock !== false && !opts?.useRealApi || opts?.useMock;
+      const runReal = opts?.useRealApi;
       if (opts?.smokeTest) {
-        lines.push(
-          `- Build 成功後，若工作目錄有\`.claude/skills/validate-output/SKILL.md\`，` +
-          `**必須**呼叫該 skill 執行 playwright-mcp smoke test（使用 ${apiMode}），確認頁面渲染正常、無 JS 錯誤`,
-          '- validate-output 失敗時，嘗試修復錯誤後重新執行；無法修復則加上 [NEEDS_HUMAN]',
-        );
+        if (runMock) {
+          lines.push(
+            `- Build 成功後，若工作目錄有\`.claude/skills/validate-output/SKILL.md\`，` +
+            `**必須**呼叫該 skill 執行 playwright-mcp smoke test（使用 mock 資料，USE_MOCK=true），截圖存到 \`docs/smoke-tests/{模組}/mock/\``,
+            '- validate-output 失敗時，嘗試修復錯誤後重新執行；無法修復則加上 [NEEDS_HUMAN]',
+          );
+        }
+        if (runReal) {
+          lines.push(
+            `- ${runMock ? 'Mock smoke test 通過後，' : 'Build 成功後，'}若工作目錄有\`.claude/skills/validate-output/SKILL.md\`，` +
+            `再次執行 playwright-mcp smoke test（使用真實後端 API），截圖存到 \`docs/smoke-tests/{模組}/realAPI/\``,
+          );
+        }
       }
       if (opts?.e2eSpec) {
-        const mockNote = opts?.useRealApi
-          ? '測試使用真實 API（USE_MOCK=false），確認後端服務已啟動'
-          : '測試使用 mock 資料（USE_MOCK=true），不需要後端服務';
+        const modes: string[] = [];
+        if (runMock) modes.push('mock 模式（E2E_MODE=mock）');
+        if (runReal) modes.push('真實 API 模式（USE_MOCK=false，確認後端已啟動）');
+        const modeNote = modes.join('，再跑一次 ');
         lines.push(
           `- ${opts?.smokeTest ? 'Smoke test 通過後，' : ''}若 \`e2e/templates/\` 存在，` +
           `依照 \`e2e/templates/module-spec.template.ts\` 格式，為本次開發的模組在 \`e2e/\` 目錄撰寫 E2E spec 檔案（同時建立對應的 mock-data JSON）`,
-          `- E2E spec 預設執行方式：${mockNote}`,
+          `- E2E spec 執行指令（從 spec 檔案名稱取出模組代碼，如 \`e2e/sm29.spec.ts\` → \`sm29\`）：` +
+          (runMock ? `mock 模式（不需後端，跳過 auth setup）：\`E2E_MODE=mock TEST_MODULE={模組} TEST_API_MODE=mock npx playwright test e2e/{模組}.spec.ts --project=chromium --no-deps${opts?.headed ? ' --headed' : ''}\`，截圖存到 \`test-results/{模組}/mock/\`` : '') +
+          (runMock && runReal ? '；' : '') +
+          (runReal ? `real API 模式（需後端已啟動，含登入 auth setup）：\`TEST_MODULE={模組} TEST_API_MODE=realAPI npx playwright test e2e/{模組}.spec.ts --project=chromium${opts?.headed ? ' --headed' : ''}\`（不加 --no-deps，讓 auth.setup.ts 先跑完登入），截圖存到 \`test-results/{模組}/realAPI/\`` : ''),
+        );
+      }
+      if (opts?.consoleScript) {
+        lines.push(
+          `- 為本次開發的模組產生瀏覽器 Console 測試腳本，存到 \`e2e/console-scripts/{模組}.js\`：` +
+          `腳本需動態載入 html2canvas（\`await import('https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js')\`），` +
+          `腳本開頭一律先導航到登入頁、填入帳號密碼（admin/Admin123!/驗證碼0000）並等待跳轉完成（不管當前是否已登入），` +
+          `登入完成後導航到目標頁面，依據 data-testid 驗證關鍵元素、點擊查詢按鈕、確認結果渲染，每個步驟後截圖並自動下載 PNG，` +
+          `最後 \`console.table(results)\` 輸出 pass/fail 摘要。腳本必須可直接貼到瀏覽器 Console 執行，無需任何 npm 套件。`,
         );
       }
       lines.push('- 所有步驟完成後，在回應末尾加上 [TASK_COMPLETE]');

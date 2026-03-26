@@ -12,6 +12,7 @@ const TASK_TYPE_COLORS: Record<TaskType, string> = {
   bug: 'bg-red-500/100/20 text-red-400',
   feature: 'bg-blue-500/100/20 text-blue-400',
   refactor: 'bg-purple-500/20 text-purple-400',
+  testing: 'bg-teal-500/15 text-teal-400',
   other: 'bg-muted text-muted-foreground',
 };
 
@@ -82,6 +83,7 @@ export function TaskList({ selectedModel }: TaskListProps) {
   const [newLabel, setNewLabel] = useState('frontend');
   const [newSpecUrl, setNewSpecUrl] = useState('');
   const [newBackendSpecUrl, setNewBackendSpecUrl] = useState('');
+  const [newTestOptions, setNewTestOptions] = useState({ smokeTest: true, e2eSpec: false, consoleScript: false, useMock: true, useRealApi: false, headed: false });
   const [stagedFiles, setStagedFiles] = useState<Array<{ file: File; docType: 'SA' | 'SD' | 'image' }>>([]);
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
   const [confirmClearAsana, setConfirmClearAsana] = useState(false);
@@ -90,6 +92,8 @@ export function TaskList({ selectedModel }: TaskListProps) {
   const svnBrowserEditCallback = useRef<((url: string) => void) | null>(null);
   const pendingUploadsRef = useRef<Array<{ file: File; docType: 'SA' | 'SD' | 'image' }>>([]);
   const autoExpandNextTask = useRef(false);
+  const autoExecuteAfterCreate = useRef<{ testOptions: TestOptions; executionRunId: string } | null>(null);
+  const handleExecuteTaskRef = useRef<((taskId: string, modelOverride?: string, mockupFiles?: string[], testOptions?: TestOptions, executionRunId?: string) => void) | null>(null);
 
   // Check if project has SVN config
   const svnPaths = (() => {
@@ -183,6 +187,13 @@ export function TaskList({ selectedModel }: TaskListProps) {
           pendingUploadsRef.current = [];
         }
       }
+      // Auto-execute if requested
+      if (autoExecuteAfterCreate.current) {
+        const { testOptions, executionRunId } = autoExecuteAfterCreate.current;
+        autoExecuteAfterCreate.current = null;
+        handleExecuteTaskRef.current(newTask.id, undefined, [], testOptions, executionRunId);
+      }
+
       autoExpandNextTask.current = false;
     }
     prevTaskCount.current = projectTasks.length;
@@ -247,6 +258,7 @@ export function TaskList({ selectedModel }: TaskListProps) {
     addToast({ type: 'info', title: 'Task execution started', message: `Using ${model}...` });
     setExpandedTaskId(null);
   }, [currentProjectId, client, selectedModel, addToast]);
+  handleExecuteTaskRef.current = handleExecuteTask;
 
   const handleUploadImage = useCallback((taskId: string, file: File, executionRunId?: string) => {
     if (!currentProjectId || !client) return;
@@ -480,39 +492,122 @@ export function TaskList({ selectedModel }: TaskListProps) {
               className="w-full bg-muted border border-border rounded-md px-2.5 py-1.5 text-xs min-h-[50px] resize-y outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
             />
 
-            <div className="flex gap-2">
-              <div className="flex-1">
-                <label className="block text-[10px] text-muted-foreground mb-0.5">Type</label>
-                <div className="relative">
-                  <select
-                    value={newTaskType}
-                    onChange={(e) => setNewTaskType(e.target.value as TaskType)}
-                    className="w-full bg-muted border border-border rounded-md px-2 py-1.5 text-xs appearance-none outline-none focus:border-primary focus:ring-1 focus:ring-primary/30 pr-6"
+            <div>
+              <span className="block text-[10px] text-muted-foreground mb-1">Type</span>
+              <div className="flex flex-wrap gap-1.5">
+                {(['bug', 'feature', 'refactor', 'testing', 'other'] as TaskType[]).map(t => (
+                  <button
+                    key={t}
+                    type="button"
+                    onClick={() => setNewTaskType(t)}
+                    className={`px-2.5 py-1 rounded text-xs font-medium transition-colors border ${
+                      t === newTaskType
+                        ? `${TASK_TYPE_COLORS[t]} ring-1 ring-current border-current/30`
+                        : 'bg-background/50 border-border/50 text-muted-foreground hover:text-foreground hover:border-border'
+                    }`}
                   >
-                    <option value="feature">Feature</option>
-                    <option value="bug">Bug</option>
-                    <option value="refactor">Refactor</option>
-                    <option value="other">Other</option>
-                  </select>
-                  <IconChevronDown className="w-3 h-3 absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
-                </div>
-              </div>
-              <div className="flex-1">
-                <label className="block text-[10px] text-muted-foreground mb-0.5">Label</label>
-                <div className="relative">
-                  <select
-                    value={newLabel}
-                    onChange={(e) => setNewLabel(e.target.value)}
-                    className="w-full bg-muted border border-border rounded-md px-2 py-1.5 text-xs appearance-none outline-none focus:border-primary focus:ring-1 focus:ring-primary/30 pr-6"
-                  >
-                    {availableLabels.map(l => (
-                      <option key={l} value={l}>{l.charAt(0).toUpperCase() + l.slice(1)}</option>
-                    ))}
-                  </select>
-                  <IconChevronDown className="w-3 h-3 absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
-                </div>
+                    {t.toUpperCase()}
+                  </button>
+                ))}
               </div>
             </div>
+
+            <div>
+              <span className="block text-[10px] text-muted-foreground mb-1">Label</span>
+              <div className="flex flex-wrap gap-1.5">
+                {availableLabels.map(l => (
+                  <button
+                    key={l}
+                    type="button"
+                    onClick={() => setNewLabel(l)}
+                    className={`px-2.5 py-1 rounded text-xs font-medium transition-colors border ${
+                      l === newLabel
+                        ? `${LABEL_COLORS[l] || 'bg-primary/15 text-primary'} ring-1 ring-current border-current/30`
+                        : 'bg-background/50 border-border/50 text-muted-foreground hover:text-foreground hover:border-border'
+                    }`}
+                  >
+                    {l.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Test Options */}
+            {(newLabel === 'frontend' || newLabel === 'backend') && (
+              <div>
+                <span className="block text-[10px] text-muted-foreground mb-1">測試選項</span>
+                <div className="flex flex-wrap gap-x-4 gap-y-1.5">
+                  {newLabel === 'frontend' && (
+                    <>
+                      {/* Smoke Test always runs — just show as badge */}
+                      <span className="flex items-center gap-1 text-xs text-teal-400/70 select-none">
+                        <span className="w-3 h-3 flex items-center justify-center text-teal-400">✓</span>
+                        Smoke Test（必跑）
+                      </span>
+                      {([
+                        { key: 'e2eSpec' as const, label: 'E2E Spec' },
+                        { key: 'consoleScript' as const, label: 'Console Script' },
+                      ]).map(({ key, label }) => (
+                        <label key={key} className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={newTestOptions[key]}
+                            onChange={e => setNewTestOptions(prev => ({ ...prev, [key]: e.target.checked }))}
+                            className="w-3 h-3 accent-blue-500"
+                          />
+                          {label}
+                        </label>
+                      ))}
+                      {/* Mock / Real API — always show for frontend (smoke test always runs) */}
+                      <div className="flex gap-3 ml-2 pl-2 border-l border-border/50">
+                        {([
+                          { key: 'useMock' as const, label: 'Mock', color: 'accent-blue-400' },
+                          { key: 'useRealApi' as const, label: 'Real API', color: 'accent-green-500' },
+                        ]).map(({ key, label, color }) => (
+                          <label key={key} className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground cursor-pointer select-none">
+                            <input
+                              type="checkbox"
+                              checked={newTestOptions[key]}
+                              onChange={e => setNewTestOptions(prev => ({ ...prev, [key]: e.target.checked }))}
+                              className={`w-3 h-3 ${color}`}
+                            />
+                            {label}
+                          </label>
+                        ))}
+                      </div>
+                      {/* headed toggle — only when E2E Spec is checked */}
+                      {newTestOptions.e2eSpec && (
+                        <div className="w-full flex items-center gap-2 mt-0.5">
+                          <span className="text-[10px] text-muted-foreground">E2E 執行模式：</span>
+                          <button
+                            type="button"
+                            onClick={() => setNewTestOptions(prev => ({ ...prev, headed: false }))}
+                            className={`px-2 py-0.5 rounded text-xs font-medium transition-colors border ${
+                              !newTestOptions.headed
+                                ? 'bg-gray-500/20 text-gray-300 border-gray-500/40 ring-1 ring-gray-400/30'
+                                : 'bg-background/50 border-border/50 text-muted-foreground hover:text-foreground'
+                            }`}
+                          >
+                            背景執行
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setNewTestOptions(prev => ({ ...prev, headed: true }))}
+                            className={`px-2 py-0.5 rounded text-xs font-medium transition-colors border ${
+                              newTestOptions.headed
+                                ? 'bg-blue-500/20 text-blue-300 border-blue-500/40 ring-1 ring-blue-400/30'
+                                : 'bg-background/50 border-border/50 text-muted-foreground hover:text-foreground'
+                            }`}
+                          >
+                            前台執行（可見畫面）
+                          </button>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
 
             {/* Spec Source — Frontend */}
             {svnPaths.frontend && (
@@ -655,14 +750,32 @@ export function TaskList({ selectedModel }: TaskListProps) {
               )}
             </div>
 
-            <button
-              onClick={handleCreateTask}
-              disabled={!newTitle.trim()}
-              className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-primary text-primary-foreground rounded-lg disabled:opacity-40 disabled:cursor-not-allowed hover:bg-primary/90 transition-colors"
-            >
-              <IconPlus className="w-3 h-3" />
-              Create Task{stagedFiles.length > 0 ? ` (${stagedFiles.length} file${stagedFiles.length > 1 ? 's' : ''})` : ''}
-            </button>
+            <div className="flex gap-2">
+              <button
+                onClick={handleCreateTask}
+                disabled={!newTitle.trim()}
+                className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-muted text-foreground border border-border rounded-lg disabled:opacity-40 disabled:cursor-not-allowed hover:bg-muted/80 transition-colors"
+              >
+                <IconPlus className="w-3 h-3" />
+                建立
+              </button>
+              <button
+                onClick={() => {
+                  const executionRunId = crypto.randomUUID();
+                  const testOptions: TestOptions = {
+                    frontend: { smokeTest: newTestOptions.smokeTest, e2eSpec: newTestOptions.e2eSpec, consoleScript: newTestOptions.consoleScript, useMock: newTestOptions.useMock, useRealApi: newTestOptions.useRealApi, headed: newTestOptions.headed },
+                    backend: { unitTests: true, apiSmokeTest: false, apiContract: false },
+                  };
+                  autoExecuteAfterCreate.current = { testOptions, executionRunId };
+                  handleCreateTask();
+                }}
+                disabled={!newTitle.trim()}
+                className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-primary text-primary-foreground rounded-lg disabled:opacity-40 disabled:cursor-not-allowed hover:bg-primary/90 transition-colors"
+              >
+                <IconPlay className="w-3 h-3" />
+                執行
+              </button>
+            </div>
           </div>
         )}
       </div>
@@ -934,13 +1047,13 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
   onRemoveSvnFile?: (index: number) => void;
   onReloadSvn?: () => void;
 }) {
-  const ALL_LABELS = ['frontend', 'backend', 'devops', 'testing', 'review', 'architect'] as const;
-  const ALL_TASK_TYPES: TaskType[] = ['bug', 'feature', 'refactor', 'other'];
+  const ALL_LABELS = ['frontend', 'backend', 'devops', 'review', 'architect'] as const;
+  const ALL_TASK_TYPES: TaskType[] = ['bug', 'feature', 'refactor', 'testing', 'other'];
   const isAsana = task.source === 'asana';
   const client = useWsStore(s => s.client);
   const [execModel, setExecModel] = useState<string>(task.preferredModel || 'sonnet');
   const [testOptions, setTestOptions] = useState<TestOptions>(() => ({
-    frontend: { smokeTest: true, e2eSpec: false, useRealApi: false },
+    frontend: { smokeTest: true, e2eSpec: false, consoleScript: false, useMock: true, useRealApi: false, headed: false },
     backend: { unitTests: true, apiSmokeTest: false, apiContract: false },
   }));
   // Each time the task panel is opened, generate a fresh execution run ID.
@@ -1374,9 +1487,14 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
           <div className="text-[10px] text-muted-foreground font-medium mb-1.5 uppercase tracking-wide">測試選項</div>
           {task.label === 'frontend' && (
             <div className="flex flex-wrap gap-x-4 gap-y-1">
+              {/* Smoke Test always runs */}
+              <span className="flex items-center gap-1.5 text-xs text-emerald-400 select-none">
+                <span className="w-3 h-3 flex items-center justify-center text-[10px]">✓</span>
+                Smoke Test（必跑）
+              </span>
               {([
-                { key: 'smokeTest', label: 'Smoke Test' },
                 { key: 'e2eSpec', label: '產出 E2E Spec' },
+                { key: 'consoleScript', label: 'Console Script' },
               ] as const).map(({ key, label }) => (
                 <label key={key} className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground cursor-pointer select-none">
                   <input
@@ -1388,16 +1506,43 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
                   {label}
                 </label>
               ))}
-              {(testOptions.frontend.smokeTest || testOptions.frontend.e2eSpec) && (
-                <label className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground cursor-pointer select-none ml-2 pl-2 border-l border-border/50">
-                  <input
-                    type="checkbox"
-                    checked={testOptions.frontend.useRealApi}
-                    onChange={e => setTestOptions(prev => ({ ...prev, frontend: { ...prev.frontend, useRealApi: e.target.checked } }))}
-                    className="w-3 h-3 accent-green-500"
-                  />
-                  使用真實 API（後端已完成）
-                </label>
+              {/* Mock / Real API always shown (smoke test always runs) */}
+              <div className="flex gap-3 ml-2 pl-2 border-l border-border/50">
+                {([
+                  { key: 'useMock' as const, label: 'Mock', color: 'accent-blue-400' },
+                  { key: 'useRealApi' as const, label: 'Real API', color: 'accent-green-500' },
+                ]).map(({ key, label, color }) => (
+                  <label key={key} className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={testOptions.frontend[key]}
+                      onChange={e => setTestOptions(prev => ({ ...prev, frontend: { ...prev.frontend, [key]: e.target.checked } }))}
+                      className={`w-3 h-3 ${color}`}
+                    />
+                    {label}
+                  </label>
+                ))}
+              </div>
+              {testOptions.frontend.e2eSpec && (
+                <div className="flex gap-1.5 ml-2 pl-2 border-l border-border/50">
+                  {([
+                    { value: false, label: '背景執行' },
+                    { value: true, label: '前台執行' },
+                  ]).map(({ value, label }) => (
+                    <button
+                      key={label}
+                      type="button"
+                      onClick={() => setTestOptions(prev => ({ ...prev, frontend: { ...prev.frontend, headed: value } }))}
+                      className={`px-2 py-0.5 rounded text-[10px] font-medium border transition-colors ${
+                        testOptions.frontend.headed === value
+                          ? 'bg-amber-500/15 text-amber-400 border-amber-400/30 ring-1 ring-amber-400/30'
+                          : 'bg-background/50 border-border/50 text-muted-foreground hover:text-foreground'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
               )}
             </div>
           )}

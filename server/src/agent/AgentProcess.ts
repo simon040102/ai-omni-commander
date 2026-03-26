@@ -80,6 +80,8 @@ export class AgentProcess extends EventEmitter {
         includePartialMessages: true,
         // Avoid nested session detection
         env: cleanEnv,
+        // Extra MCP servers (bypasses .mcp.json interactive approval requirement)
+        ...(this.config.mcpServers && { mcpServers: this.config.mcpServers }),
       },
     });
 

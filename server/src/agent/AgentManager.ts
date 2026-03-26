@@ -1,7 +1,9 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type {
   AgentRole, AgentStartConfig, AgentOutputEvent,
   ClaudeStreamResult, ClaudeStreamInit, BusEvent,
-  Workspace,
+  Workspace, McpStdioServerConfig,
 } from '@omni/shared';
 import { EventTypes } from '@omni/shared';
 import { AgentProcess } from './AgentProcess.js';
@@ -29,7 +31,7 @@ const NUDGE_MESSAGE = '請繼續執行任務。如果你在等待什麼或遇到
 
 /** When agent exits mid-task, auto-resume this many times before accepting completion */
 const MAX_AUTO_RESUMES = 3;
-const AUTO_RESUME_MESSAGE = '請繼續執行任務，直到所有工作都完成為止。';
+const AUTO_RESUME_MESSAGE = '請繼續執行任務。注意：任務完成標準包含 build 零錯誤、smoke test（若有勾選）通過、E2E spec 撰寫並執行（若有勾選），全部完成後才能加上 [TASK_COMPLETE]。';
 
 export class AgentManager {
   private processes = new Map<string, AgentProcess>();
@@ -203,13 +205,19 @@ export class AgentManager {
       });
     }
 
+    // Inject playwright MCP server if workingDir contains a .mcp.json with playwright
+    // This bypasses the interactive approval requirement for .mcp.json in subprocess mode
+    const agentWorkingDir = config.workingDir || this.getWorkingDir(config.projectId, config.role);
+    const mcpServers = this.resolveMcpServers(agentWorkingDir);
+
     // Create AgentProcess
     const proc = new AgentProcess(agent.id, config.role, {
-      workingDir: config.workingDir || this.getWorkingDir(config.projectId, config.role),
+      workingDir: agentWorkingDir,
       systemPrompt,
       model: config.model || roleConfig.model,
       allowedTools: roleConfig.allowedTools,
       useWorkspaceSkills: config.useWorkspaceSkills !== false, // default to true
+      ...(mcpServers && { mcpServers }),
     });
 
     // Wire up event handlers
@@ -617,6 +625,22 @@ export class AgentManager {
     return project.workingDir;
   }
 
+  /**
+   * Read .mcp.json from workingDir and return its mcpServers map.
+   * This allows subprocess agents to use MCP servers without interactive approval.
+   */
+  private resolveMcpServers(workingDir: string): Record<string, McpStdioServerConfig> | undefined {
+    try {
+      const raw = readFileSync(join(workingDir, '.mcp.json'), 'utf8');
+      const parsed = JSON.parse(raw) as { mcpServers?: Record<string, McpStdioServerConfig> };
+      return parsed.mcpServers && Object.keys(parsed.mcpServers).length > 0
+        ? parsed.mcpServers
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   private async handleAgentComplete(
     agentId: string,
     projectId: string,
@@ -860,10 +884,14 @@ export class AgentManager {
   }
 
   private checkMarkers(agentId: string, projectId: string, taskId: string | null, content: string): void {
-    // [TASK_COMPLETE] — agent explicitly signals it's done; skip auto-resume
+    // [TASK_COMPLETE] or [REVIEW_COMPLETE] — agent signals done; skip auto-resume
     if (/(?:^|\n)\s*\[TASK_COMPLETE\]/.test(content)) {
       this.taskDoneAgents.add(agentId);
       logger.info({ agentId, taskId }, '[TASK_COMPLETE] marker detected — auto-resume disabled');
+    }
+    if (/(?:^|\n)\s*\[REVIEW_COMPLETE\]/.test(content)) {
+      this.taskDoneAgents.add(agentId);
+      logger.info({ agentId, taskId }, '[REVIEW_COMPLETE] marker detected — auto-resume disabled');
     }
 
     // Only match [NEEDS_HUMAN] when it appears as a standalone marker,

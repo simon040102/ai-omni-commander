@@ -117,7 +117,7 @@ export class AsanaSyncService {
     // Parse project config for auto-execute rules
     const config = project.configJson ? JSON.parse(project.configJson) as ProjectConfig : null;
     const syncConfig = config?.asanaSyncConfig;
-    const autoExecuteRules = syncConfig?.autoExecuteRules || { bug: false, feature: false, refactor: false, other: false };
+    const autoExecuteRules = syncConfig?.autoExecuteRules || { bug: false, feature: false, refactor: false, testing: false, other: false };
     const maxConcurrent = syncConfig?.maxConcurrentAgents || 2;
 
     let newTasks = 0;
@@ -212,7 +212,7 @@ export class AsanaSyncService {
         } as WsMessage);
 
         // Auto-execute if rules allow
-        const shouldAutoExecute = autoExecuteRules[classification.taskType] || false;
+        const shouldAutoExecute = (autoExecuteRules as Record<string, boolean>)[classification.taskType] || false;
         if (shouldAutoExecute && autoExecuted < maxConcurrent) {
           try {
             await this.pipeline.executeTask(task.id);
