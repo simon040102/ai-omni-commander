@@ -3,6 +3,7 @@ import { marked } from 'marked';
 import type { AgentOutput } from '../../stores/agentStore';
 import { useAgentStore } from '../../stores/agentStore';
 import { IconSearch, IconStop, IconRefresh, IconSend, IconChevronDown, IconChevronRight, IconX } from '../ui/Icons';
+import { FlowPanel } from './FlowPanel';
 
 // Configure marked for terminal-friendly output
 marked.setOptions({
@@ -168,6 +169,7 @@ export function TerminalOutput({ outputs, title, role, status, agentId, projectI
   const [searchQuery, setSearchQuery] = useState('');
   const [showSearch, setShowSearch] = useState(false);
   const [filterType, setFilterType] = useState<string | null>(null);
+  const [showFlow, setShowFlow] = useState(false);
 
   // Use store for command input to persist across project switches
   const commandInputs = useAgentStore((s) => s.commandInputs);
@@ -177,6 +179,10 @@ export function TerminalOutput({ outputs, title, role, status, agentId, projectI
   // Get streaming buffer for real-time display
   const streamingBuffers = useAgentStore((s) => s.streamingBuffers);
   const streamingBuffer = agentId ? streamingBuffers[agentId] : undefined;
+
+  // Get flow plan for this agent
+  const flowPlans = useAgentStore((s) => s.flowPlans);
+  const flowPlan = agentId ? (flowPlans[agentId] ?? null) : null;
 
   // Pasted files state
   const [pastedFiles, setPastedFiles] = useState<PastedFile[]>([]);
@@ -388,6 +394,19 @@ export function TerminalOutput({ outputs, title, role, status, agentId, projectI
             </button>
           ))}
 
+          {/* Flow plan toggle */}
+          <button
+            onClick={() => setShowFlow(!showFlow)}
+            className={`px-2 py-1 rounded text-[11px] font-medium transition-colors ${
+              showFlow
+                ? 'bg-emerald-500/15 text-emerald-400'
+                : 'text-muted-foreground/60 hover:text-muted-foreground hover:bg-muted'
+            }`}
+            title="Toggle flow plan"
+          >
+            FLOW{flowPlan ? ` ${flowPlan.steps.filter(s => s.status === 'done').length}/${flowPlan.steps.length}` : ''}
+          </button>
+
           <div className="h-4 w-px bg-border" />
 
           {/* Agent actions */}
@@ -442,7 +461,8 @@ export function TerminalOutput({ outputs, title, role, status, agentId, projectI
         </div>
       )}
 
-      {/* Output area */}
+      {/* Output area + Flow panel */}
+      <div className="flex flex-1 min-h-0">
       <div className="relative flex-1 min-h-0">
         <div
           ref={scrollRef}
@@ -531,6 +551,9 @@ export function TerminalOutput({ outputs, title, role, status, agentId, projectI
             Latest
           </button>
         )}
+      </div>
+      {/* Flow panel (right side) */}
+      {showFlow && <FlowPanel plan={flowPlan} agentStatus={status} />}
       </div>
 
       {/* Command input */}

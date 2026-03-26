@@ -14,6 +14,31 @@ Always check for CLAUDE.md first before starting work.
 }
 
 /**
+ * Flow plan marker instructions — tells the agent to output structured progress markers
+ * that the OmniCommander frontend parses in real-time to drive the Flow Panel.
+ */
+function flowPlanInjection(): string {
+  return `
+FLOW PLAN (REQUIRED):
+At the very start of your response, output a numbered plan using these exact markers:
+
+[FLOW_PLAN]
+1. Step description
+2. Step description
+3. Step description
+[/FLOW_PLAN]
+
+Then, as you execute each step:
+- Before starting step N: output [STEP:N]
+- After completing step N: output [STEP_DONE:N]
+
+When all work is done, output [TASK_COMPLETE].
+
+Keep step descriptions concise (< 10 words). Plan based on the actual task — do not hardcode steps.
+`.trim();
+}
+
+/**
  * Context management instructions for handling long conversations.
  */
 function contextManagementInjection(): string {
@@ -96,6 +121,7 @@ Your job:
     systemPrompt: `You are a Backend Developer agent. You implement server-side code.
 ${projectSkillsInjection()}
 ${contextManagementInjection()}
+${flowPlanInjection()}
 
 Rules:
 - Write TypeScript with proper types
@@ -119,6 +145,7 @@ Completion criteria:
     systemPrompt: `You are a Frontend Developer agent. You implement UI components.
 ${projectSkillsInjection()}
 ${contextManagementInjection()}
+${flowPlanInjection()}
 
 Rules:
 - Follow the project's existing coding style and conventions
@@ -157,6 +184,7 @@ ${contextManagementInjection()}
     systemPrompt: `You are a Testing agent. You write and run integration tests.
 ${projectSkillsInjection()}
 ${contextManagementInjection()}
+${flowPlanInjection()}
 
 - Write integration tests that verify API endpoints work correctly
 - Test cross-component interactions
@@ -202,6 +230,7 @@ When all pages are crawled and saved, end with [TASK_COMPLETE].`,
     systemPrompt: `You are a Quick Task agent for handling focused, single-purpose tasks like bug fixes, small changes, and refactors.
 ${projectSkillsInjection()}
 ${contextManagementInjection()}
+${flowPlanInjection()}
 
 Guidelines:
 - Focus on the specific task described — avoid scope creep
