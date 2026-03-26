@@ -1,4 +1,4 @@
-export type TaskType = 'bug' | 'feature' | 'refactor' | 'other';
+export type TaskType = 'bug' | 'feature' | 'refactor' | 'testing' | 'other';
 
 export type TaskSource = 'manual' | 'asana';
 

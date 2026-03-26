@@ -50,9 +50,12 @@ export interface WsUploadDocument extends WsMessage {
 
 export interface TestOptions {
   frontend: {
-    smokeTest: boolean;   // validate-output skill smoke test
-    e2eSpec: boolean;     // write E2E spec file
-    useRealApi: boolean;  // false = mock data, true = real backend API
+    smokeTest: boolean;      // validate-output skill smoke test
+    e2eSpec: boolean;        // write E2E spec file
+    consoleScript: boolean;  // generate browser console test script (e2e/console-scripts/{module}.js)
+    useMock: boolean;        // run with mock data
+    useRealApi: boolean;     // run with real backend API
+    headed: boolean;         // run E2E spec with visible browser (--headed)
   };
   backend: {
     unitTests: boolean;   // write and run unit tests

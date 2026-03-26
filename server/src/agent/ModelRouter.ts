@@ -12,6 +12,7 @@ const BASE_MODEL_MAP: Record<TaskType, string> = {
   bug: 'sonnet',
   feature: 'opus',
   refactor: 'sonnet',
+  testing: 'sonnet',
   other: 'haiku',
 };
 
