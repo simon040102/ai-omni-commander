@@ -18,6 +18,8 @@ export class AgentProcess extends EventEmitter {
   // Buffers for accumulating streamed content
   private _streamingTextBuffer = '';
   private _streamingThinkingBuffer = '';
+  /** When true, all output emission is suppressed (set immediately on stop) */
+  private _outputSuppressed = false;
 
   constructor(
     public readonly agentId: string,
@@ -124,10 +126,17 @@ export class AgentProcess extends EventEmitter {
     return false;
   }
 
+  /** Suppress all future output emission (called externally for immediate silencing) */
+  suppressOutput(): void {
+    this._outputSuppressed = true;
+  }
+
   /** Gracefully stop the agent */
   async stop(): Promise<void> {
     if (!this._query) return;
 
+    // Immediately suppress output so no new events leak while close() propagates
+    this._outputSuppressed = true;
     this.setStatus('stopping');
     this._query.close();
 
@@ -161,6 +170,9 @@ export class AgentProcess extends EventEmitter {
 
   /** Map SDK messages to internal events */
   private handleSDKMessage(msg: SDKMessage): void {
+    // If output is suppressed (agent is being stopped), skip all emission
+    if (this._outputSuppressed) return;
+
     // Log all system messages to understand what SDK sends
     if (msg.type === 'system') {
       const subtype = 'subtype' in msg ? msg.subtype : 'unknown';

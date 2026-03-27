@@ -16,7 +16,8 @@ import type {
 import type { SvnConfig } from '@omni/shared';
 import { normalizeSvnUrl, extractFunctionCode } from '../svn/SvnSpecService.js';
 import type { SvnSpecService } from '../svn/SvnSpecService.js';
-import { getSvnCredentials, setSvnCredentials, getAsanaPat, setAsanaPat } from '../db/queries/globalConfig.js';
+import { getSvnCredentials, setSvnCredentials, getAsanaPat, setAsanaPat, getGlobalMcpServers, setGlobalMcpServers } from '../db/queries/globalConfig.js';
+import type { McpStdioServerConfig } from '@omni/shared';
 import { getConfig, reloadAsanaPat } from '../config.js';
 import type { MasterOrchestrator } from '../orchestrator/MasterOrchestrator.js';
 import type { AgentManager } from '../agent/AgentManager.js';
@@ -938,6 +939,7 @@ export function registerHandlers(
         hasSvnPassword: !!creds.password,
         hasAsanaPat: !!(asanaPat || getConfig().asanaPat),
         asanaPatSource: asanaPat ? 'db' : getConfig().asanaPat ? 'env' : 'none',
+        globalMcpServers: getGlobalMcpServers(),
       },
     } as WsMessage);
   };
@@ -956,6 +958,12 @@ export function registerHandlers(
     const { payload } = msg as unknown as { payload: { pat: string } };
     setAsanaPat(payload.pat);
     reloadAsanaPat(payload.pat || null);
+    sendConfigState(ws);
+  });
+
+  wsServer.registerHandler('config.setGlobalMcpServers', (msg: WsMessage, ws: WebSocket) => {
+    const { payload } = msg as unknown as { payload: { servers: Record<string, unknown> } };
+    setGlobalMcpServers(payload.servers as Record<string, McpStdioServerConfig>);
     sendConfigState(ws);
   });
 
@@ -1479,6 +1487,7 @@ function sendProjectState(
         payload: {
           agentId: agent.id,
           outputs: outputs.reverse(),
+          flowPlanJson: agent.flowPlanJson || null,
         },
       } as WsMessage);
     }

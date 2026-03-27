@@ -11,6 +11,7 @@ import { getAgentRoleConfig } from './AgentRoles.js';
 import { ProgressDetector } from './ProgressDetector.js';
 import { createAgent, updateAgent, getAgent, getAgentsByRole, getAgentsByProject, getRunningAgents } from '../db/queries/agents.js';
 import { getProject, updateProject } from '../db/queries/projects.js';
+import { getGlobalMcpServers } from '../db/queries/globalConfig.js';
 import { updateTask, getTask } from '../db/queries/tasks.js';
 import { logAgentOutput, createIntervention, clearAgentOutputs, getAgentOutputs } from '../db/queries/events.js';
 import { createPlan } from '../db/queries/plans.js';
@@ -205,17 +206,16 @@ export class AgentManager {
       });
     }
 
-    // Inject playwright MCP server if workingDir contains a .mcp.json with playwright
-    // This bypasses the interactive approval requirement for .mcp.json in subprocess mode
+    // Resolve MCP servers (global config + workspace .mcp.json) and build allowed tools list
     const agentWorkingDir = config.workingDir || this.getWorkingDir(config.projectId, config.role);
-    const mcpServers = this.resolveMcpServers(agentWorkingDir);
+    const { allowedTools, mcpServers } = this.resolveToolsAndMcp(roleConfig.allowedTools, agentWorkingDir);
 
     // Create AgentProcess
     const proc = new AgentProcess(agent.id, config.role, {
       workingDir: agentWorkingDir,
       systemPrompt,
       model: config.model || roleConfig.model,
-      allowedTools: roleConfig.allowedTools,
+      allowedTools,
       useWorkspaceSkills: config.useWorkspaceSkills !== false, // default to true
       ...(mcpServers && { mcpServers }),
     });
@@ -381,11 +381,15 @@ export class AgentManager {
       systemPrompt += `\n\nCurrent API Contracts:\n${JSON.stringify(contracts, null, 2)}`;
     }
 
+    const rerunWorkingDir = this.getWorkingDir(agent.projectId, agent.role);
+    const { allowedTools, mcpServers } = this.resolveToolsAndMcp(roleConfig.allowedTools, rerunWorkingDir);
+
     const newProc = new AgentProcess(agentId, agent.role, {
-      workingDir: this.getWorkingDir(agent.projectId, agent.role),
+      workingDir: rerunWorkingDir,
       systemPrompt,
       model: agent.model,
-      allowedTools: roleConfig.allowedTools,
+      allowedTools,
+      ...(mcpServers && { mcpServers }),
     });
 
     this.wireProcessEvents(newProc, agentId, agent.projectId, null);
@@ -404,7 +408,15 @@ export class AgentManager {
 
     if (proc) {
       logger.info({ agentId, sessionId: proc.sessionId }, 'Resuming existing process');
-      await proc.resume(followUpPrompt);
+      // Prepend flow plan progress so agent knows where it left off
+      let enrichedPrompt = followUpPrompt;
+      if (enrichedPrompt) {
+        const flowSummary = this.progressDetector.getFlowPlanSummary(agentId);
+        if (flowSummary) {
+          enrichedPrompt = `${flowSummary}\n\n請從尚未完成的步驟繼續執行，不要重複已完成的步驟。\n\n${enrichedPrompt}`;
+        }
+      }
+      await proc.resume(enrichedPrompt);
     } else {
       const agent = getAgent(agentId);
       logger.info({ agentId, agentSessionId: agent?.sessionId, agentStatus: agent?.status }, 'Resuming from DB agent');
@@ -416,19 +428,38 @@ export class AgentManager {
       const roleConfig = getAgentRoleConfig(agent.role);
 
       // Create new process with session resume
+      const resumeWorkingDir = this.getWorkingDir(agent.projectId, agent.role);
+      const { allowedTools, mcpServers } = this.resolveToolsAndMcp(roleConfig.allowedTools, resumeWorkingDir);
+
       const newProc = new AgentProcess(agentId, agent.role, {
-        workingDir: this.getWorkingDir(agent.projectId, agent.role),
+        workingDir: resumeWorkingDir,
         sessionId: agent.sessionId,
         model: agent.model,
         systemPrompt: roleConfig.systemPrompt,
-        allowedTools: roleConfig.allowedTools,
+        allowedTools,
+        ...(mcpServers && { mcpServers }),
       });
 
       // Wire up event handlers (same as startAgent)
       this.wireProcessEvents(newProc, agentId, agent.projectId, agent.currentTaskId);
 
       this.processes.set(agentId, newProc);
-      await newProc.resume(followUpPrompt);
+
+      // Restore flow plan state from DB so isFlowComplete() works after server restart
+      if (agent.flowPlanJson) {
+        this.progressDetector.restoreFlowPlan(agentId, agent.flowPlanJson);
+      }
+
+      // Prepend flow plan progress summary so the agent knows where it left off
+      let enrichedPrompt = followUpPrompt;
+      if (enrichedPrompt) {
+        const flowSummary = this.progressDetector.getFlowPlanSummary(agentId);
+        if (flowSummary) {
+          enrichedPrompt = `${flowSummary}\n\n請從尚未完成的步驟繼續執行，不要重複已完成的步驟。\n\n${enrichedPrompt}`;
+        }
+      }
+
+      await newProc.resume(enrichedPrompt);
 
       logger.info({ agentId, sessionId: agent.sessionId }, 'Agent session resumed');
     }
@@ -486,6 +517,9 @@ export class AgentManager {
       await proc.stop();
       this.processes.delete(agentId);
     }
+
+    // Clear task-done flag so the new session can auto-resume and output normally
+    this.taskDoneAgents.delete(agentId);
 
     // Resume the session with the user's instruction as the new prompt
     logger.info({ agentId, sessionId }, 'Resuming agent session with user instruction');
@@ -550,12 +584,9 @@ export class AgentManager {
         timestamp: new Date().toISOString(),
       });
 
-      // Check for markers — only in assistant text output
-      if (output.streamType === 'text') {
-        this.checkMarkers(agentId, projectId, taskId, output.content);
-      }
-
-      // Detect progress changes (non-streaming only to avoid noise)
+      // Detect progress changes BEFORE checking markers — so [STEP_DONE:N] in the same
+      // text block as [TASK_COMPLETE] gets processed first, allowing isFlowComplete() to
+      // return true when checkMarkers runs.
       if (!output.isStreaming) {
         const progress = this.progressDetector.processOutput(agentId, output);
         if (progress) {
@@ -565,7 +596,17 @@ export class AgentManager {
             payload: progress as unknown as Record<string, unknown>,
             timestamp: new Date().toISOString(),
           });
+          // Persist flow plan to DB whenever it changes
+          const flowJson = this.progressDetector.getFlowPlanJson(agentId);
+          if (flowJson) {
+            updateAgent(agentId, { flowPlanJson: flowJson });
+          }
         }
+      }
+
+      // Check for markers — only in assistant text output (after progress detection)
+      if (output.streamType === 'text') {
+        this.checkMarkers(agentId, projectId, taskId, output.content);
       }
     });
 
@@ -626,19 +667,56 @@ export class AgentManager {
   }
 
   /**
-   * Read .mcp.json from workingDir and return its mcpServers map.
+   * Merge global MCP servers (from global_config) with project-level .mcp.json.
+   * Project-level entries override global ones with the same name.
    * This allows subprocess agents to use MCP servers without interactive approval.
    */
   private resolveMcpServers(workingDir: string): Record<string, McpStdioServerConfig> | undefined {
+    const global = getGlobalMcpServers();
+
+    let project: Record<string, McpStdioServerConfig> = {};
     try {
       const raw = readFileSync(join(workingDir, '.mcp.json'), 'utf8');
       const parsed = JSON.parse(raw) as { mcpServers?: Record<string, McpStdioServerConfig> };
-      return parsed.mcpServers && Object.keys(parsed.mcpServers).length > 0
-        ? parsed.mcpServers
-        : undefined;
+      project = parsed.mcpServers ?? {};
     } catch {
-      return undefined;
+      // no .mcp.json — fine
     }
+
+    const merged = { ...global, ...project };
+    return Object.keys(merged).length > 0 ? merged : undefined;
+  }
+
+  /**
+   * Build the full allowedTools list by merging role defaults with MCP tool names.
+   * Also returns resolved mcpServers for passing to AgentProcess.
+   */
+  private resolveToolsAndMcp(
+    roleAllowedTools: string[],
+    workingDir: string,
+  ): { allowedTools: string[]; mcpServers?: Record<string, McpStdioServerConfig> } {
+    const mcpServers = this.resolveMcpServers(workingDir);
+    const allowedTools = [...roleAllowedTools];
+
+    if (mcpServers) {
+      for (const serverName of Object.keys(mcpServers)) {
+        if (serverName === 'playwright') {
+          const pwTools = [
+            'browser_navigate', 'browser_navigate_back', 'browser_click', 'browser_type',
+            'browser_fill_form', 'browser_select_option', 'browser_press_key', 'browser_hover',
+            'browser_drag', 'browser_snapshot', 'browser_take_screenshot', 'browser_evaluate',
+            'browser_run_code', 'browser_console_messages', 'browser_network_requests',
+            'browser_wait_for', 'browser_resize', 'browser_tabs', 'browser_close',
+            'browser_handle_dialog', 'browser_file_upload', 'browser_install',
+          ];
+          for (const tool of pwTools) {
+            allowedTools.push(`mcp__${serverName}__${tool}`);
+          }
+        }
+      }
+    }
+
+    return { allowedTools, mcpServers };
   }
 
   private async handleAgentComplete(
@@ -684,9 +762,12 @@ export class AgentManager {
 
     // --- Self-review: intercept first completion to trigger review ---
     const agent = getAgent(agentId);
+    // Skip self-review if agent explicitly signaled [TASK_COMPLETE] —
+    // the flow plan already includes a self-review step before the marker.
     const shouldSelfReview = taskId
       && !result.is_error
       && !this.reviewingAgents.has(agentId)
+      && !this.taskDoneAgents.has(agentId)
       && agent
       && (agent.role === 'frontend' || agent.role === 'backend')
       && this.isReviewEnabled(projectId);
@@ -884,14 +965,25 @@ export class AgentManager {
   }
 
   private checkMarkers(agentId: string, projectId: string, taskId: string | null, content: string): void {
-    // [TASK_COMPLETE] or [REVIEW_COMPLETE] — agent signals done; skip auto-resume
+    // [TASK_COMPLETE] or [REVIEW_COMPLETE] — agent signals done
+    // Only force-stop if flow plan is fully done (or no flow plan exists)
     if (/(?:^|\n)\s*\[TASK_COMPLETE\]/.test(content)) {
       this.taskDoneAgents.add(agentId);
-      logger.info({ agentId, taskId }, '[TASK_COMPLETE] marker detected — auto-resume disabled');
+      const flowComplete = this.progressDetector.isFlowComplete(agentId);
+      if (flowComplete) {
+        // Don't stop immediately — let the agent finish its current turn so it can
+        // write a completion summary after the marker. The SDK query() will end naturally,
+        // firing the 'result' event which triggers handleAgentComplete().
+        // taskDoneAgents flag prevents auto-resume there.
+        logger.info({ agentId, taskId }, '[TASK_COMPLETE] + flow complete — letting agent finish current turn');
+      } else {
+        logger.info({ agentId, taskId }, '[TASK_COMPLETE] detected but flow plan not finished — letting agent continue');
+      }
     }
     if (/(?:^|\n)\s*\[REVIEW_COMPLETE\]/.test(content)) {
       this.taskDoneAgents.add(agentId);
-      logger.info({ agentId, taskId }, '[REVIEW_COMPLETE] marker detected — auto-resume disabled');
+      // Don't stop immediately — let the agent finish its current turn (e.g., write summary)
+      logger.info({ agentId, taskId }, '[REVIEW_COMPLETE] marker detected — letting agent finish current turn');
     }
 
     // Only match [NEEDS_HUMAN] when it appears as a standalone marker,

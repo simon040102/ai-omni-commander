@@ -276,6 +276,9 @@ export function runMigrations(db: Database.Database): void {
   if (!agentCols.some(c => c.name === 'title')) {
     db.exec("ALTER TABLE agents ADD COLUMN title TEXT");
   }
+  if (!agentCols.some(c => c.name === 'flow_plan_json')) {
+    db.exec("ALTER TABLE agents ADD COLUMN flow_plan_json TEXT");
+  }
 
   // =============================================
   // v4 Migration: SVN spec auto-fetch support
