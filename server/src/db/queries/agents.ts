@@ -62,6 +62,7 @@ export function updateAgent(id: string, data: Partial<{
   totalOutputTokens: number;
   lastHeartbeat: string;
   reviewResultJson: string | null;
+  flowPlanJson: string | null;
 }>): void {
   const db = getDb();
   const sets: string[] = [];
@@ -79,6 +80,7 @@ export function updateAgent(id: string, data: Partial<{
   if (data.totalOutputTokens !== undefined) { sets.push('total_output_tokens = ?'); values.push(data.totalOutputTokens); }
   if (data.lastHeartbeat !== undefined) { sets.push('last_heartbeat = ?'); values.push(data.lastHeartbeat); }
   if (data.reviewResultJson !== undefined) { sets.push('review_result_json = ?'); values.push(data.reviewResultJson); }
+  if (data.flowPlanJson !== undefined) { sets.push('flow_plan_json = ?'); values.push(data.flowPlanJson); }
 
   if (sets.length === 0) return;
   sets.push("updated_at = datetime('now')");
@@ -127,6 +129,7 @@ function mapAgent(row: Record<string, unknown>): Agent {
     totalInputTokens: (row['total_input_tokens'] as number) || 0,
     totalOutputTokens: (row['total_output_tokens'] as number) || 0,
     lastHeartbeat: row['last_heartbeat'] as string | null,
+    flowPlanJson: (row['flow_plan_json'] as string) || null,
     createdAt: row['created_at'] as string,
     updatedAt: row['updated_at'] as string,
   };

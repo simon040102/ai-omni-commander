@@ -28,6 +28,17 @@ At the very start of your response, output a numbered plan using these exact mar
 3. Step description
 [/FLOW_PLAN]
 
+IMPORTANT: The FLOW_PLAN must include EVERY step you will perform from start to finish.
+This includes implementation steps AND all verification steps such as:
+- Self-review (re-read your changes against requirements)
+- Running tests / writing tests
+- Running the build
+- Using validate-output or smoke test skills
+- Any cleanup or final checks
+Do NOT add steps after the plan is output. Do NOT perform actions outside the plan.
+If your completion criteria say "review changes" or "run build", those MUST appear as numbered steps in the plan.
+NEVER output [FLOW_PLAN] more than once. If you are interrupted, poked, or resume after a pause, do NOT output a new plan — just continue executing from where you left off using [STEP:N] markers.
+
 Then, as you execute each step:
 - Before starting step N: output [STEP:N]
 - After completing step N: output [STEP_DONE:N]

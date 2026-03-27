@@ -553,7 +553,15 @@ export function TerminalOutput({ outputs, title, role, status, agentId, projectI
         )}
       </div>
       {/* Flow panel (right side) */}
-      {showFlow && <FlowPanel plan={flowPlan} agentStatus={status} />}
+      {showFlow && (
+        <FlowPanel
+          plan={flowPlan}
+          agentStatus={status}
+          onReRun={agentId && onSendCommand ? (stepN, stepLabel) => {
+            onSendCommand(agentId, `Please re-run from step ${stepN}: "${stepLabel}". Treat all previous steps as incomplete and resume the task from this step onwards. Output [STEP:${stepN}] to mark it active, then continue to completion.`);
+          } : undefined}
+        />
+      )}
       </div>
 
       {/* Command input */}

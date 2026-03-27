@@ -24,15 +24,27 @@ function applyFlowMarkers(text: string, current: AgentFlowPlan | null): AgentFlo
   let plan = current;
 
   // [FLOW_PLAN]\n1. ...\n2. ...\n[/FLOW_PLAN]
-  const planMatch = /\[FLOW_PLAN\]([\s\S]*?)\[\/FLOW_PLAN\]/g.exec(text);
-  if (planMatch) {
-    const lines = planMatch[1].trim().split('\n');
-    const steps: FlowStep[] = [];
-    for (const line of lines) {
-      const m = /^\s*(\d+)[.)]\s+(.+)/.exec(line.trim());
-      if (m) steps.push({ n: parseInt(m[1]), label: m[2].trim(), status: 'pending' });
+  // First plan initializes; subsequent plans APPEND to existing steps (e.g., bug fix after completion)
+  {
+    const planMatch = /\[FLOW_PLAN\]([\s\S]*?)\[\/FLOW_PLAN\]/g.exec(text);
+    if (planMatch) {
+      const lines = planMatch[1].trim().split('\n');
+      const newSteps: FlowStep[] = [];
+      for (const line of lines) {
+        const m = /^\s*(\d+)[.)]\s+(.+)/.exec(line.trim());
+        if (m) newSteps.push({ n: parseInt(m[1]), label: m[2].trim(), status: 'pending' });
+      }
+      if (newSteps.length > 0) {
+        if (!plan) {
+          plan = { steps: newSteps };
+        } else {
+          // Append: renumber new steps continuing from last existing step
+          const nextN = Math.max(...plan.steps.map(s => s.n)) + 1;
+          const renumbered = newSteps.map((s, i) => ({ ...s, n: nextN + i }));
+          plan = { steps: [...plan.steps, ...renumbered] };
+        }
+      }
     }
-    if (steps.length > 0) plan = { steps };
   }
 
   if (!plan) return null;
@@ -116,6 +128,9 @@ interface AgentStoreState {
 
   /** Set progress for an agent */
   setProgress: (agentId: string, progress: AgentProgress) => void;
+
+  /** Set flow plan for an agent directly (from server DB) */
+  setFlowPlan: (agentId: string, plan: AgentFlowPlan) => void;
 
   /** Clear progress for an agent */
   clearProgress: (agentId: string) => void;
@@ -246,6 +261,10 @@ export const useAgentStore = create<AgentStoreState>()(
 
       setCommandInput: (agentId, value) => set((state) => ({
         commandInputs: { ...state.commandInputs, [agentId]: value },
+      })),
+
+      setFlowPlan: (agentId, plan) => set((state) => ({
+        flowPlans: { ...state.flowPlans, [agentId]: plan },
       })),
 
       setProgress: (agentId, progress) => set((state) => ({

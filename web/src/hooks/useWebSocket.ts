@@ -31,6 +31,7 @@ export function useWebSocket() {
   const clearOutputs = useAgentStore(s => s.clearOutputs);
   const clearAllOutputs = useAgentStore(s => s.clearAll);
   const setProgress = useAgentStore(s => s.setProgress);
+  const setFlowPlan = useAgentStore(s => s.setFlowPlan);
   const addTask = useProjectStore(s => s.addTask);
   const setTasks = useProjectStore(s => s.setTasks);
   const setReviewResult = useProjectStore(s => s.setReviewResult);
@@ -143,6 +144,22 @@ export function useWebSocket() {
                 content: o.content,
                 timestamp: o.timestamp,
               })));
+            }
+            // Restore flow plan from server DB (overrides re-parsed plan if present)
+            const flowPlanJson = payload['flowPlanJson'] as string | null;
+            if (bulkAgentId && flowPlanJson) {
+              try {
+                const parsed = JSON.parse(flowPlanJson) as { steps: Array<{ n: number; label: string; status: string }> };
+                if (parsed.steps?.length > 0) {
+                  setFlowPlan(bulkAgentId, {
+                    steps: parsed.steps.map(s => ({
+                      n: s.n,
+                      label: s.label,
+                      status: s.status as 'pending' | 'active' | 'done',
+                    })),
+                  });
+                }
+              } catch { /* ignore parse errors */ }
             }
             break;
           }

@@ -83,7 +83,7 @@ export function TaskList({ selectedModel }: TaskListProps) {
   const [newLabel, setNewLabel] = useState('frontend');
   const [newSpecUrl, setNewSpecUrl] = useState('');
   const [newBackendSpecUrl, setNewBackendSpecUrl] = useState('');
-  const [newTestOptions, setNewTestOptions] = useState({ smokeTest: true, e2eSpec: false, consoleScript: false, useMock: true, useRealApi: false, headed: false });
+  const [newTestOptions, setNewTestOptions] = useState({ smokeTest: false, e2eSpec: false, consoleScript: false, useMock: true, useRealApi: false, headed: false });
   const [stagedFiles, setStagedFiles] = useState<Array<{ file: File; docType: 'SA' | 'SD' | 'image' }>>([]);
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
   const [confirmClearAsana, setConfirmClearAsana] = useState(false);
@@ -539,12 +539,8 @@ export function TaskList({ selectedModel }: TaskListProps) {
                 <div className="flex flex-wrap gap-x-4 gap-y-1.5">
                   {newLabel === 'frontend' && (
                     <>
-                      {/* Smoke Test always runs — just show as badge */}
-                      <span className="flex items-center gap-1 text-xs text-teal-400/70 select-none">
-                        <span className="w-3 h-3 flex items-center justify-center text-teal-400">✓</span>
-                        Smoke Test（必跑）
-                      </span>
                       {([
+                        { key: 'smokeTest' as const, label: 'Smoke Test' },
                         { key: 'e2eSpec' as const, label: 'E2E Spec' },
                         { key: 'consoleScript' as const, label: 'Console Script' },
                       ]).map(({ key, label }) => (
@@ -1053,7 +1049,7 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
   const client = useWsStore(s => s.client);
   const [execModel, setExecModel] = useState<string>(task.preferredModel || 'sonnet');
   const [testOptions, setTestOptions] = useState<TestOptions>(() => ({
-    frontend: { smokeTest: true, e2eSpec: false, consoleScript: false, useMock: true, useRealApi: false, headed: false },
+    frontend: { smokeTest: false, e2eSpec: false, consoleScript: false, useMock: true, useRealApi: false, headed: false },
     backend: { unitTests: true, apiSmokeTest: false, apiContract: false },
   }));
   // Each time the task panel is opened, generate a fresh execution run ID.
@@ -1487,12 +1483,8 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
           <div className="text-[10px] text-muted-foreground font-medium mb-1.5 uppercase tracking-wide">測試選項</div>
           {task.label === 'frontend' && (
             <div className="flex flex-wrap gap-x-4 gap-y-1">
-              {/* Smoke Test always runs */}
-              <span className="flex items-center gap-1.5 text-xs text-emerald-400 select-none">
-                <span className="w-3 h-3 flex items-center justify-center text-[10px]">✓</span>
-                Smoke Test（必跑）
-              </span>
               {([
+                { key: 'smokeTest', label: 'Smoke Test' },
                 { key: 'e2eSpec', label: '產出 E2E Spec' },
                 { key: 'consoleScript', label: 'Console Script' },
               ] as const).map(({ key, label }) => (

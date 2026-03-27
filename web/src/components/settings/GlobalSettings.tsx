@@ -11,6 +11,7 @@ export function GlobalSettings() {
   const [svnPassword, setSvnPassword] = useState('');
   const [asanaPat, setAsanaPat] = useState('');
   const [asanaPatSource, setAsanaPatSource] = useState<'none' | 'env' | 'db'>('none');
+  const [playwrightEnabled, setPlaywrightEnabled] = useState(false);
   const [loaded, setLoaded] = useState(false);
 
   // Test states
@@ -22,12 +23,13 @@ export function GlobalSettings() {
     if (!client || loaded) return;
     const unsub = client.addMessageListener((msg) => {
       if (msg.type === 'config.state') {
-        const p = msg.payload as { svnUsername: string; hasSvnPassword: boolean; hasAsanaPat: boolean; asanaPatSource: string };
+        const p = msg.payload as { svnUsername: string; hasSvnPassword: boolean; hasAsanaPat: boolean; asanaPatSource: string; globalMcpServers?: Record<string, unknown> };
         setSvnUsername(p.svnUsername || '');
         if (!loaded) {
           setSvnPassword(p.hasSvnPassword ? '••••••••' : '');
           setAsanaPat(p.hasAsanaPat ? '••••••••' : '');
           setAsanaPatSource((p.asanaPatSource as 'none' | 'env' | 'db') || 'none');
+          setPlaywrightEnabled(!!(p.globalMcpServers && 'playwright' in p.globalMcpServers));
         }
         setLoaded(true);
       }
@@ -199,6 +201,51 @@ export function GlobalSettings() {
           <p className="text-[10px] text-muted-foreground">
             Get your token from <span className="text-foreground/70">Asana &rarr; My Settings &rarr; Apps &rarr; Personal Access Tokens</span>
           </p>
+        </div>
+
+        {/* Global MCP Servers */}
+        <div className="border border-border rounded-lg p-4 space-y-3">
+          <div className="flex items-center gap-2">
+            <svg className="w-4 h-4 text-purple-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M9 3H5a2 2 0 00-2 2v4m6-6h10a2 2 0 012 2v4M9 3v18m0 0h10a2 2 0 002-2V9M9 21H5a2 2 0 01-2-2V9m0 0h18" />
+            </svg>
+            <h4 className="text-sm font-medium">Global MCP Servers</h4>
+            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground">All agents</span>
+          </div>
+          <p className="text-xs text-muted-foreground">全域啟用的 MCP servers，所有 agent 啟動時自動注入（無需 .mcp.json 授權）</p>
+
+          {/* Playwright toggle */}
+          <div className="flex items-center justify-between py-2 px-3 rounded-md border border-border/60 bg-muted/20">
+            <div>
+              <div className="text-sm font-medium">Playwright MCP</div>
+              <div className="text-[11px] text-muted-foreground">瀏覽器自動化 — smoke test / E2E</div>
+            </div>
+            <button
+              onClick={() => {
+                const next = !playwrightEnabled;
+                setPlaywrightEnabled(next);
+                if (!client) return;
+                client.send({
+                  type: 'config.setGlobalMcpServers',
+                  id: crypto.randomUUID(),
+                  timestamp: new Date().toISOString(),
+                  payload: {
+                    servers: next
+                      ? { playwright: { command: 'npx', args: ['@playwright/mcp@latest'] } }
+                      : {},
+                  },
+                });
+                addToast({ type: 'success', title: `Playwright MCP ${next ? 'enabled' : 'disabled'} globally` });
+              }}
+              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                playwrightEnabled ? 'bg-purple-500' : 'bg-muted-foreground/30'
+              }`}
+            >
+              <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${
+                playwrightEnabled ? 'translate-x-6' : 'translate-x-1'
+              }`} />
+            </button>
+          </div>
         </div>
 
         {/* Save Button */}

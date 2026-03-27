@@ -43,6 +43,8 @@ export interface Agent {
   totalInputTokens: number;
   totalOutputTokens: number;
   lastHeartbeat: string | null;
+  /** JSON-serialized flow plan (steps + progress) persisted across restarts */
+  flowPlanJson: string | null;
   createdAt: string;
   updatedAt: string;
 }

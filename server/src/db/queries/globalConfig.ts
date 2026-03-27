@@ -45,6 +45,30 @@ export function setAsanaPat(pat: string): void {
 }
 
 // =============================================
+// Global MCP servers
+// =============================================
+
+import type { McpStdioServerConfig } from '@omni/shared';
+
+export function getGlobalMcpServers(): Record<string, McpStdioServerConfig> {
+  const raw = getGlobalConfig('global.mcpServers');
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw) as Record<string, McpStdioServerConfig>;
+  } catch {
+    return {};
+  }
+}
+
+export function setGlobalMcpServers(servers: Record<string, McpStdioServerConfig>): void {
+  if (Object.keys(servers).length === 0) {
+    deleteGlobalConfig('global.mcpServers');
+  } else {
+    setGlobalConfig('global.mcpServers', JSON.stringify(servers));
+  }
+}
+
+// =============================================
 // SVN credential helpers
 // =============================================
 
