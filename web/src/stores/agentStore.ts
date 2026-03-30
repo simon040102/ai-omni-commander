@@ -19,6 +19,19 @@ export interface AgentFlowPlan {
   steps: FlowStep[];
 }
 
+/**
+ * Post-compression step remap: if step N is already 'done', the agent's
+ * numbering has reset after context compression. Map N to the Nth non-done step.
+ */
+function remapStepNumber(n: number, steps: FlowStep[]): number {
+  const target = steps.find(s => s.n === n);
+  if (!target || target.status !== 'done') return n;
+  const nonDone = steps.filter(s => s.status !== 'done').sort((a, b) => a.n - b.n);
+  if (nonDone.length === 0) return n;
+  const idx = Math.min(n - 1, nonDone.length - 1);
+  return nonDone[idx].n;
+}
+
 /** Parse flow markers from a text chunk and return updated plan */
 function applyFlowMarkers(text: string, current: AgentFlowPlan | null): AgentFlowPlan | null {
   let plan = current;
@@ -38,10 +51,14 @@ function applyFlowMarkers(text: string, current: AgentFlowPlan | null): AgentFlo
         if (!plan) {
           plan = { steps: newSteps };
         } else {
-          // Append: renumber new steps continuing from last existing step
-          const nextN = Math.max(...plan.steps.map(s => s.n)) + 1;
-          const renumbered = newSteps.map((s, i) => ({ ...s, n: nextN + i }));
-          plan = { steps: [...plan.steps, ...renumbered] };
+          const allDone = plan.steps.every(s => s.status === 'done');
+          if (allDone) {
+            // All steps done — append new work (e.g., bug fix after completion)
+            const nextN = Math.max(...plan.steps.map(s => s.n)) + 1;
+            const renumbered = newSteps.map((s, i) => ({ ...s, n: nextN + i }));
+            plan = { steps: [...plan.steps, ...renumbered] };
+          }
+          // else: still has pending steps — post-compression duplicate, ignore
         }
       }
     }
@@ -49,26 +66,29 @@ function applyFlowMarkers(text: string, current: AgentFlowPlan | null): AgentFlo
 
   if (!plan) return null;
 
-  // [STEP:N] — mark step N active, previous steps done
+  // [STEP:N] — mark step N active, previous steps done, future steps pending
   const stepMatches = [...text.matchAll(/\[STEP:(\d+)\]/g)];
   for (const m of stepMatches) {
-    const n = parseInt(m[1]);
+    const n = remapStepNumber(parseInt(m[1]), plan.steps);
     plan = {
       steps: plan.steps.map(s =>
         s.n === n ? { ...s, status: 'active' }
         : s.n < n ? { ...s, status: 'done' }
-        : s
+        : { ...s, status: 'pending' } // reset future steps (undo premature TASK_COMPLETE)
       ),
     };
   }
 
-  // [STEP_DONE:N] — mark step N done
+  // [STEP_DONE:N] — mark step N done only if all prior steps are done
   const doneMatches = [...text.matchAll(/\[STEP_DONE:(\d+)\]/g)];
   for (const m of doneMatches) {
-    const n = parseInt(m[1]);
-    plan = {
-      steps: plan.steps.map(s => s.n === n ? { ...s, status: 'done' } : s),
-    };
+    const n = remapStepNumber(parseInt(m[1]), plan.steps);
+    const priorAllDone = plan.steps.filter(s => s.n < n).every(s => s.status === 'done');
+    if (priorAllDone) {
+      plan = {
+        steps: plan.steps.map(s => s.n === n ? { ...s, status: 'done' } : s),
+      };
+    }
   }
 
   // [TASK_COMPLETE] — mark all steps done

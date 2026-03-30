@@ -117,14 +117,20 @@ export class ProgressDetector {
               });
               logger.info(`Flow plan detected for ${agentId}: ${lines.length} steps`);
             } else {
-              // Subsequent flow plan — append with renumbered steps
-              const nextN = s.flowSteps.length > 0 ? Math.max(...s.flowSteps.map(st => st.n)) + 1 : 1;
-              const newSteps = lines.map((line, i) => {
-                const m = /^\s*\d+[.)]\s+(.+)/.exec(line.trim());
-                return { n: nextN + i, label: m![1].trim(), status: 'pending' as const };
-              });
-              s.flowSteps = [...s.flowSteps, ...newSteps];
-              logger.info(`Flow plan appended for ${agentId}: +${lines.length} steps (total ${s.flowSteps.length})`);
+              const allDone = s.flowSteps.every(st => st.status === 'done');
+              if (allDone) {
+                // All steps done — append new work (e.g., bug fix after completion)
+                const nextN = s.flowSteps.length > 0 ? Math.max(...s.flowSteps.map(st => st.n)) + 1 : 1;
+                const newSteps = lines.map((line, i) => {
+                  const m = /^\s*\d+[.)]\s+(.+)/.exec(line.trim());
+                  return { n: nextN + i, label: m![1].trim(), status: 'pending' as const };
+                });
+                s.flowSteps = [...s.flowSteps, ...newSteps];
+                logger.info(`Flow plan appended for ${agentId}: +${lines.length} steps (total ${s.flowSteps.length})`);
+              } else {
+                // Still has pending/active steps — post-compression duplicate, ignore
+                logger.info(`Ignoring duplicate flow plan for ${agentId} (${s.flowSteps.filter(st => st.status !== 'done').length} steps still pending)`);
+              }
             }
             s.flowTotalSteps = s.flowSteps.length;
             s.flowDoneSteps = s.flowSteps.filter(st => st.status === 'done').length;
@@ -138,22 +144,34 @@ export class ProgressDetector {
       // [STEP:N] → update currentPhase and mark step active (previous ones done)
       const stepActiveMatch = output.content.match(/\[STEP:(\d+)\]/);
       if (stepActiveMatch && s.flowTotalSteps > 0) {
-        const n = parseInt(stepActiveMatch[1]);
+        let n = parseInt(stepActiveMatch[1]);
+        // Post-compression remap: if step N is already done, agent's numbering
+        // has reset after context compression. Map N to the Nth non-done step.
+        n = this.remapStepNumber(n, s.flowSteps);
         s.currentPhase = `step ${n}/${s.flowTotalSteps}`;
         for (const step of s.flowSteps) {
           if (step.n === n) step.status = 'active';
           else if (step.n < n) step.status = 'done';
+          else if (step.n > n) step.status = 'pending'; // reset future steps (undo premature TASK_COMPLETE)
         }
         changed = true;
       }
 
-      // [STEP_DONE:N] → increment done count and mark step done
+      // [STEP_DONE:N] → mark step done only if all prior steps are done (prevent out-of-order marking)
       const stepDoneMatches = [...output.content.matchAll(/\[STEP_DONE:(\d+)\]/g)];
       if (stepDoneMatches.length > 0) {
         for (const m of stepDoneMatches) {
-          const n = parseInt(m[1]);
+          // Post-compression remap: same logic as [STEP:N]
+          const n = this.remapStepNumber(parseInt(m[1]), s.flowSteps);
           const step = s.flowSteps.find(st => st.n === n);
-          if (step) step.status = 'done';
+          if (!step) continue;
+          // Only mark done if all prior steps are already done
+          const priorAllDone = s.flowSteps.filter(st => st.n < n).every(st => st.status === 'done');
+          if (priorAllDone) {
+            step.status = 'done';
+          } else {
+            logger.info(`Ignoring out-of-order [STEP_DONE:${n}] — prior steps not done`);
+          }
         }
         s.flowDoneSteps = s.flowSteps.filter(st => st.status === 'done').length;
         changed = true;
@@ -259,6 +277,23 @@ export class ProgressDetector {
    */
   clear(agentId: string): void {
     this.state.delete(agentId);
+  }
+
+  /**
+   * Post-compression step remap: if step N is already 'done', the agent's
+   * numbering has reset after context compression. Map N to the Nth non-done step.
+   * e.g. agent says [STEP:1] but steps 1-7 are done → returns step 8 (first non-done).
+   */
+  private remapStepNumber(n: number, flowSteps: FlowStepState[]): number {
+    const target = flowSteps.find(st => st.n === n);
+    if (!target || target.status !== 'done') return n; // No remap needed
+    const nonDone = flowSteps
+      .filter(st => st.status !== 'done')
+      .sort((a, b) => a.n - b.n);
+    if (nonDone.length === 0) return n; // All done
+    const idx = Math.min(n - 1, nonDone.length - 1); // 1-based → 0-based
+    logger.info(`Remapped [STEP:${n}] → [STEP:${nonDone[idx].n}] (post-compression)`);
+    return nonDone[idx].n;
   }
 
   private computePercentage(s: ProgressState): number {
