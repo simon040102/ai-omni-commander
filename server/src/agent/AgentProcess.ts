@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import type { Query, SDKMessage, SDKAssistantMessage, SDKUserMessage as SDKUserMsg, SDKResultMessage, SDKSystemMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { Query, SDKMessage, SDKAssistantMessage, SDKUserMessage as SDKUserMsg, SDKResultMessage, SDKSystemMessage, HookInput, HookCallbackMatcher } from '@anthropic-ai/claude-agent-sdk';
 import type { AgentRole, AgentSpawnConfig } from '@omni/shared';
 import { createChildLogger } from '../utils/logger.js';
 
@@ -14,12 +14,22 @@ export class AgentProcess extends EventEmitter {
   private _status: AgentProcessStatus = 'idle';
   private _sessionId: string | null = null;
   private _pid: number | null = null;
+  /** AbortController for forcefully terminating the underlying CLI process.
+   *  Must be recreated on each spawn() since abort() is one-shot. */
+  private _abortController: AbortController | null = null;
 
   // Buffers for accumulating streamed content
   private _streamingTextBuffer = '';
   private _streamingThinkingBuffer = '';
   /** When true, all output emission is suppressed (set immediately on stop) */
   private _outputSuppressed = false;
+
+  // Queue-based input: allows injecting user messages without stop/resume
+  private _inputQueue: string[] = [];
+  private _inputWaiter: (() => void) | null = null;
+
+  /** External callback to provide context after compaction (set by AgentManager) */
+  public onCompactionContext: (() => string | null) | null = null;
 
   constructor(
     public readonly agentId: string,
@@ -65,8 +75,64 @@ export class AgentProcess extends EventEmitter {
 
     logger.info({ platform: process.platform, permissionMode }, 'Using platform-specific permission mode');
 
+    // Create a fresh AbortController for each spawn (abort() is one-shot, cannot be reused)
+    this._abortController = new AbortController();
+
+    // Queue-based AsyncGenerator: yields initial prompt, then waits for queued input.
+    // This allows sendInput() to inject follow-up messages without stop/resume.
+    this._inputQueue = [];
+    this._inputWaiter = null;
+    const self = this;
+    async function* messageGenerator() {
+      // Yield initial prompt
+      yield {
+        type: 'user' as const,
+        message: { role: 'user' as const, content: safePrompt },
+        parent_tool_use_id: null,
+        session_id: self._sessionId || '',
+      };
+      // Wait for queued follow-up messages
+      while (true) {
+        if (self._inputQueue.length > 0) {
+          const text = self._inputQueue.shift()!;
+          yield {
+            type: 'user' as const,
+            message: { role: 'user' as const, content: text },
+            parent_tool_use_id: null,
+            session_id: self._sessionId || '',
+          };
+        } else {
+          // Wait until sendInput() pushes a message or agent is stopped
+          await new Promise<void>((resolve) => {
+            self._inputWaiter = resolve;
+          });
+          // If agent is stopping, exit the generator
+          if (self._status === 'stopping' || self._status === 'stopped') return;
+        }
+      }
+    }
+
+    // Build SessionStart hook to inject flow plan context after compaction
+    const compactionHook: HookCallbackMatcher = {
+      hooks: [async (input: HookInput) => {
+        if (input.hook_event_name === 'SessionStart' && 'source' in input && input.source === 'compact') {
+          const context = self.onCompactionContext?.();
+          if (context) {
+            logger.info({ agentId: self.agentId }, 'Injecting flow plan context after compaction');
+            return {
+              hookSpecificOutput: {
+                hookEventName: 'SessionStart' as const,
+                additionalContext: context,
+              },
+            };
+          }
+        }
+        return {};
+      }],
+    };
+
     this._query = query({
-      prompt: safePrompt,
+      prompt: messageGenerator(),
       options: {
         cwd: this.config.workingDir,
         model: this.config.model,
@@ -84,6 +150,12 @@ export class AgentProcess extends EventEmitter {
         env: cleanEnv,
         // Extra MCP servers (bypasses .mcp.json interactive approval requirement)
         ...(this.config.mcpServers && { mcpServers: this.config.mcpServers }),
+        // AbortController for forceful termination
+        abortController: this._abortController,
+        // Hooks: inject flow plan context after compaction
+        hooks: {
+          SessionStart: [compactionHook],
+        },
       },
     });
 
@@ -118,12 +190,21 @@ export class AgentProcess extends EventEmitter {
   }
 
   /**
-   * Send a follow-up message is not directly supported in single-query mode.
-   * Returns false — use resume() to continue a conversation instead.
+   * Send a follow-up message to the running agent via the input queue.
+   * The message will be delivered after the current turn completes.
+   * Returns true if the agent is running and input was queued.
    */
-  sendInput(_text: string): boolean {
-    logger.warn({ agentId: this.agentId }, 'Cannot send input: use resume instead');
-    return false;
+  sendInput(text: string): boolean {
+    if (!this._query || this._status !== 'running') return false;
+    this._inputQueue.push(text);
+    // Wake up the generator if it's waiting
+    if (this._inputWaiter) {
+      const waiter = this._inputWaiter;
+      this._inputWaiter = null;
+      waiter();
+    }
+    logger.info({ agentId: this.agentId, queueLen: this._inputQueue.length }, 'Input queued for agent');
+    return true;
   }
 
   /** Suppress all future output emission (called externally for immediate silencing) */
@@ -131,16 +212,54 @@ export class AgentProcess extends EventEmitter {
     this._outputSuppressed = true;
   }
 
-  /** Gracefully stop the agent */
+  /** Gracefully stop the agent — abort + close double guarantee */
   async stop(): Promise<void> {
     if (!this._query) return;
 
-    // Immediately suppress output so no new events leak while close() propagates
+    // 1. Flush any accumulated streaming buffers so they get persisted to DB
+    if (this._streamingTextBuffer.trim()) {
+      this.emit('output', {
+        agentId: this.agentId,
+        streamType: 'text',
+        content: this._streamingTextBuffer.trim(),
+        timestamp: new Date().toISOString(),
+      });
+      this._streamingTextBuffer = '';
+    }
+    if (this._streamingThinkingBuffer.trim()) {
+      this.emit('output', {
+        agentId: this.agentId,
+        streamType: 'system',
+        content: `[thinking] ${this._streamingThinkingBuffer.trim()}`,
+        timestamp: new Date().toISOString(),
+      });
+      this._streamingThinkingBuffer = '';
+    }
+
+    // 2. Now suppress output so no new events leak after this point
     this._outputSuppressed = true;
     this.setStatus('stopping');
-    this._query.close();
 
-    // Wait briefly for the stream to finish
+    // Wake up the input generator so it can exit
+    if (this._inputWaiter) {
+      const waiter = this._inputWaiter;
+      this._inputWaiter = null;
+      waiter();
+    }
+
+    // 3. AbortController — forcefully terminates the underlying HTTP connection and CLI process
+    if (this._abortController) {
+      this._abortController.abort();
+    }
+
+    // 3. close() as guarantee to clean up resources (subprocess, MCP transports, etc.)
+    try {
+      this._query.close();
+    } catch {
+      // close() may fail if already terminated — ignore
+    }
+
+    // Wait for consumeStream to finish (abort triggers AbortError in the for-await loop)
     await new Promise<void>((resolve) => {
       const timeout = setTimeout(resolve, 3000);
       const check = () => {
@@ -165,6 +284,13 @@ export class AgentProcess extends EventEmitter {
     // Ensure both are set for spawn() to use
     this._sessionId = sessionId;
     this.config.sessionId = sessionId;
+
+    // Reset state — aborted AbortController cannot be reused, spawn() creates a new one
+    this._outputSuppressed = false;
+    this._abortController = null;
+    this._inputQueue = [];
+    this._inputWaiter = null;
+
     await this.spawn(newPrompt || 'Continue where you left off.');
   }
 

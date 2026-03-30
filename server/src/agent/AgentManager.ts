@@ -32,6 +32,8 @@ const NUDGE_MESSAGE = '請繼續執行任務。如果你在等待什麼或遇到
 
 /** When agent exits mid-task, auto-resume this many times before accepting completion */
 const MAX_AUTO_RESUMES = 3;
+/** Wait this long after last user input before executing stop→resume (merge rapid inputs) */
+const INPUT_DEBOUNCE_MS = 1500;
 const AUTO_RESUME_MESSAGE = '請繼續執行任務。注意：任務完成標準包含 build 零錯誤、smoke test（若有勾選）通過、E2E spec 撰寫並執行（若有勾選），全部完成後才能加上 [TASK_COMPLETE]。';
 
 export class AgentManager {
@@ -47,6 +49,10 @@ export class AgentManager {
   private autoResumeCount = new Map<string, number>();
   /** Agents that have explicitly signaled task completion via [TASK_COMPLETE] */
   private taskDoneAgents = new Set<string>();
+  /** Per-agent debounce: buffer pending inputs and fire once after DEBOUNCE_MS of silence */
+  private inputBuffer = new Map<string, string[]>();
+  private inputDebounceTimer = new Map<string, ReturnType<typeof setTimeout>>();
+  private inputDebounceResolvers = new Map<string, Array<(v: boolean) => void>>();
   private watchdogInterval: ReturnType<typeof setInterval>;
 
   constructor(
@@ -222,6 +228,9 @@ export class AgentManager {
 
     // Wire up event handlers
     this.wireProcessEvents(proc, agent.id, config.projectId, config.taskId || null);
+
+    // Set compaction context callback — injects flow plan summary after auto-compaction
+    proc.onCompactionContext = () => this.progressDetector.getFlowPlanSummary(agent.id);
 
     this.processes.set(agent.id, proc);
     this.lastOutputAt.set(agent.id, Date.now());
@@ -443,6 +452,9 @@ export class AgentManager {
       // Wire up event handlers (same as startAgent)
       this.wireProcessEvents(newProc, agentId, agent.projectId, agent.currentTaskId);
 
+      // Set compaction context callback
+      newProc.onCompactionContext = () => this.progressDetector.getFlowPlanSummary(agentId);
+
       this.processes.set(agentId, newProc);
 
       // Restore flow plan state from DB so isFlowComplete() works after server restart
@@ -471,6 +483,56 @@ export class AgentManager {
    * this stops the current process and resumes the session with the new prompt.
    */
   async sendInputToAgent(agentId: string, text: string): Promise<boolean> {
+    // Accumulate input into per-agent buffer and debounce
+    const buf = this.inputBuffer.get(agentId) ?? [];
+    buf.push(text);
+    this.inputBuffer.set(agentId, buf);
+
+    // Clear previous timer (reset the debounce window)
+    const prevTimer = this.inputDebounceTimer.get(agentId);
+    if (prevTimer) clearTimeout(prevTimer);
+
+    // Return a promise that resolves when the debounced batch actually executes
+    return new Promise<boolean>((resolve) => {
+      const resolvers = this.inputDebounceResolvers.get(agentId) ?? [];
+      resolvers.push(resolve);
+      this.inputDebounceResolvers.set(agentId, resolvers);
+
+      const timer = setTimeout(async () => {
+        // Collect and clear buffer
+        const messages = this.inputBuffer.get(agentId) ?? [];
+        this.inputBuffer.delete(agentId);
+        this.inputDebounceTimer.delete(agentId);
+        const pendingResolvers = this.inputDebounceResolvers.get(agentId) ?? [];
+        this.inputDebounceResolvers.delete(agentId);
+
+        // Merge all buffered messages into one prompt
+        let merged: string;
+        if (messages.length === 1) {
+          merged = messages[0]!;
+        } else {
+          // Number each message so the agent addresses all of them
+          merged = messages
+            .map((m, i) => `[USER MESSAGE ${i + 1}/${messages.length}]\n${m}`)
+            .join('\n\n')
+            + '\n\n請逐一回應以上所有訊息。';
+        }
+        logger.info({ agentId, messageCount: messages.length }, 'Debounce fired — executing merged input');
+
+        try {
+          const result = await this._doSendInput(agentId, merged);
+          for (const r of pendingResolvers) r(result);
+        } catch (err) {
+          for (const r of pendingResolvers) r(false);
+        }
+      }, INPUT_DEBOUNCE_MS);
+
+      this.inputDebounceTimer.set(agentId, timer);
+    });
+  }
+
+  /** Actual send-input logic, executed after debounce merges rapid inputs */
+  private async _doSendInput(agentId: string, text: string): Promise<boolean> {
     const proc = this.processes.get(agentId);
     logger.info({ agentId, hasProc: !!proc, procStatus: proc?.status }, 'sendInputToAgent called');
 
@@ -518,8 +580,9 @@ export class AgentManager {
       this.processes.delete(agentId);
     }
 
-    // Clear task-done flag so the new session can auto-resume and output normally
-    this.taskDoneAgents.delete(agentId);
+    // Keep taskDoneAgents flag — if the agent already completed its task,
+    // don't auto-resume after responding to user input (prevents loops on casual chat).
+    // If the user sends a real bug report, the agent will work and output [TASK_COMPLETE] again.
 
     // Resume the session with the user's instruction as the new prompt
     logger.info({ agentId, sessionId }, 'Resuming agent session with user instruction');
@@ -568,12 +631,17 @@ export class AgentManager {
 
       // Only persist non-streaming outputs to DB (streaming will be followed by full message)
       if (!output.isStreaming) {
-        logAgentOutput({
-          agentId,
-          taskId: taskId || undefined,
-          streamType: output.streamType,
-          content: output.content,
-        });
+        try {
+          logAgentOutput({
+            agentId,
+            taskId: taskId || undefined,
+            streamType: output.streamType,
+            content: output.content,
+          });
+        } catch (dbErr) {
+          // FK constraint can fail if agent was deleted while still outputting — log but don't crash
+          logger.warn({ agentId, err: dbErr }, 'Failed to persist agent output (agent may have been deleted)');
+        }
       }
 
       // Broadcast via event bus (WebSocket will pick this up) — including streaming for real-time display
