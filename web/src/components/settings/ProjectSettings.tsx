@@ -34,6 +34,10 @@ export function ProjectSettings() {
   // Axure Share URL
   const [axshareUrl, setAxshareUrl] = useState('');
 
+  // Extra prompts per role
+  const [frontendExtraPrompt, setFrontendExtraPrompt] = useState('');
+  const [backendExtraPrompt, setBackendExtraPrompt] = useState('');
+
   // Parse existing config
   const existingConfig = useMemo(() => {
     if (!project?.configJson) return null;
@@ -53,6 +57,8 @@ export function ProjectSettings() {
       setSvnFrontendPath(svn?.frontendSpecPath || '');
       setSvnBackendPath(svn?.backendSpecPath || '');
       setAxshareUrl(existingConfig?.axshareUrl || '');
+      setFrontendExtraPrompt(existingConfig?.frontendExtraPrompt || '');
+      setBackendExtraPrompt(existingConfig?.backendExtraPrompt || '');
     }
   }, [project, existingConfig]);
 
@@ -83,6 +89,8 @@ export function ProjectSettings() {
       ...(existingConfig || {}),
       svnConfig,
       axshareUrl: axshareUrl.trim() || undefined,
+      frontendExtraPrompt: frontendExtraPrompt.trim() || undefined,
+      backendExtraPrompt: backendExtraPrompt.trim() || undefined,
     };
 
     client.send({
@@ -102,7 +110,7 @@ export function ProjectSettings() {
 
     addToast({ type: 'success', title: 'Project settings saved' });
   }, [client, project, name, frontendPath, backendPath, asanaProjectGid, dbConnectionString,
-    svnFrontendPath, svnBackendPath, axshareUrl, existingConfig, addToast]);
+    svnFrontendPath, svnBackendPath, axshareUrl, frontendExtraPrompt, backendExtraPrompt, existingConfig, addToast]);
 
   if (!project) {
     return (
@@ -207,6 +215,39 @@ export function ProjectSettings() {
               onChange={(e) => setAxshareUrl(e.target.value)}
               placeholder="https://xxxxxx.axshare.com"
               className="w-full bg-muted border border-border rounded-md px-3 py-2 text-sm font-mono outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
+            />
+          </div>
+        </div>
+
+        {/* Extra Prompts per Role */}
+        <div className="border border-border rounded-lg p-4 space-y-3">
+          <div className="flex items-center gap-2">
+            <svg className="w-4 h-4 text-green-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
+            </svg>
+            <h4 className="text-sm font-medium">Extra Prompt（額外提示）</h4>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            附加到 Agent 提示的額外指令。例如：指定共用元件位置、禁止使用某些套件、指定 coding 規範等。
+          </p>
+          <div>
+            <label className="block text-xs text-muted-foreground mb-1">Frontend Extra Prompt</label>
+            <textarea
+              value={frontendExtraPrompt}
+              onChange={(e) => setFrontendExtraPrompt(e.target.value)}
+              rows={4}
+              placeholder={`例如：\n- 共用搜尋元件在 src/component/SearchModal/，使用前先確認是否已有對應元件\n- 禁止使用 moment.js，改用 date-fns`}
+              className="w-full bg-muted border border-border rounded-md px-3 py-2 text-sm font-mono outline-none focus:border-primary focus:ring-1 focus:ring-primary/30 resize-y"
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-muted-foreground mb-1">Backend Extra Prompt</label>
+            <textarea
+              value={backendExtraPrompt}
+              onChange={(e) => setBackendExtraPrompt(e.target.value)}
+              rows={4}
+              placeholder={`例如：\n- API 路徑統一使用 /main/ 前綴\n- 所有 Entity 繼承 BaseEntity`}
+              className="w-full bg-muted border border-border rounded-md px-3 py-2 text-sm font-mono outline-none focus:border-primary focus:ring-1 focus:ring-primary/30 resize-y"
             />
           </div>
         </div>

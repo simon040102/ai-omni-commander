@@ -116,11 +116,20 @@ export class SpecModeHandler {
     // Parse workspaces and superpowers from project config
     let workspaces: Workspace[] = [];
     let superpowers: SuperpowersConfig | undefined;
+    let frontendExtraPrompt: string | undefined;
+    let backendExtraPrompt: string | undefined;
     if (project.configJson) {
       try {
-        const cfg = JSON.parse(project.configJson) as { workspaces?: Workspace[]; superpowers?: SuperpowersConfig };
+        const cfg = JSON.parse(project.configJson) as {
+          workspaces?: Workspace[];
+          superpowers?: SuperpowersConfig;
+          frontendExtraPrompt?: string;
+          backendExtraPrompt?: string;
+        };
         workspaces = cfg.workspaces || [];
         superpowers = cfg.superpowers;
+        frontendExtraPrompt = cfg.frontendExtraPrompt;
+        backendExtraPrompt = cfg.backendExtraPrompt;
       } catch { /* ignore */ }
     }
 
@@ -158,7 +167,8 @@ export class SpecModeHandler {
       // Inject specs to workspace before starting agent (long-term memory)
       await this.injectSpecsToWorkspace(ws, finalDocs);
 
-      const prompt = this.buildWorkspacePrompt(ws, finalDocs, role, requirement, superpowers, debugMode, testOptions);
+      const extraPrompt = role === 'frontend' ? frontendExtraPrompt : role === 'backend' ? backendExtraPrompt : undefined;
+      const prompt = this.buildWorkspacePrompt(ws, finalDocs, role, requirement, superpowers, debugMode, testOptions, extraPrompt, projectId);
 
       // Reuse existing agent for this role if available, otherwise create new
       const existingAgents = getAgentsByRole(projectId, resolvedRole);
@@ -187,7 +197,7 @@ export class SpecModeHandler {
   }
 
   /** Build the prompt for a workspace agent */
-  private buildWorkspacePrompt(workspace: Workspace, docs: ParsedDocument[], role: string, requirement?: string, superpowers?: SuperpowersConfig, debugMode?: boolean, testOptions?: TestOptions): string {
+  private buildWorkspacePrompt(workspace: Workspace, docs: ParsedDocument[], role: string, requirement?: string, superpowers?: SuperpowersConfig, debugMode?: boolean, testOptions?: TestOptions, extraPrompt?: string, projectId?: string): string {
     const docLines = docs.map(d => {
       const typeTag = `[${d.docType}] `;
       const isPdf = d.filename.toLowerCase().endsWith('.pdf');
@@ -209,6 +219,18 @@ export class SpecModeHandler {
       ? `\n## 本次需求說明\n\n${requirement.trim()}\n`
       : '';
 
+    // Resolve template variables in extraPrompt
+    const resolvedExtraPrompt = extraPrompt?.trim()
+      ? extraPrompt.trim().replace(
+          /\{AXURE_SNAPSHOTS_PATH\}/g,
+          path.join(getConfig().projectRoot, 'docs', 'axure-snapshots', projectId || ''),
+        )
+      : '';
+
+    const extraPromptSection = resolvedExtraPrompt
+      ? `\n## 專案額外指令\n\n${resolvedExtraPrompt}\n`
+      : '';
+
     // Build Superpowers methodology prefix if enabled
     let superpowersPrefix = '';
     if (superpowers?.enabled && superpowers.features.length > 0) {
@@ -218,7 +240,7 @@ export class SpecModeHandler {
     // Debug mode: work with existing codebase
     if (debugMode) {
       return `${superpowersPrefix}你的工作目錄是 "${workspace.path}"（${workspace.label}）。
-${requirementSection}
+${requirementSection}${extraPromptSection}
 ## 模式：Debug / 修改現有程式碼
 
 這是一個**現有的程式碼專案**，你的任務是根據需求修改或擴充現有功能，而不是從零開始建立。
@@ -267,7 +289,7 @@ ${this.getCompletionCriteria(role, testOptions)}
 
     // New build mode (default)
     return `${superpowersPrefix}你的工作目錄是 "${workspace.path}"（${workspace.label}）。
-${requirementSection}
+${requirementSection}${extraPromptSection}
 ## 第一步：讀取專案技能設定
 
 請先檢查工作目錄中是否有 CLAUDE.md 或 .claude/ 設定，如果有請讀取並遵循其中的指示和技能定義。
