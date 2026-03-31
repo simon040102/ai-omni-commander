@@ -64,6 +64,26 @@ function applyFlowMarkers(text: string, current: AgentFlowPlan | null): AgentFlo
     }
   }
 
+  // [FLOW_PLAN_APPEND] — append new steps mid-execution (e.g., after skill discovery)
+  // Unlike [FLOW_PLAN], this always appends regardless of current step status.
+  // Multiple FLOW_PLAN_APPEND blocks in one text chunk are all processed in order.
+  if (plan) {
+    const appendMatches = [...text.matchAll(/\[FLOW_PLAN_APPEND\]([\s\S]*?)\[\/FLOW_PLAN_APPEND\]/g)];
+    for (const appendMatch of appendMatches) {
+      const lines = appendMatch[1].trim().split('\n');
+      const newSteps: FlowStep[] = [];
+      for (const line of lines) {
+        const m = /^\s*(\d+)[.)]\s+(.+)/.exec(line.trim());
+        if (m) newSteps.push({ n: parseInt(m[1]), label: m[2].trim(), status: 'pending' });
+      }
+      if (newSteps.length > 0) {
+        const maxN = Math.max(...plan.steps.map(s => s.n));
+        const renumbered = newSteps.map((s, i) => ({ ...s, n: maxN + 1 + i }));
+        plan = { steps: [...plan.steps, ...renumbered] };
+      }
+    }
+  }
+
   if (!plan) return null;
 
   // [STEP:N] — mark step N active, previous steps done, future steps pending

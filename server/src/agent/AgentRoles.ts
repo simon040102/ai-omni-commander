@@ -6,10 +6,9 @@ import type { AgentRole, AgentRoleConfig } from '@omni/shared';
  */
 function projectSkillsInjection(): string {
   return `
-IMPORTANT: If the project working directory contains a CLAUDE.md file or .claude/ directory,
-you MUST read and follow the instructions, conventions, and agent skills defined therein.
-These project-level instructions take priority over your default behavior.
-Always check for CLAUDE.md first before starting work.
+IMPORTANT: The project's CLAUDE.md and .claude/ skills are already loaded in your context at startup.
+Follow the instructions, conventions, and agent skills defined therein — they take priority over your default behavior.
+Do NOT read CLAUDE.md manually; it is already loaded.
 `.trim();
 }
 
@@ -20,32 +19,34 @@ Always check for CLAUDE.md first before starting work.
 function flowPlanInjection(): string {
   return `
 FLOW PLAN (REQUIRED):
-At the very start of your response, output a numbered plan using these exact markers:
+Project skills and CLAUDE.md are already loaded in your context at startup.
+Output your plan immediately based on what you already know — no need to read files first:
 
 [FLOW_PLAN]
 1. Step description
 2. Step description
-3. Step description
 [/FLOW_PLAN]
 
-IMPORTANT: The FLOW_PLAN must include EVERY step you will perform from start to finish.
-This includes implementation steps AND all verification steps such as:
-- Self-review (re-read your changes against requirements)
-- Running tests / writing tests
-- Running the build
-- Using validate-output or smoke test skills
-- Any cleanup or final checks
-Do NOT add steps after the plan is output. Do NOT perform actions outside the plan.
-If your completion criteria say "review changes" or "run build", those MUST appear as numbered steps in the plan.
-NEVER output [FLOW_PLAN] more than once. If you are interrupted, poked, or resume after a pause, do NOT output a new plan — just continue executing from where you left off using [STEP:N] markers.
+Rules:
+- If CLAUDE.md defines a skill workflow, include those skill invocation steps in the plan
+- Invoke skills using the Skill tool with the exact skill name (e.g., skill: "develop-feature")
+- Do NOT perform actions outside the plan
+- NEVER output [FLOW_PLAN] more than once; if interrupted/resuming, continue with [STEP:N] markers
 
-Then, as you execute each step:
+When you invoke a skill via the Skill tool, its full instructions are returned to you.
+Immediately append the skill's sub-steps to the plan:
+
+[FLOW_PLAN_APPEND]
+1. Sub-step from skill
+2. Another sub-step
+[/FLOW_PLAN_APPEND]
+
+As you execute each step:
 - Before starting step N: output [STEP:N]
 - After completing step N: output [STEP_DONE:N]
 
 When all work is done, output [TASK_COMPLETE].
-
-Keep step descriptions concise (< 10 words). Plan based on the actual task — do not hardcode steps.
+Keep step descriptions concise (< 10 words).
 `.trim();
 }
 
@@ -146,7 +147,7 @@ Completion criteria:
 3. Write unit tests for each endpoint / module you implement
 4. Run ALL tests (e.g. npm test / pnpm test) and ensure they pass with zero failures — fix any failing tests before proceeding
 5. When all tests pass, end with [TASK_COMPLETE]`,
-    allowedTools: ['Read', 'Edit', 'Write', 'Bash', 'Glob', 'Grep', 'Agent'],
+    allowedTools: ['Read', 'Edit', 'Write', 'Bash', 'Glob', 'Grep', 'Agent', 'Skill'],
   },
 
   frontend: {
@@ -169,7 +170,7 @@ Completion criteria:
 2. If review finds issues, fix them before proceeding
 3. Run the project's build command (e.g. npm run build / pnpm build) and ensure it passes with zero errors
 4. When build succeeds, end with [TASK_COMPLETE]`,
-    allowedTools: ['Read', 'Edit', 'Write', 'Bash', 'Glob', 'Grep', 'Agent'],
+    allowedTools: ['Read', 'Edit', 'Write', 'Bash', 'Glob', 'Grep', 'Agent', 'Skill'],
   },
 
   devops: {
@@ -202,7 +203,7 @@ ${flowPlanInjection()}
 - Report results in structured format
 - If tests fail, provide clear diagnostic information
 - When your task is complete, end with [TASK_COMPLETE]`,
-    allowedTools: ['Read', 'Edit', 'Write', 'Bash', 'Glob', 'Grep', 'Agent'],
+    allowedTools: ['Read', 'Edit', 'Write', 'Bash', 'Glob', 'Grep', 'Agent', 'Skill'],
   },
 
   review: {
@@ -257,7 +258,7 @@ Completion:
 3. If the project has tests, run them to ensure nothing is broken
 4. Run the build to verify it compiles with zero errors
 5. When build succeeds, end with [TASK_COMPLETE]`,
-    allowedTools: ['Read', 'Edit', 'Write', 'Bash', 'Glob', 'Grep', 'Agent'],
+    allowedTools: ['Read', 'Edit', 'Write', 'Bash', 'Glob', 'Grep', 'Agent', 'Skill'],
   },
 };
 

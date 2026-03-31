@@ -10,6 +10,7 @@ import type { SpecResult } from '../documents/SpecFetcher.js';
 import { ModelRouter } from '../agent/ModelRouter.js';
 import { getProject, updateProject } from '../db/queries/projects.js';
 import { getTask, updateTask } from '../db/queries/tasks.js';
+import { getConfig } from '../config.js';
 import { getDocumentsForTask } from '../db/queries/taskDocuments.js';
 import { loadSuperpowersPrompt } from '../skills/superpowers/index.js';
 import { createChildLogger } from '../utils/logger.js';
@@ -63,6 +64,11 @@ export class ExecutionPipeline {
 
     // Parse project config (needed for SVN auth in spec fetch and auto-fetch)
     const projectConfig = project.configJson ? JSON.parse(project.configJson) as ProjectConfig : null;
+    const extraPrompt = task.label === 'frontend'
+      ? (projectConfig as any)?.frontendExtraPrompt as string | undefined
+      : task.label === 'backend'
+      ? (projectConfig as any)?.backendExtraPrompt as string | undefined
+      : undefined;
 
     // Fetch spec content if available (pass svnConfig so SVN https:// URLs get auth)
     let specResult: SpecResult | null = null;
@@ -115,6 +121,7 @@ export class ExecutionPipeline {
       svnDocuments,
       mockupFiles,
       testOptions,
+      extraPrompt,
     });
 
     // Resolve working directory
@@ -249,6 +256,7 @@ export class ExecutionPipeline {
     svnDocuments?: Array<{ documentId: string; filename: string; filePath: string; parsedText: string | null; docType: string | null }>;
     mockupFiles?: string[];
     testOptions?: TestOptions;
+    extraPrompt?: string;
   }): string {
     const parts: string[] = [];
 
@@ -287,6 +295,15 @@ export class ExecutionPipeline {
     // Layer 2.9: Mockup / Axure HTML snapshots
     if (opts.mockupFiles && opts.mockupFiles.length > 0) {
       parts.push(this.buildMockupSection(opts.mockupFiles));
+    }
+
+    // Layer 2.95: Extra prompt (per-role, from project settings)
+    if (opts.extraPrompt?.trim()) {
+      const resolved = opts.extraPrompt.trim().replace(
+        /\{AXURE_SNAPSHOTS_PATH\}/g,
+        path.join(getConfig().projectRoot, 'docs', 'axure-snapshots', opts.projectId),
+      );
+      parts.push(`## 專案額外指令\n\n${resolved}`);
     }
 
     // Layer 3: Task prompt
