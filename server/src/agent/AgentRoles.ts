@@ -9,6 +9,13 @@ function projectSkillsInjection(): string {
 IMPORTANT: The project's CLAUDE.md and .claude/ skills are already loaded in your context at startup.
 Follow the instructions, conventions, and agent skills defined therein — they take priority over your default behavior.
 Do NOT read CLAUDE.md manually; it is already loaded.
+
+DURING DEVELOPMENT: If you encounter ANYTHING unclear or uncertain (component patterns, API behavior, form validation, shared modals, data-testid, etc.):
+1. Check CLAUDE.md sections, examples, tables, and Skill references first
+2. If still uncertain, immediately invoke the relevant Skill using the Skill tool
+3. DO NOT guess or rely on memory — verify every time before proceeding
+
+This applies throughout the entire task, including mid-development decisions. Never proceed with uncertainty.
 `.trim();
 }
 
