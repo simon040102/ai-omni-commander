@@ -629,7 +629,8 @@ ${this.buildCompletionCriteria(role, testOptions)}
     if (role === 'frontend') {
       const opts = testOptions?.frontend;
       const lines: string[] = [
-        '- 開發完成後，執行 build 指令（例如 npm run build / pnpm build），確保零錯誤',
+        '- **回對規格**：開發完成後，重新閱讀原始規格文件，逐項確認畫面欄位、元件互動、API 串接、data-testid 是否都已正確實作。列出每項需求對應的程式碼位置及確認結果，若有缺漏立即修復',
+        '- 執行 build 指令（例如 npm run build / pnpm build），確保零錯誤',
       ];
       const runMock = opts?.useMock !== false && !opts?.useRealApi || opts?.useMock;
       const runReal = opts?.useRealApi;
@@ -678,7 +679,8 @@ ${this.buildCompletionCriteria(role, testOptions)}
     if (role === 'backend') {
       const opts = testOptions?.backend;
       const lines: string[] = [
-        '- 開發完成後，執行 build 指令，確保零錯誤',
+        '- **回對規格**：開發完成後，重新閱讀原始規格文件，逐項確認每支 API 的 URL、INPUT/OUTPUT 欄位、商業邏輯是否都已正確實作。列出每項需求對應的程式碼位置及確認結果，若有缺漏立即修復',
+        '- 執行 build 指令，確保零錯誤',
       ];
       if (opts?.unitTests) {
         lines.push(
@@ -703,7 +705,8 @@ ${this.buildCompletionCriteria(role, testOptions)}
     }
 
     // Default for other roles
-    return `- 完成任務後，如果專案有測試，請執行測試確保通過
+    return `- **回對規格**：開發完成後，重新閱讀原始規格文件，逐項確認每項需求是否都已正確實作。列出每項需求對應的程式碼位置及確認結果，若有缺漏立即修復
+- 完成任務後，如果專案有測試，請執行測試確保通過
 - 如果是前端專案，請執行 build 確保成功
 - 確認完成後，在回應末尾加上 [TASK_COMPLETE]`;
   }

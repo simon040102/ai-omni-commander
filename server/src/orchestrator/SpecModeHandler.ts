@@ -7,6 +7,7 @@ import { DocumentParser, type ParsedDocument } from '../documents/DocumentParser
 import { updateProject, getProject } from '../db/queries/projects.js';
 import { getAgentsByRole } from '../db/queries/agents.js';
 import { getTask } from '../db/queries/tasks.js';
+import { getDb } from '../db/connection.js';
 import { getConfig } from '../config.js';
 import { createChildLogger } from '../utils/logger.js';
 import { loadSuperpowersPrompt } from '../skills/superpowers/index.js';
@@ -53,6 +54,13 @@ export class SpecModeHandler {
     agentId?: string,
     executionRunId?: string,
   ): Promise<void> {
+    // Clear old document bindings for this task before uploading new ones
+    if (taskId) {
+      const db = getDb();
+      db.prepare('DELETE FROM task_documents WHERE task_id = ?').run(taskId);
+      logger.info({ taskId }, 'Cleared old task document bindings');
+    }
+
     let subFolder: string | undefined;
     if (agentId) {
       subFolder = agentId;
@@ -104,6 +112,13 @@ export class SpecModeHandler {
   async execute(projectId: string, requirement?: string, model?: string, debugMode?: boolean, testOptions?: TestOptions): Promise<void> {
     const project = getProject(projectId);
     if (!project) throw new Error(`Project ${projectId} not found`);
+
+    // Clean up execution runs without agents and orphaned task folders before execution
+    const cleanedRuns = await this.documentParser.cleanupExecutionRunsWithoutAgents(projectId);
+    const cleanedFolders = await this.documentParser.cleanupOrphanedFolders(projectId);
+    if (cleanedRuns > 0 || cleanedFolders > 0) {
+      logger.info({ projectId, cleanedRuns, cleanedFolders }, 'Cleaned up before execution');
+    }
 
     // Get all uploaded documents — exclude task-specific attachments (files in subfolders)
     const allDocs = this.documentParser.getDocuments(projectId);

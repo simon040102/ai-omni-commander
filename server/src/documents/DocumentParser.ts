@@ -360,6 +360,126 @@ export class DocumentParser {
     return docs.filter(d => docTypes.includes(d.docType));
   }
 
+  /**
+   * Clean up execution run folders where the agent has been deleted.
+   * Scans task folders and removes execution run subfolders (executionRunId UUIDs)
+   * that have no corresponding agent records.
+   */
+  async cleanupExecutionRunsWithoutAgents(projectId: string): Promise<number> {
+    const db = getDb();
+    const projectDir = path.join(this.uploadDir, projectId);
+
+    // Get all task subdirectories (folders like SM27_xxx_taskid or task_xxx_taskid)
+    let taskDirs: string[] = [];
+    try {
+      const entries = await fs.readdir(projectDir, { withFileTypes: true });
+      taskDirs = entries
+        .filter(e => e.isDirectory() && /[0-9a-f]{8}/.test(e.name)) // Has taskid-like suffix
+        .map(e => path.join(projectDir, e.name).replace(/\\/g, '/'));
+    } catch {
+      return 0;
+    }
+
+    let deletedCount = 0;
+
+    // For each task directory, check execution run subfolders
+    for (const taskDir of taskDirs) {
+      try {
+        const entries = await fs.readdir(taskDir, { withFileTypes: true });
+
+        for (const entry of entries) {
+          if (entry.isDirectory()) {
+            const runId = entry.name;
+
+            // Check if this runId has any corresponding agent
+            const agentCount = db.prepare(
+              'SELECT COUNT(*) as cnt FROM agents WHERE execution_run_id = ?'
+            ).get(runId) as { cnt: number };
+
+            if (agentCount.cnt === 0) {
+              // No agents for this run — delete it
+              const runDir = path.join(taskDir, runId);
+              try {
+                await fs.rm(runDir, { recursive: true, force: true });
+                logger.info({ projectId, runId }, 'Execution run folder cleaned up (no agents)');
+                deletedCount++;
+              } catch (err) {
+                logger.warn({ err, runId }, 'Failed to cleanup execution run folder');
+              }
+            }
+          }
+        }
+      } catch (err) {
+        logger.warn({ err, taskDir }, 'Failed to scan task directory');
+      }
+    }
+
+    return deletedCount;
+  }
+
+  /**
+   * Clean up orphaned task folders (folders with no bound documents).
+   * Scans uploads/{projectId}/ for subdirectories where all files are unbound.
+   * Call this periodically or after bulk task deletions.
+   */
+  async cleanupOrphanedFolders(projectId: string): Promise<number> {
+    const db = getDb();
+    const projectDir = path.join(this.uploadDir, projectId);
+
+    // Scan all subdirectories in projectDir (not the root)
+    const subdirs = new Set<string>();
+    try {
+      const entries = await fs.readdir(projectDir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isDirectory()) {
+          subdirs.add(path.join(projectDir, entry.name).replace(/\\/g, '/'));
+        }
+      }
+    } catch {
+      // Directory doesn't exist
+      return 0;
+    }
+
+    if (subdirs.size === 0) return 0;
+
+    // For each subdirectory, check if ANY file in it is bound to a task
+    let deletedCount = 0;
+    for (const subdir of subdirs) {
+      // Get all documents in this subtree
+      const docRows = db.prepare(`
+        SELECT id FROM documents
+        WHERE project_id = ? AND file_path LIKE ?
+      `).all(projectId, `${subdir}%`) as Array<{ id: string }>;
+
+      if (docRows.length === 0) {
+        // No documents at all in this folder — skip (folder is empty)
+        continue;
+      }
+
+      // Check if ANY document is bound to a task
+      const boundCount = db.prepare(`
+        SELECT COUNT(*) as cnt FROM task_documents
+        WHERE document_id IN (${docRows.map(() => '?').join(',')})
+      `).get(...docRows.map(r => r.id)) as { cnt: number };
+
+      if (boundCount.cnt === 0) {
+        // All documents are orphaned — delete folder and records
+        try {
+          await fs.rm(subdir, { recursive: true, force: true });
+          for (const doc of docRows) {
+            db.prepare('DELETE FROM documents WHERE id = ?').run(doc.id);
+          }
+          logger.info({ projectId, folder: subdir }, 'Orphaned folder cleaned up');
+          deletedCount++;
+        } catch (err) {
+          logger.warn({ err, projectId, folder: subdir }, 'Failed to cleanup orphaned folder');
+        }
+      }
+    }
+
+    return deletedCount;
+  }
+
   /** Delete a single document by ID (DB row + physical file + associated .md and images) */
   async deleteDocument(documentId: string): Promise<{ filename: string; docType: DocType } | null> {
     const db = getDb();
