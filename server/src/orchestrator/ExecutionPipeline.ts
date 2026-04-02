@@ -631,6 +631,7 @@ ${this.buildCompletionCriteria(role, testOptions)}
       const lines: string[] = [
         '- **回對規格**：開發完成後，重新閱讀原始規格文件，逐項確認畫面欄位、元件互動、API 串接、data-testid 是否都已正確實作。列出每項需求對應的程式碼位置及確認結果，若有缺漏立即修復',
         '- 執行 build 指令（例如 npm run build / pnpm build），確保零錯誤',
+        '- 所有 playwright 截圖一律使用 `fullPage: true`，確保捕捉完整頁面（含捲軸內容）',
       ];
       const runMock = opts?.useMock !== false && !opts?.useRealApi || opts?.useMock;
       const runReal = opts?.useRealApi;

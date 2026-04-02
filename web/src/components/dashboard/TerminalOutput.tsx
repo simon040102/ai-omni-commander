@@ -184,6 +184,9 @@ export function TerminalOutput({ outputs, title, role, status, agentId, projectI
   const flowPlans = useAgentStore((s) => s.flowPlans);
   const flowPlan = agentId ? (flowPlans[agentId] ?? null) : null;
 
+  // Get context usage for this agent
+  const contextUsage = useAgentStore((s) => agentId ? s.contextUsage[agentId] : undefined);
+
   // Pasted files state
   const [pastedFiles, setPastedFiles] = useState<PastedFile[]>([]);
   const [isUploading, setIsUploading] = useState(false);
@@ -360,6 +363,20 @@ export function TerminalOutput({ outputs, title, role, status, agentId, projectI
             <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-600 dark:text-blue-400">
               {((totalInputTokens + (totalOutputTokens || 0)) / 1000).toFixed(1)}k tokens
             </span>
+          )}
+          {/* Context usage bar */}
+          {contextUsage && (
+            <div className="flex items-center gap-1" title={`Context: ${contextUsage.totalTokens.toLocaleString()} / ${contextUsage.maxTokens.toLocaleString()} tokens (${Math.round(contextUsage.percentage)}%)`}>
+              <div className="w-16 h-1.5 rounded-full bg-muted overflow-hidden">
+                <div
+                  className={`h-full rounded-full transition-all ${contextUsage.percentage > 80 ? 'bg-red-500' : contextUsage.percentage > 60 ? 'bg-amber-500' : 'bg-green-500'}`}
+                  style={{ width: `${Math.min(contextUsage.percentage, 100)}%` }}
+                />
+              </div>
+              <span className={`text-[10px] ${contextUsage.percentage > 80 ? 'text-red-500' : 'text-muted-foreground'}`}>
+                {Math.round(contextUsage.percentage)}%
+              </span>
+            </div>
           )}
         </div>
         <div className="flex items-center gap-1.5">

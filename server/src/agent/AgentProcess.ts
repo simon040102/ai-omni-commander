@@ -45,6 +45,17 @@ export class AgentProcess extends EventEmitter {
   /** True if the underlying SDK query is still running (not yet finished/aborted) */
   get isActive(): boolean { return this._query !== null; }
 
+  /** Get current context usage from the running query */
+  async getContextUsage(): Promise<{ totalTokens: number; maxTokens: number; percentage: number } | null> {
+    if (!this._query) return null;
+    try {
+      const usage = await this._query.getContextUsage();
+      return { totalTokens: usage.totalTokens, maxTokens: usage.maxTokens, percentage: usage.percentage };
+    } catch {
+      return null;
+    }
+  }
+
   /** Start a new Claude agent using the SDK */
   async spawn(prompt: string): Promise<void> {
     if (this._query) {
@@ -65,13 +76,11 @@ export class AgentProcess extends EventEmitter {
     const cleanEnv = { ...process.env };
     delete cleanEnv['CLAUDECODE'];
 
-    // Platform-specific permission settings
-    const isMac = process.platform === 'darwin';
-
-    // Mac: Use bypassPermissions (requires prior `claude --dangerously-skip-permissions` acceptance)
-    // Windows/Linux: Use acceptEdits (auto-accepts file edits, no prior setup needed)
-    const permissionMode = isMac ? 'bypassPermissions' : 'acceptEdits';
-    const allowDangerouslySkipPermissions = isMac ? true : undefined;
+    // Use bypassPermissions on all platforms — agents run autonomously and need
+    // full tool access (including MCP tools like playwright for smoke tests).
+    // Requires prior `claude --dangerously-skip-permissions` acceptance on the machine.
+    const permissionMode = 'bypassPermissions';
+    const allowDangerouslySkipPermissions = true;
 
     logger.info({ platform: process.platform, permissionMode }, 'Using platform-specific permission mode');
 

@@ -950,8 +950,11 @@ function TaskRow({ task, expandedTaskId, onExecute, onDelete, onToggleExpand, on
           ) : null}
         </span>
 
-        {/* Title */}
+        {/* Title — show parentName prefix if available */}
         <span className="flex-1 min-w-0 text-sm text-foreground truncate">
+          {task.parentName && !task.title?.startsWith(task.parentName) && (
+            <span className="text-muted-foreground">{task.parentName}.</span>
+          )}
           {task.title || <span className="italic text-muted-foreground">Untitled</span>}
         </span>
 
