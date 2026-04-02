@@ -260,6 +260,19 @@ export function useWebSocket() {
             break;
           }
 
+          case 'agent.contextUsage': {
+            const { setContextUsage } = useAgentStore.getState();
+            setContextUsage(
+              payload['agentId'] as string,
+              {
+                totalTokens: payload['totalTokens'] as number,
+                maxTokens: payload['maxTokens'] as number,
+                percentage: payload['percentage'] as number,
+              },
+            );
+            break;
+          }
+
           case 'agent.completed': {
             const completedProjectId = payload['projectId'] as string;
             // Mark activity for non-current projects

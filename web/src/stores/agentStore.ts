@@ -145,6 +145,12 @@ interface AgentStoreState {
   /** Map of agentId -> parsed flow plan from [FLOW_PLAN] markers */
   flowPlans: Record<string, AgentFlowPlan>;
 
+  /** Map of agentId -> context usage info */
+  contextUsage: Record<string, { totalTokens: number; maxTokens: number; percentage: number }>;
+
+  /** Update context usage for an agent */
+  setContextUsage: (agentId: string, usage: { totalTokens: number; maxTokens: number; percentage: number }) => void;
+
   /** Append output to an agent's buffer */
   appendOutput: (agentId: string, output: AgentOutput) => void;
 
@@ -202,6 +208,11 @@ export const useAgentStore = create<AgentStoreState>()(
       streamingBuffers: {},
       progress: {},
       flowPlans: {},
+      contextUsage: {},
+
+      setContextUsage: (agentId, usage) => set((state) => ({
+        contextUsage: { ...state.contextUsage, [agentId]: usage },
+      })),
 
       appendOutput: (agentId, output) => set((state) => {
         const existing = state.outputs[agentId] || [];

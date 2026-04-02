@@ -49,6 +49,8 @@ export class AgentManager {
   private autoResumeCount = new Map<string, number>();
   /** Agents that have explicitly signaled task completion via [TASK_COMPLETE] */
   private taskDoneAgents = new Set<string>();
+  /** Store initial prompts per agent for re-injection after context compaction */
+  private initialPrompts = new Map<string, string>();
   /** Per-agent debounce: buffer pending inputs and fire once after DEBOUNCE_MS of silence */
   private inputBuffer = new Map<string, string[]>();
   private inputDebounceTimer = new Map<string, ReturnType<typeof setTimeout>>();
@@ -109,6 +111,23 @@ export class AgentManager {
     }
 
     if (this.processes.size === 0) return;
+
+    // Broadcast context usage for all running agents
+    for (const [agentId, proc] of this.processes) {
+      try {
+        const usage = await proc.getContextUsage();
+        if (usage) {
+          const agent = getAgent(agentId);
+          await this.eventBus.emit({
+            type: 'agent.contextUsage',
+            source: agentId,
+            payload: { agentId, projectId: agent?.projectId, ...usage },
+            timestamp: new Date().toISOString(),
+          });
+        }
+      } catch { /* ignore */ }
+    }
+
     const now = Date.now();
     for (const [agentId] of this.processes) {
       const lastOut = this.lastOutputAt.get(agentId);
@@ -229,8 +248,22 @@ export class AgentManager {
     // Wire up event handlers
     this.wireProcessEvents(proc, agent.id, config.projectId, config.taskId || null);
 
-    // Set compaction context callback — injects flow plan summary after auto-compaction
-    proc.onCompactionContext = () => this.progressDetector.getFlowPlanSummary(agent.id);
+    // Store initial prompt for re-injection after context compaction
+    this.initialPrompts.set(agent.id, config.prompt);
+
+    // Set compaction context callback — re-injects initial prompt after auto-compaction
+    proc.onCompactionContext = () => {
+      const initialPrompt = this.initialPrompts.get(agent.id);
+      const flowSummary = this.progressDetector.getFlowPlanSummary(agent.id);
+      const parts: string[] = [];
+      if (initialPrompt) {
+        parts.push(`## 原始任務 Prompt（Context 壓縮後重新注入）\n\n${initialPrompt}`);
+      }
+      if (flowSummary) {
+        parts.push(flowSummary);
+      }
+      return parts.length > 0 ? parts.join('\n\n---\n\n') : null;
+    };
 
     this.processes.set(agent.id, proc);
     this.lastOutputAt.set(agent.id, Date.now());
@@ -452,8 +485,19 @@ export class AgentManager {
       // Wire up event handlers (same as startAgent)
       this.wireProcessEvents(newProc, agentId, agent.projectId, agent.currentTaskId);
 
-      // Set compaction context callback
-      newProc.onCompactionContext = () => this.progressDetector.getFlowPlanSummary(agentId);
+      // Set compaction context callback — re-injects initial prompt after auto-compaction
+      newProc.onCompactionContext = () => {
+        const initialPrompt = this.initialPrompts.get(agentId);
+        const flowSummary = this.progressDetector.getFlowPlanSummary(agentId);
+        const parts: string[] = [];
+        if (initialPrompt) {
+          parts.push(`## 原始任務 Prompt（Context 壓縮後重新注入）\n\n${initialPrompt}`);
+        }
+        if (flowSummary) {
+          parts.push(flowSummary);
+        }
+        return parts.length > 0 ? parts.join('\n\n---\n\n') : null;
+      };
 
       this.processes.set(agentId, newProc);
 
