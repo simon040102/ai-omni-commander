@@ -12,7 +12,8 @@ const VIEW_LABELS: Record<string, string> = {
   'new-task': 'Quick Run',
   events: 'Events',
   agents: 'Agents',
-  'db-explorer': 'DB Explorer',
+  'db-explorer': 'DB Schema',
+  'internal-db': 'Internal DB',
   settings: 'Settings',
 };
 

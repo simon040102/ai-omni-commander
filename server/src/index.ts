@@ -5,6 +5,7 @@ import os from 'node:os';
 import express from 'express';
 import { getConfig, reloadAsanaPat } from './config.js';
 import { getDb } from './db/connection.js';
+import { getProject } from './db/queries/projects.js';
 import { EventBus } from './eventbus/EventBus.js';
 import { ContextSync } from './eventbus/ContextSync.js';
 import { ContractWatcher } from './eventbus/ContractWatcher.js';
@@ -360,6 +361,86 @@ async function main() {
       });
     } catch (err) {
       res.status(500).json({ error: `Failed to query table: ${(err as Error).message}` });
+    }
+  });
+
+  // ── External DB Schema API ──────────────────────────────────────
+  const { ExternalSchemaFetcher } = await import('./db/externalDb.js');
+  const { getSchema: getCachedSchema, setSchema: setCachedSchema } = await import('./db/schemaCache.js');
+  const { generateFullERDiagram, generateSingleTableERDiagram } = await import('./db/erDiagramGenerator.js');
+  const schemaFetcher = new ExternalSchemaFetcher();
+
+  // POST /api/schema/:projectId/:connectionId/fetch — trigger schema fetch (manual only)
+  app.post('/api/schema/:projectId/:connectionId/fetch', async (req, res) => {
+    const { projectId, connectionId } = req.params;
+    const project = getProject(projectId as string);
+    if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+
+    const cfg = project.configJson ? JSON.parse(project.configJson) : {};
+    const conn = (cfg.dbConnections || []).find((c: { id: string }) => c.id === connectionId);
+    if (!conn) { res.status(404).json({ error: 'Connection not found' }); return; }
+
+    try {
+      const result = await schemaFetcher.fetchSchema(connectionId as string, conn.connectionString, conn.dbType);
+      setCachedSchema(projectId as string, connectionId as string, result);
+
+      // Persist schema.json and er-diagram.mmd so agents can read them
+      const dataDir = path.dirname(config.dbPath);
+      const schemaDir = path.join(dataDir, 'schemas', projectId as string, connectionId as string);
+      fs.mkdirSync(schemaDir, { recursive: true });
+      fs.writeFileSync(path.join(schemaDir, 'schema.json'), JSON.stringify(result, null, 2), 'utf8');
+      const mmdContent = generateFullERDiagram(result);
+      fs.writeFileSync(path.join(schemaDir, 'er-diagram.mmd'), mmdContent, 'utf8');
+
+      res.json({ result, schemaPath: path.join(schemaDir, 'schema.json'), erPath: path.join(schemaDir, 'er-diagram.mmd') });
+    } catch (err) {
+      res.status(500).json({ error: `Schema fetch failed: ${(err as Error).message}` });
+    }
+  });
+
+  // GET /api/schema/:projectId/:connectionId — get cached schema
+  app.get('/api/schema/:projectId/:connectionId', (req, res) => {
+    const { projectId, connectionId } = req.params;
+    const cached = getCachedSchema(projectId as string, connectionId as string);
+    if (!cached) { res.status(404).json({ error: 'No cached schema. Click "Fetch Schema" to load.' }); return; }
+    res.json({ result: cached });
+  });
+
+  // GET /api/schema/:projectId/:connectionId/er-diagram?table= — get Mermaid ER diagram
+  app.get('/api/schema/:projectId/:connectionId/er-diagram', (req, res) => {
+    const { projectId, connectionId } = req.params;
+    let schema = getCachedSchema(projectId as string, connectionId as string);
+
+    // Fallback: load from disk if not in memory (e.g. after server restart)
+    if (!schema) {
+      const dataDir = path.dirname(config.dbPath);
+      const schemaFile = path.join(dataDir, 'schemas', projectId as string, connectionId as string, 'schema.json');
+      if (fs.existsSync(schemaFile)) {
+        try {
+          schema = JSON.parse(fs.readFileSync(schemaFile, 'utf8'));
+          if (schema) setCachedSchema(projectId as string, connectionId as string, schema);
+        } catch { /* ignore parse errors */ }
+      }
+    }
+
+    if (!schema) { res.status(404).json({ error: 'No schema found. Click "Fetch Schema" first.' }); return; }
+
+    const tableName = req.query['table'] as string | undefined;
+    const mermaid = tableName
+      ? generateSingleTableERDiagram(schema, tableName)
+      : generateFullERDiagram(schema);
+    res.json({ mermaid });
+  });
+
+  // POST /api/schema/test-connection — test DB connectivity
+  app.post('/api/schema/test-connection', async (req, res) => {
+    const { connectionString, dbType } = req.body as { connectionString: string; dbType: string };
+    if (!connectionString || !dbType) { res.status(400).json({ error: 'Missing connectionString or dbType' }); return; }
+    try {
+      await schemaFetcher.testConnection(connectionString, dbType as 'postgresql' | 'mysql' | 'mssql');
+      res.json({ success: true });
+    } catch (err) {
+      res.json({ success: false, error: (err as Error).message });
     }
   });
 

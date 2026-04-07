@@ -114,7 +114,7 @@ export function Sidebar({ currentView, onViewChange, collapsed, onToggleCollapse
     { view: 'agents', label: 'Agents', Icon: IconRobot, pulse: runningAgents > 0 },
     { view: 'events', label: 'Events', Icon: IconClock },
     { view: 'mockup', label: 'Mockup', Icon: IconMockup },
-    { view: 'db-explorer', label: 'DB Explorer', Icon: IconDatabase },
+    { view: 'db-explorer', label: 'DB Schema', Icon: IconDatabase },
     { view: 'settings', label: 'Settings', Icon: IconSettings },
   ];
 
@@ -223,8 +223,22 @@ export function Sidebar({ currentView, onViewChange, collapsed, onToggleCollapse
       {/* Spacer to push bottom items down */}
       <div className="flex-1" />
 
-      {/* Global Settings - pinned at bottom */}
+      {/* Bottom items - pinned */}
       <div className={`${collapsed ? 'p-1' : 'px-2 pb-1'} border-t border-border`}>
+        <button
+          onClick={() => onViewChange('internal-db')}
+          className={`w-full flex items-center gap-2 rounded-md text-sm mb-0.5 transition-colors ${
+            collapsed ? 'justify-center px-2 py-2.5' : 'px-3 py-2.5'
+          } ${
+            currentView === 'internal-db'
+              ? 'bg-primary/10 text-primary'
+              : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+          }`}
+          title={collapsed ? 'Internal DB' : undefined}
+        >
+          <IconDatabase className="w-4 h-4" />
+          {!collapsed && <span className="flex-1 text-left">Internal DB</span>}
+        </button>
         <button
           onClick={() => onViewChange('global-settings')}
           className={`w-full flex items-center gap-2 rounded-md text-sm mb-0.5 transition-colors ${

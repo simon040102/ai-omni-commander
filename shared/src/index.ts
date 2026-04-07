@@ -8,3 +8,4 @@ export * from './contracts.js';
 export * from './model-info.js';
 export * from './asana-types.js';
 export * from './review-types.js';
+export * from './schema-types.js';

@@ -69,6 +69,7 @@ export interface ProjectConfig {
   asanaSyncConfig?: AsanaSyncConfig;
   svnConfig?: SvnConfig;
   axshareUrl?: string;
+  dbConnections?: import('./schema-types.js').DbConnectionConfig[];
 }
 
 /** Stored plan for an agent */
