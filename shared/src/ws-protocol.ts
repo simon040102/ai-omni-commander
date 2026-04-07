@@ -739,6 +739,46 @@ export interface WsAsanaSyncConfig extends WsMessage {
   };
 }
 
+// ============================================
+// SCHEMA messages (CLIENT -> SERVER, SERVER -> CLIENT)
+// ============================================
+
+export interface WsSchemaFetch extends WsMessage {
+  type: 'schema.fetch';
+  payload: {
+    projectId: string;
+    connectionId: string;
+  };
+}
+
+export interface WsSchemaTestConnection extends WsMessage {
+  type: 'schema.testConnection';
+  payload: {
+    projectId: string;
+    connectionId: string;
+  };
+}
+
+export interface WsSchemaResult extends WsMessage {
+  type: 'schema.result';
+  payload: {
+    projectId: string;
+    connectionId: string;
+    result?: import('./schema-types.js').DbSchemaResult;
+    error?: string;
+  };
+}
+
+export interface WsSchemaTestResult extends WsMessage {
+  type: 'schema.testResult';
+  payload: {
+    projectId: string;
+    connectionId: string;
+    success: boolean;
+    error?: string;
+  };
+}
+
 export type ServerMessage =
   | WsProjectState
   | WsProjectsList
@@ -771,4 +811,6 @@ export type ServerMessage =
   | WsSvnBrowseResult
   | WsSvnPreview
   | WsSvnPreviewResult
-  | WsGlobalConfigState;
+  | WsGlobalConfigState
+  | WsSchemaResult
+  | WsSchemaTestResult;

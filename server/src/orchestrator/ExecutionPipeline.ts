@@ -106,6 +106,26 @@ export class ExecutionPipeline {
       ? allSvnDocs.filter(d => d.docType === 'SD')
       : allSvnDocs;  // frontend / others get SA + SD
 
+    // Find available DB schema files for this project
+    const schemaBasePath = path.join(path.dirname(getConfig().dbPath), 'schemas', task.projectId);
+    const dbSchemaFiles: Array<{ label: string; schemaPath: string; erPath: string }> = [];
+    if (fs.existsSync(schemaBasePath)) {
+      const projectConfig: ProjectConfig = project.configJson ? JSON.parse(project.configJson) : {};
+      const connections = projectConfig.dbConnections ?? [];
+      for (const connDir of fs.readdirSync(schemaBasePath)) {
+        const schemaFile = path.join(schemaBasePath, connDir, 'schema.json');
+        const erFile = path.join(schemaBasePath, connDir, 'er-diagram.mmd');
+        if (fs.existsSync(schemaFile)) {
+          const conn = connections.find((c: { id: string }) => c.id === connDir);
+          dbSchemaFiles.push({
+            label: conn?.label ?? connDir,
+            schemaPath: schemaFile,
+            erPath: fs.existsSync(erFile) ? erFile : '',
+          });
+        }
+      }
+    }
+
     // Assemble context
     const prompt = this.assembleContext({
       superpowers,
@@ -117,6 +137,7 @@ export class ExecutionPipeline {
       taskType: task.taskType,
       specResult,
       dbConnectionString: project.dbConnectionString,
+      dbSchemaFiles: dbSchemaFiles.length > 0 ? dbSchemaFiles : undefined,
       taskAttachments,
       svnDocuments,
       mockupFiles,
@@ -252,6 +273,7 @@ export class ExecutionPipeline {
     taskType: TaskType;
     specResult?: SpecResult | null;
     dbConnectionString?: string | null;
+    dbSchemaFiles?: Array<{ label: string; schemaPath: string; erPath: string }>;
     taskAttachments?: Array<{ filename: string; filePath: string; docType?: string }>;
     svnDocuments?: Array<{ documentId: string; filename: string; filePath: string; parsedText: string | null; docType: string | null }>;
     mockupFiles?: string[];
@@ -285,6 +307,11 @@ export class ExecutionPipeline {
     // Layer 2.7: Database connection info (primarily for backend)
     if (opts.dbConnectionString) {
       parts.push(this.buildDbSection(opts.dbConnectionString));
+    }
+
+    // Layer 2.7b: DB schema files (for backend agents to query when needed)
+    if (opts.dbSchemaFiles && opts.dbSchemaFiles.length > 0) {
+      parts.push(this.buildDbSchemaSection(opts.dbSchemaFiles));
     }
 
     // Layer 2.8: Task attachments (images, documents uploaded per task)
@@ -421,6 +448,30 @@ export class ExecutionPipeline {
       const filename = fp.split(/[\\/]/).pop() || fp;
       lines.push(`- **${filename}**: \`${fp.replace(/\\/g, '/')}\``);
     }
+    return lines.join('\n');
+  }
+
+  /**
+   * Build DB schema reference section — tells backend agents where to find schema files.
+   * Does NOT embed the full schema; agents use Read tool to query what they need.
+   */
+  private buildDbSchemaSection(files: Array<{ label: string; schemaPath: string; erPath: string }>): string {
+    const lines: string[] = [
+      '## 資料庫 Schema 參考',
+      '',
+      '本專案已預先抓取以下資料庫的 schema，存放在以下檔案。',
+      '**需要了解 DB 結構時，用 Read tool 查閱對應檔案，不要全部載入，只讀你需要的部分。**',
+      '',
+    ];
+    for (const f of files) {
+      lines.push(`### ${f.label}`);
+      lines.push(`- **Schema JSON** (tables / columns / foreign keys): \`${f.schemaPath.replace(/\\/g, '/')}\``);
+      if (f.erPath) {
+        lines.push(`- **ER Diagram (Mermaid)**: \`${f.erPath.replace(/\\/g, '/')}\``);
+      }
+      lines.push('');
+    }
+    lines.push('Schema JSON 結構：`{ tables: [{name, schema}], columns: [{tableName, columnName, dataType, isPrimaryKey, isForeignKey, referencedTable}], foreignKeys: [{tableName, columnName, referencedTable, referencedColumn}] }`');
     return lines.join('\n');
   }
 

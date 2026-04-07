@@ -3,8 +3,10 @@ import { useProjectStore } from '../../stores/projectStore';
 import { useWsStore } from '../../stores/wsStore';
 import { useAsanaStore } from '../../stores/asanaStore';
 import { useToastStore } from '../../stores/toastStore';
+import type { DbConnectionConfig } from '@omni/shared';
 import { FolderPicker } from '../project/FolderPicker';
 import { AsanaSyncSettings } from '../dashboard/AsanaSyncSettings';
+import { DbConnectionsEditor } from './DbConnectionsEditor';
 import { IconRefresh, IconChevronDown, IconAsana } from '../ui/Icons';
 
 interface SvnConfig {
@@ -24,7 +26,7 @@ export function ProjectSettings() {
   const [frontendPath, setFrontendPath] = useState('');
   const [backendPath, setBackendPath] = useState('');
   const [asanaProjectGid, setAsanaProjectGid] = useState('');
-  const [dbConnectionString, setDbConnectionString] = useState('');
+  const [dbConnections, setDbConnections] = useState<DbConnectionConfig[]>([]);
   const [showSyncSettings, setShowSyncSettings] = useState(false);
 
   // SVN config state (per-project paths)
@@ -51,7 +53,23 @@ export function ProjectSettings() {
       setFrontendPath(project.frontendPath || '');
       setBackendPath(project.backendPath || '');
       setAsanaProjectGid(project.asanaProjectGid || '');
-      setDbConnectionString(project.dbConnectionString || '');
+      // Load DB connections from configJson, with migration from legacy dbConnectionString
+      const savedConns = existingConfig?.dbConnections as DbConnectionConfig[] | undefined;
+      if (savedConns?.length) {
+        setDbConnections(savedConns);
+      } else if (project.dbConnectionString) {
+        // Migrate legacy single connection string
+        const dbType = project.dbConnectionString.startsWith('postgresql') ? 'postgresql'
+          : project.dbConnectionString.startsWith('mysql') ? 'mysql' : 'mssql';
+        setDbConnections([{
+          id: crypto.randomUUID(),
+          label: 'Default',
+          connectionString: project.dbConnectionString,
+          dbType: dbType as DbConnectionConfig['dbType'],
+        }]);
+      } else {
+        setDbConnections([]);
+      }
 
       const svn = existingConfig?.svnConfig as SvnConfig | undefined;
       setSvnFrontendPath(svn?.frontendSpecPath || '');
@@ -91,6 +109,7 @@ export function ProjectSettings() {
       axshareUrl: axshareUrl.trim() || undefined,
       frontendExtraPrompt: frontendExtraPrompt.trim() || undefined,
       backendExtraPrompt: backendExtraPrompt.trim() || undefined,
+      dbConnections: dbConnections.length > 0 ? dbConnections : undefined,
     };
 
     client.send({
@@ -103,14 +122,47 @@ export function ProjectSettings() {
         frontendPath: frontendPath.trim() || null,
         backendPath: backendPath.trim() || null,
         asanaProjectGid: asanaProjectGid.trim() || null,
-        dbConnectionString: dbConnectionString.trim() || null,
+        dbConnectionString: dbConnections[0]?.connectionString || null,
         configJson: JSON.stringify(newConfig),
       },
     });
 
     addToast({ type: 'success', title: 'Project settings saved' });
-  }, [client, project, name, frontendPath, backendPath, asanaProjectGid, dbConnectionString,
+  }, [client, project, name, frontendPath, backendPath, asanaProjectGid, dbConnections,
     svnFrontendPath, svnBackendPath, axshareUrl, frontendExtraPrompt, backendExtraPrompt, existingConfig, addToast]);
+
+  const handleGenSkills = useCallback((workspaceType: 'frontend' | 'backend') => {
+    if (!client || !project) return;
+    const p = workspaceType === 'frontend' ? frontendPath : backendPath;
+    if (!p.trim()) return;
+    client.send({
+      type: 'workspace.generateSkills',
+      id: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+      payload: { projectId: project.id, path: p.trim(), workspaceType },
+    });
+    addToast({ type: 'success', title: `Gen Skills started for ${workspaceType}`, message: 'Opus agent is analyzing the codebase...' });
+  }, [client, project, frontendPath, backendPath, addToast]);
+
+  // Auto-save DB connections immediately when they change (so user doesn't need to click Save)
+  const handleDbConnectionsChange = useCallback((updated: DbConnectionConfig[]) => {
+    setDbConnections(updated);
+    if (!client || !project) return;
+    const newConfig = {
+      ...(existingConfig || {}),
+      dbConnections: updated.length > 0 ? updated : undefined,
+    };
+    client.send({
+      type: 'project.update',
+      id: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+      payload: {
+        projectId: project.id,
+        dbConnectionString: updated[0]?.connectionString || null,
+        configJson: JSON.stringify(newConfig),
+      },
+    });
+  }, [client, project, existingConfig]);
 
   if (!project) {
     return (
@@ -143,18 +195,46 @@ export function ProjectSettings() {
 
         {/* Workspace Paths */}
         <div>
-          <label className="block text-sm font-medium mb-1">
-            Frontend Path
-            <span className="text-xs text-muted-foreground ml-2 font-normal">optional</span>
-          </label>
+          <div className="flex items-center justify-between mb-1">
+            <label className="text-sm font-medium">
+              Frontend Path
+              <span className="text-xs text-muted-foreground ml-2 font-normal">optional</span>
+            </label>
+            {frontendPath.trim() && (
+              <button
+                onClick={() => handleGenSkills('frontend')}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-md bg-violet-500/10 text-violet-600 border border-violet-500/30 hover:bg-violet-500/20 transition-colors"
+                title="Spawn an Opus agent to analyze this codebase and generate/update CLAUDE.md + skills"
+              >
+                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                </svg>
+                Gen Skills
+              </button>
+            )}
+          </div>
           <FolderPicker value={frontendPath} onChange={setFrontendPath} />
         </div>
 
         <div>
-          <label className="block text-sm font-medium mb-1">
-            Backend Path
-            <span className="text-xs text-muted-foreground ml-2 font-normal">optional</span>
-          </label>
+          <div className="flex items-center justify-between mb-1">
+            <label className="text-sm font-medium">
+              Backend Path
+              <span className="text-xs text-muted-foreground ml-2 font-normal">optional</span>
+            </label>
+            {backendPath.trim() && (
+              <button
+                onClick={() => handleGenSkills('backend')}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-md bg-violet-500/10 text-violet-600 border border-violet-500/30 hover:bg-violet-500/20 transition-colors"
+                title="Spawn an Opus agent to analyze this codebase and generate/update CLAUDE.md + skills"
+              >
+                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                </svg>
+                Gen Skills
+              </button>
+            )}
+          </div>
           <FolderPicker value={backendPath} onChange={setBackendPath} />
         </div>
 
@@ -252,20 +332,8 @@ export function ProjectSettings() {
           </div>
         </div>
 
-        {/* Database Connection */}
-        <div className="border border-border rounded-lg p-4 space-y-3">
-          <h4 className="text-sm font-medium">Database Connection</h4>
-          <p className="text-xs text-muted-foreground">
-            Connection string for the project's database. This will be provided to backend agents for DB operations.
-          </p>
-          <input
-            type="text"
-            value={dbConnectionString}
-            onChange={(e) => setDbConnectionString(e.target.value)}
-            placeholder="e.g. postgresql://user:pass@host:5432/dbname or mysql://..."
-            className="w-full bg-muted border border-border rounded-md px-3 py-2 text-sm font-mono outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
-          />
-        </div>
+        {/* Database Connections */}
+        <DbConnectionsEditor connections={dbConnections} onChange={handleDbConnectionsChange} />
 
         {/* Asana Integration */}
         <div className="border border-border rounded-lg p-4 space-y-3">

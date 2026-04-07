@@ -8,6 +8,7 @@ import { EventLog } from './components/events/EventLog';
 import { AgentsView } from './components/agents/AgentsView';
 import { NewTaskView } from './components/task/NewTaskView';
 import { DbExplorer } from './components/db/DbExplorer';
+import { DbSchemaExplorer } from './components/db/DbSchemaExplorer';
 import { ProjectSettings } from './components/settings/ProjectSettings';
 import { GlobalSettings } from './components/settings/GlobalSettings';
 import { MockupView } from './components/mockup/MockupView';
@@ -39,6 +40,8 @@ export function App() {
           case 'new-task':
             return <NewTaskView onViewChange={onViewChange} />;
           case 'db-explorer':
+            return <DbSchemaExplorer />;
+          case 'internal-db':
             return <DbExplorer />;
           case 'settings':
             return <ProjectSettings />;
