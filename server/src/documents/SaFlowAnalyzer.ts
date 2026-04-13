@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import Anthropic from '@anthropic-ai/sdk';
+import { query } from '@anthropic-ai/claude-agent-sdk';
+import type { SDKAssistantMessage } from '@anthropic-ai/claude-agent-sdk';
 import { createChildLogger } from '../utils/logger.js';
 
 const logger = createChildLogger('SaFlowAnalyzer');
@@ -19,12 +20,27 @@ export interface SaFlowResult {
 
 export class SaFlowAnalyzer {
   private flowsDir: string;
-  private client: Anthropic;
 
   constructor(dataDir: string) {
     this.flowsDir = path.join(dataDir, FLOWS_DIR_NAME);
     fs.mkdirSync(this.flowsDir, { recursive: true });
-    this.client = new Anthropic();
+  }
+
+  private async callClaude(prompt: string, model = 'claude-sonnet-4-6'): Promise<string> {
+    let text = '';
+    const q = query({
+      prompt,
+      options: { model, permissionMode: 'bypassPermissions' },
+    });
+    for await (const msg of q) {
+      if (msg.type === 'assistant') {
+        const m = msg as SDKAssistantMessage;
+        for (const block of m.message.content) {
+          if (block.type === 'text') text += block.text;
+        }
+      }
+    }
+    return text;
   }
 
   /**
@@ -57,7 +73,7 @@ export class SaFlowAnalyzer {
       fullFlow = fs.readFileSync(flowPath, 'utf-8');
       logger.info({ sourceFilename, hash }, 'SA flow cache hit');
     } else {
-      // Generate full flowchart via Claude API
+      // Generate full flowchart via Claude
       logger.info({ sourceFilename, hash }, 'Generating SA flow diagram');
       fullFlow = await this.generateFullFlow(saContent, sourceFilename);
 
@@ -82,13 +98,7 @@ export class SaFlowAnalyzer {
   }
 
   private async generateFullFlow(saContent: string, filename: string): Promise<string> {
-    try {
-      const response = await this.client.messages.create({
-        model: 'claude-opus-4-5',
-        max_tokens: 2000,
-        messages: [{
-          role: 'user',
-          content: `你是 SA 規格分析師。請分析以下 SA（需求規格）文件，產出前端操作流程的 Mermaid flowchart。
+    const prompt = `你是 SA 規格分析師。請分析以下 SA（需求規格）文件，產出前端操作流程的 Mermaid flowchart。
 
 **要求：**
 - 只輸出 mermaid 程式碼，不要任何解釋文字
@@ -102,14 +112,10 @@ export class SaFlowAnalyzer {
 
 ${saContent.slice(0, 8000)}
 
-請直接輸出 mermaid 程式碼：`,
-        }],
-      });
+請直接輸出 mermaid 程式碼：`;
 
-      const text = response.content
-        .filter(b => b.type === 'text')
-        .map(b => (b as { type: 'text'; text: string }).text)
-        .join('');
+    try {
+      const text = await this.callClaude(prompt);
 
       // Extract mermaid block
       const mmdMatch = text.match(/```(?:mermaid)?\s*([\s\S]+?)```/);
@@ -133,13 +139,7 @@ ${saContent.slice(0, 8000)}
     }
 
     // For bug/testing, extract relevant paths only
-    try {
-      const response = await this.client.messages.create({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 1000,
-        messages: [{
-          role: 'user',
-          content: `以下是一份前端操作流程圖（Mermaid）。
+    const prompt = `以下是一份前端操作流程圖（Mermaid）。
 
 任務類型：${taskType === 'bug' ? 'Bug 修復' : '測試'}
 任務描述：${taskDescription}
@@ -150,14 +150,10 @@ ${saContent.slice(0, 8000)}
 完整流程圖：
 \`\`\`mermaid
 ${fullFlow}
-\`\`\``,
-        }],
-      });
+\`\`\``;
 
-      const text = response.content
-        .filter(b => b.type === 'text')
-        .map(b => (b as { type: 'text'; text: string }).text)
-        .join('');
+    try {
+      const text = await this.callClaude(prompt, 'claude-haiku-4-5-20251001');
 
       const mmdMatch = text.match(/```(?:mermaid)?\s*([\s\S]+?)```/);
       if (mmdMatch) return mmdMatch[1].trim();

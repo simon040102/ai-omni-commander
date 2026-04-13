@@ -538,23 +538,15 @@ ${flowDiagram}
    */
   private findSaDocument(
     taskId: string,
-    projectId: string,
-    svnDocs: Array<{ documentId: string; filename: string; filePath: string; parsedText: string | null; docType: string | null }>,
+    _projectId: string,
+    _svnDocs: Array<{ documentId: string; filename: string; filePath: string; parsedText: string | null; docType: string | null }>,
   ): { filename: string; content: string } | null {
-    // 1. Task-bound SA docs (manually uploaded)
-    const taskDocs = getDocumentsForTask(taskId).filter(d => d.source !== 'svn' && d.docType === 'SA');
+    // Query DB directly — all SA docs bound to this task (upload or SVN)
+    const taskDocs = getDocumentsForTask(taskId).filter(d => d.docType === 'SA');
     for (const doc of taskDocs) {
       const content = this.readDocContent(doc.parsedText, doc.filePath);
       if (content) return { filename: doc.filename, content };
     }
-
-    // 2. SVN SA docs
-    const svnSaDocs = svnDocs.filter(d => d.docType === 'SA');
-    for (const doc of svnSaDocs) {
-      const content = this.readDocContent(doc.parsedText, doc.filePath);
-      if (content) return { filename: doc.filename, content };
-    }
-
     return null;
   }
 
