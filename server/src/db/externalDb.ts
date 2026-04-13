@@ -58,7 +58,8 @@ export class ExternalSchemaFetcher {
         const sql = await import('mssql');
         const config = this.parseMssqlConfig(connectionString);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const pool = await sql.default.connect(config as any);
+        const pool = new sql.default.ConnectionPool(config as any);
+        await pool.connect();
         await pool.close();
         break;
       }
@@ -286,6 +287,8 @@ export class ExternalSchemaFetcher {
         if (eq >= 0) props[seg.slice(0, eq).toLowerCase().trim()] = seg.slice(eq + 1).trim();
       }
       if (props['portnumber']) port = parseInt(props['portnumber']);
+      const encrypt = props['encrypt']?.toLowerCase() !== 'false'; // default true
+      const trustServerCertificate = props['trustservercertificate']?.toLowerCase() !== 'false'; // default true
       return {
         server,
         port,
@@ -295,11 +298,40 @@ export class ExternalSchemaFetcher {
         connectionTimeout: CONNECT_TIMEOUT,
         requestTimeout: QUERY_TIMEOUT,
         options: {
-          encrypt: props['encrypt']?.toLowerCase() === 'true',
-          trustServerCertificate: props['trustservercertificate']?.toLowerCase() === 'true',
+          encrypt,
+          trustServerCertificate,
+          enableArithAbort: true,
+          cryptoCredentialsDetails: { minVersion: 'TLSv1' },
         },
       };
     }
+    // ADO.NET format: Server=host;Database=db;User Id=u;Password=p;
+    const adoProps: Record<string, string> = {};
+    for (const seg of str.split(';')) {
+      const eq = seg.indexOf('=');
+      if (eq >= 0) adoProps[seg.slice(0, eq).toLowerCase().trim()] = seg.slice(eq + 1).trim();
+    }
+    const adoServer = adoProps['server'] || adoProps['data source'] || adoProps['datasource'] || adoProps['host'];
+    if (adoServer) {
+      const encrypt = adoProps['encrypt']?.toLowerCase() !== 'false';
+      const trustServerCertificate = adoProps['trustservercertificate']?.toLowerCase() !== 'false';
+      return {
+        server: adoServer,
+        port: parseInt(adoProps['port'] || '1433'),
+        database: adoProps['database'] || adoProps['initial catalog'] || '',
+        user: adoProps['user id'] || adoProps['uid'] || adoProps['user'] || '',
+        password: adoProps['password'] || adoProps['pwd'] || '',
+        connectionTimeout: CONNECT_TIMEOUT,
+        requestTimeout: QUERY_TIMEOUT,
+        options: {
+          encrypt,
+          trustServerCertificate,
+          enableArithAbort: true,
+          cryptoCredentialsDetails: { minVersion: 'TLSv1' },
+        },
+      };
+    }
+
     return str;
   }
 
@@ -307,7 +339,8 @@ export class ExternalSchemaFetcher {
     const sql = await import('mssql');
     const config = this.parseMssqlConfig(connectionString);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const pool = await sql.default.connect(config as any);
+    const pool = new sql.default.ConnectionPool(config as any);
+    await pool.connect();
 
     try {
       // Fetch tables

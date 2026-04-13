@@ -74,19 +74,15 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
   const [dragIdx, setDragIdx] = useState<number | null>(null);
   const [dropIdx, setDropIdx] = useState<number | null>(null);
 
-  // Auto-add new agents to grid (newest first, dedup via functional update)
+  // Clear grid when project changes
   useEffect(() => {
-    // agents is already newest-first (reversed insertion order)
-    const allIds = agents.map(a => a.id);
+    setGridAgentIds([]);
+  }, [currentProjectId]);
 
-    setGridAgentIds(prev => {
-      // Remove stale ids first
-      const valid = prev.filter(id => allIds.includes(id));
-      // Prepend any new ids (newest first)
-      const existingSet = new Set(valid);
-      const newIds = allIds.filter(id => !existingSet.has(id));
-      return [...newIds, ...valid];
-    });
+  // Keep gridAgentIds clean: remove stale ids when agents are removed
+  useEffect(() => {
+    const allIds = new Set(agents.map(a => a.id));
+    setGridAgentIds(prev => prev.filter(id => allIds.has(id)));
   }, [agents.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Right panel state (list mode only)

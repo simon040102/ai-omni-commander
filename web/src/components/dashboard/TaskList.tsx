@@ -489,7 +489,7 @@ export function TaskList({ selectedModel }: TaskListProps) {
                 }
               }}
               placeholder="Description (optional, 可貼上圖片)..."
-              className="w-full bg-muted border border-border rounded-md px-2.5 py-1.5 text-xs min-h-[50px] resize-y outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
+              className="w-full bg-muted border border-border rounded-md px-2.5 py-1.5 text-xs min-h-[100px] resize-y outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
             />
 
             <div>
@@ -1196,7 +1196,7 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
               onChange={(e) => setDescDraft(e.target.value)}
               onPaste={handleDescPaste}
               placeholder="Task description... (可貼上圖片)"
-              className="w-full bg-background/50 border border-border rounded-md px-3 py-2 text-sm min-h-[80px] resize-y outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
+              className="w-full bg-background/50 border border-border rounded-md px-3 py-2 text-sm min-h-[160px] resize-y outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
               autoFocus
             />
             {/* Image previews */}

@@ -304,11 +304,6 @@ export class ExecutionPipeline {
       parts.push(this.buildSvnDocsSection(opts.svnDocuments));
     }
 
-    // Layer 2.7: Database connection info (primarily for backend)
-    if (opts.dbConnectionString) {
-      parts.push(this.buildDbSection(opts.dbConnectionString));
-    }
-
     // Layer 2.7b: DB schema files (for backend agents to query when needed)
     if (opts.dbSchemaFiles && opts.dbSchemaFiles.length > 0) {
       parts.push(this.buildDbSchemaSection(opts.dbSchemaFiles));
@@ -473,21 +468,6 @@ export class ExecutionPipeline {
     }
     lines.push('Schema JSON 結構：`{ tables: [{name, schema}], columns: [{tableName, columnName, dataType, isPrimaryKey, isForeignKey, referencedTable}], foreignKeys: [{tableName, columnName, referencedTable, referencedColumn}] }`');
     return lines.join('\n');
-  }
-
-  /**
-   * Build the database connection info section for agents.
-   */
-  private buildDbSection(connectionString: string): string {
-    return `## 資料庫連線資訊
-
-以下是本專案的資料庫連線字串，可用於查詢或操作資料庫：
-
-\`\`\`
-${connectionString}
-\`\`\`
-
-**注意**：請謹慎使用此連線資訊。在執行任何 DDL 或資料修改操作前，請先確認操作的正確性。`;
   }
 
   /**

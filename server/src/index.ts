@@ -36,6 +36,9 @@ import type { WsMessage } from '@omni/shared';
 import { EventTypes, CURRENT_MODELS, LEGACY_MODELS } from '@omni/shared';
 
 async function main() {
+  // Allow self-signed TLS certs for internal DB connections (MSSQL/PostgreSQL)
+  process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '0';
+
   const config = getConfig();
   logger.info({ port: config.port }, 'Starting AI-OmniCommander (SDK mode)');
 
