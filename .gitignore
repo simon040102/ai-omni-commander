@@ -1,4 +1,5 @@
-docs/axure-snapshots/
+docs/
+.playwright-mcp/
 node_modules/
 dist/
 *.tsbuildinfo
