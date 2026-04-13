@@ -7,6 +7,7 @@ import type { DocumentParser } from '../documents/DocumentParser.js';
 import { type SvnSpecService, extractFunctionCode } from '../svn/SvnSpecService.js';
 import { SpecFetcher } from '../documents/SpecFetcher.js';
 import type { SpecResult } from '../documents/SpecFetcher.js';
+import { SaFlowAnalyzer } from '../documents/SaFlowAnalyzer.js';
 import { ModelRouter } from '../agent/ModelRouter.js';
 import { getProject, updateProject } from '../db/queries/projects.js';
 import { getTask, updateTask } from '../db/queries/tasks.js';
@@ -25,6 +26,7 @@ export class ExecutionPipeline {
   private specFetcher: SpecFetcher;
   private modelRouter = new ModelRouter();
   private svnSpecService: SvnSpecService | null = null;
+  private saFlowAnalyzer: SaFlowAnalyzer;
 
   constructor(
     private agentManager: AgentManager,
@@ -33,6 +35,8 @@ export class ExecutionPipeline {
     specCacheDir?: string,
   ) {
     this.specFetcher = new SpecFetcher(specCacheDir);
+    const dataDir = path.dirname(getConfig().dbPath);
+    this.saFlowAnalyzer = new SaFlowAnalyzer(dataDir);
   }
 
   /** Inject SvnSpecService (optional, set after construction) */
@@ -126,6 +130,28 @@ export class ExecutionPipeline {
       }
     }
 
+    // Analyze SA flow diagram for frontend tasks
+    let saFlowResult = null;
+    if (task.label === 'frontend') {
+      const saDoc = this.findSaDocument(taskId, task.projectId, allSvnDocs);
+      if (saDoc) {
+        try {
+          saFlowResult = await this.saFlowAnalyzer.analyze({
+            projectId: task.projectId,
+            saContent: saDoc.content,
+            sourceFilename: saDoc.filename,
+            taskType: task.taskType,
+            taskDescription: task.description || '',
+          });
+          if (saFlowResult) {
+            logger.info({ taskId, filename: saDoc.filename }, 'SA flow diagram ready');
+          }
+        } catch (err) {
+          logger.warn({ err, taskId }, 'SA flow analysis failed, continuing without it');
+        }
+      }
+    }
+
     // Assemble context
     const prompt = this.assembleContext({
       superpowers,
@@ -143,6 +169,7 @@ export class ExecutionPipeline {
       mockupFiles,
       testOptions,
       extraPrompt,
+      saFlowResult: saFlowResult ?? undefined,
     });
 
     // Resolve working directory
@@ -279,6 +306,7 @@ export class ExecutionPipeline {
     mockupFiles?: string[];
     testOptions?: TestOptions;
     extraPrompt?: string;
+    saFlowResult?: { fullFlow: string; relevantFlow: string; flowPath: string } | null;
   }): string {
     const parts: string[] = [];
 
@@ -326,6 +354,11 @@ export class ExecutionPipeline {
         path.join(getConfig().projectRoot, 'docs', 'axure-snapshots', opts.projectId),
       );
       parts.push(`## 專案額外指令\n\n${resolved}`);
+    }
+
+    // Layer 2.97: SA operation flow diagram (frontend tasks only)
+    if (opts.saFlowResult?.relevantFlow) {
+      parts.push(this.buildSaFlowSection(opts.saFlowResult.relevantFlow, opts.taskType));
     }
 
     // Layer 3: Task prompt
@@ -468,6 +501,93 @@ export class ExecutionPipeline {
     }
     lines.push('Schema JSON 結構：`{ tables: [{name, schema}], columns: [{tableName, columnName, dataType, isPrimaryKey, isForeignKey, referencedTable}], foreignKeys: [{tableName, columnName, referencedTable, referencedColumn}] }`');
     return lines.join('\n');
+  }
+
+  /**
+   * Build SA operation flow section injected into frontend agent prompt.
+   */
+  private buildSaFlowSection(flowDiagram: string, taskType: string): string {
+    const typeNote = taskType === 'bug'
+      ? '以下是與此 Bug 相關的前端操作流程路徑（從完整 SA 流程中提取）。'
+      : taskType === 'testing'
+      ? '以下是此測試任務需要覆蓋的前端操作流程路徑。'
+      : '以下是從 SA 規格文件分析出的完整前端操作流程圖。';
+
+    const verificationNote = taskType === 'bug'
+      ? '修復完成後，請確認相關流程路徑能正常運作。'
+      : taskType === 'testing'
+      ? '測試必須覆蓋以下所有流程路徑，包含正常路徑與分支條件。'
+      : '實作完成後，請逐一確認流程圖中每個節點都有對應的 UI 元件與行為，包含所有分支條件。';
+
+    return `## SA 前端操作流程圖
+
+${typeNote}
+
+**實作時請對照此流程圖，確保每條路徑都有對應實作。**
+
+\`\`\`mermaid
+${flowDiagram}
+\`\`\`
+
+> **完成驗證要求**：${verificationNote}`;
+  }
+
+  /**
+   * Find the best SA document for a frontend task.
+   * Priority: task-bound SA docs → SVN SA docs
+   */
+  private findSaDocument(
+    taskId: string,
+    projectId: string,
+    svnDocs: Array<{ documentId: string; filename: string; filePath: string; parsedText: string | null; docType: string | null }>,
+  ): { filename: string; content: string } | null {
+    // 1. Task-bound SA docs (manually uploaded)
+    const taskDocs = getDocumentsForTask(taskId).filter(d => d.source !== 'svn' && d.docType === 'SA');
+    for (const doc of taskDocs) {
+      const content = this.readDocContent(doc.parsedText, doc.filePath);
+      if (content) return { filename: doc.filename, content };
+    }
+
+    // 2. SVN SA docs
+    const svnSaDocs = svnDocs.filter(d => d.docType === 'SA');
+    for (const doc of svnSaDocs) {
+      const content = this.readDocContent(doc.parsedText, doc.filePath);
+      if (content) return { filename: doc.filename, content };
+    }
+
+    return null;
+  }
+
+  /**
+   * Read document content from parsedText or file path.
+   */
+  private readDocContent(parsedText: string | null, filePath: string): string | null {
+    if (!parsedText) return null;
+
+    // parsedText = "[Document saved at: /path/to/file.md]"
+    const mdMatch = parsedText.match(/^\[Document saved at: (.+)\]/);
+    if (mdMatch) {
+      const mdPath = mdMatch[1].trim();
+      try {
+        return fs.readFileSync(mdPath, 'utf-8');
+      } catch {
+        return null;
+      }
+    }
+
+    // Plain text content
+    if (!parsedText.startsWith('[') && parsedText.length > 50) {
+      return parsedText;
+    }
+
+    // Try reading the file directly
+    try {
+      if (fs.existsSync(filePath)) {
+        return fs.readFileSync(filePath, 'utf-8');
+      }
+    } catch { /* ignore */ }
+
+    return null;
   }
 
   /**

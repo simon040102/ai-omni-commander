@@ -4,6 +4,7 @@ import type { AgentOutput } from '../../stores/agentStore';
 import { useAgentStore } from '../../stores/agentStore';
 import { IconSearch, IconStop, IconRefresh, IconSend, IconChevronDown, IconChevronRight, IconX } from '../ui/Icons';
 import { FlowPanel } from './FlowPanel';
+import { SaFlowModal } from './SaFlowModal';
 
 // Configure marked for terminal-friendly output
 marked.setOptions({
@@ -170,6 +171,7 @@ export function TerminalOutput({ outputs, title, role, status, agentId, projectI
   const [showSearch, setShowSearch] = useState(false);
   const [filterType, setFilterType] = useState<string | null>(null);
   const [showFlow, setShowFlow] = useState(false);
+  const [showSaFlow, setShowSaFlow] = useState(false);
 
   // Use store for command input to persist across project switches
   const commandInputs = useAgentStore((s) => s.commandInputs);
@@ -411,18 +413,16 @@ export function TerminalOutput({ outputs, title, role, status, agentId, projectI
             </button>
           ))}
 
-          {/* Flow plan toggle */}
-          <button
-            onClick={() => setShowFlow(!showFlow)}
-            className={`px-2 py-1 rounded text-[11px] font-medium transition-colors border ${
-              showFlow
-                ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30'
-                : 'text-muted-foreground hover:text-foreground hover:bg-muted border-border/50'
-            }`}
-            title="Toggle flow plan"
-          >
-            FLOW{flowPlan ? ` ${flowPlan.steps.filter(s => s.status === 'done').length}/${flowPlan.steps.length}` : ''}
-          </button>
+          {/* SA Flow button — frontend tasks only */}
+          {role === 'frontend' && projectId && (
+            <button
+              onClick={() => setShowSaFlow(true)}
+              className="px-2 py-1 rounded text-[11px] font-medium transition-colors border text-violet-600 dark:text-violet-400 border-violet-500/30 hover:bg-violet-500/10"
+              title="查看 SA 操作流程圖"
+            >
+              SA Flow
+            </button>
+          )}
 
           <div className="h-4 w-px bg-border" />
 
@@ -706,6 +706,15 @@ export function TerminalOutput({ outputs, title, role, status, agentId, projectI
           </div>
         );
       })()}
+
+      {/* SA Flow Modal */}
+      {showSaFlow && projectId && (
+        <SaFlowModal
+          projectId={projectId}
+          taskId={taskId}
+          onClose={() => setShowSaFlow(false)}
+        />
+      )}
     </div>
   );
 }

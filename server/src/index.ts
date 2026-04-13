@@ -27,6 +27,7 @@ import { CodeReviewAgent } from './review/CodeReviewAgent.js';
 import { ReviewTrigger } from './review/ReviewTrigger.js';
 import { RetryHandler } from './review/RetryHandler.js';
 import { SvnSpecService } from './svn/SvnSpecService.js';
+import { SaFlowAnalyzer } from './documents/SaFlowAnalyzer.js';
 import { listProjects } from './db/queries/projects.js';
 import { getTask } from './db/queries/tasks.js';
 import { getRecentPaths, addRecentPath, removeRecentPath, clearRecentPaths, migrateProjectPathsToRecent } from './db/queries/recentPaths.js';
@@ -433,6 +434,22 @@ async function main() {
       ? generateSingleTableERDiagram(schema, tableName)
       : generateFullERDiagram(schema);
     res.json({ mermaid });
+  });
+
+  // GET /api/sa-flow/:projectId — list all cached SA flows for a project
+  const saFlowAnalyzer = new SaFlowAnalyzer(path.dirname(config.dbPath));
+  app.get('/api/sa-flow/:projectId', (req, res) => {
+    const { projectId } = req.params;
+    const flows = saFlowAnalyzer.listProjectFlows(projectId);
+    res.json({ flows });
+  });
+
+  // GET /api/sa-flow/:projectId/file?path= — serve a .mmd file
+  app.get('/api/sa-flow/:projectId/file', (req, res) => {
+    const flowPath = req.query['path'] as string;
+    if (!flowPath || !flowPath.endsWith('.mmd')) { res.status(400).json({ error: 'Invalid path' }); return; }
+    if (!fs.existsSync(flowPath)) { res.status(404).json({ error: 'Flow file not found' }); return; }
+    res.type('text/plain').send(fs.readFileSync(flowPath, 'utf-8'));
   });
 
   // POST /api/schema/test-connection — test DB connectivity
