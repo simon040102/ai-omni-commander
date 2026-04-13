@@ -465,6 +465,7 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
                             role={agent.role}
                             status={agent.status}
                             agentId={agent.id}
+                            projectId={currentProjectId ?? undefined}
                             model={agent.model}
                             totalInputTokens={agent.totalInputTokens}
                             totalOutputTokens={agent.totalOutputTokens}
@@ -673,6 +674,7 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
               role={selectedAgent.role}
               status={selectedAgent.status}
               agentId={selectedAgent.id}
+              projectId={currentProjectId ?? undefined}
               model={selectedAgent.model}
               totalInputTokens={selectedAgent.totalInputTokens}
               totalOutputTokens={selectedAgent.totalOutputTokens}
