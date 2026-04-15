@@ -13,9 +13,10 @@ interface FlowEntry {
   filename: string;
   generatedAt: string;
   flowPath: string;
+  taskIds: string[];
 }
 
-export function SaFlowModal({ projectId, onClose }: SaFlowModalProps) {
+export function SaFlowModal({ projectId, taskId, onClose }: SaFlowModalProps) {
   const [flows, setFlows] = useState<FlowEntry[]>([]);
   const [selected, setSelected] = useState<FlowEntry | null>(null);
   const [content, setContent] = useState<string>('');
@@ -28,11 +29,13 @@ export function SaFlowModal({ projectId, onClose }: SaFlowModalProps) {
       .then(data => {
         const list: FlowEntry[] = data.flows ?? [];
         setFlows(list);
-        if (list.length > 0) setSelected(list[0]);
+        // Prefer flow that belongs to current task, fallback to first
+        const taskFlow = taskId ? list.find(f => f.taskIds?.includes(taskId)) : null;
+        setSelected(taskFlow ?? list[0] ?? null);
       })
       .catch(() => setError('無法載入 SA 流程圖'))
       .finally(() => setLoading(false));
-  }, [projectId]);
+  }, [projectId, taskId]);
 
   useEffect(() => {
     if (!selected) return;

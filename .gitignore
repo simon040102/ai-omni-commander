@@ -31,3 +31,6 @@ shared/dist/
 
 # Logs
 *.log
+
+docs/
+*.zip
