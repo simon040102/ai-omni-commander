@@ -905,11 +905,7 @@ function TaskRow({ task, expandedTaskId, onExecute, onDelete, onToggleExpand, on
   }, []);
 
   const handleRemoveSvnFile = useCallback((index: number) => {
-    setSvnPreviewFiles(prev => {
-      const f = prev[index];
-      if (!f?.manual) return prev;  // only allow removing manual entries
-      return prev.filter((_, i) => i !== index);
-    });
+    setSvnPreviewFiles(prev => prev.filter((_, i) => i !== index));
   }, []);
 
   const handleBrowseSvn = useCallback((specType: 'frontend' | 'backend') => {
@@ -1334,7 +1330,7 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
                   {f.manual && (
                     <span className="px-1.5 py-0.5 rounded text-[10px] bg-purple-500/15 text-purple-400 flex-shrink-0">手動</span>
                   )}
-                  {f.manual && onRemoveSvnFile && (
+                  {onRemoveSvnFile && (
                     <button
                       onClick={() => onRemoveSvnFile(i)}
                       className="p-1 rounded text-muted-foreground/70 hover:text-red-400 hover:bg-red-500/10 transition-colors opacity-0 group-hover:opacity-100"

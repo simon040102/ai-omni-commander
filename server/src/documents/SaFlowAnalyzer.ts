@@ -49,12 +49,13 @@ export class SaFlowAnalyzer {
    */
   async analyze(opts: {
     projectId: string;
+    taskId?: string;
     saContent: string;
     sourceFilename: string;
     taskType: string;
     taskDescription: string;
   }): Promise<SaFlowResult | null> {
-    const { projectId, saContent, sourceFilename, taskType, taskDescription } = opts;
+    const { projectId, taskId, saContent, sourceFilename, taskType, taskDescription } = opts;
 
     if (!saContent || saContent.trim().length < 100) {
       logger.warn({ sourceFilename }, 'SA content too short, skipping flow analysis');
@@ -72,6 +73,17 @@ export class SaFlowAnalyzer {
     if (fs.existsSync(flowPath)) {
       fullFlow = fs.readFileSync(flowPath, 'utf-8');
       logger.info({ sourceFilename, hash }, 'SA flow cache hit');
+      // Update taskIds in existing meta if taskId not already recorded
+      if (taskId && fs.existsSync(metaPath)) {
+        try {
+          const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+          if (!meta.taskIds) meta.taskIds = [];
+          if (!meta.taskIds.includes(taskId)) {
+            meta.taskIds.push(taskId);
+            fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+          }
+        } catch { /* ignore */ }
+      }
     } else {
       // Generate full flowchart via Claude
       logger.info({ sourceFilename, hash }, 'Generating SA flow diagram');
@@ -84,10 +96,10 @@ export class SaFlowAnalyzer {
       fs.writeFileSync(metaPath, JSON.stringify({
         hash,
         generatedAt: new Date().toISOString(),
-        sourceFilename,
+        filename: sourceFilename,
         projectId,
+        taskIds: taskId ? [taskId] : [],
       }, null, 2), 'utf-8');
-
       logger.info({ flowPath }, 'SA flow saved to cache');
     }
 
@@ -171,16 +183,22 @@ ${fullFlow}
   }
 
   /** List all cached flows for a project */
-  listProjectFlows(projectId: string): Array<{ hash: string; filename: string; generatedAt: string; flowPath: string }> {
+  listProjectFlows(projectId: string): Array<{ hash: string; filename: string; generatedAt: string; flowPath: string; taskIds: string[] }> {
     try {
       const files = fs.readdirSync(this.flowsDir);
-      const results: Array<{ hash: string; filename: string; generatedAt: string; flowPath: string }> = [];
+      const results: Array<{ hash: string; filename: string; generatedAt: string; flowPath: string; taskIds: string[] }> = [];
       for (const f of files) {
         if (!f.startsWith(projectId) || !f.endsWith('-meta.json')) continue;
         const meta = JSON.parse(fs.readFileSync(path.join(this.flowsDir, f), 'utf-8'));
         const flowFile = f.replace('-meta.json', '-flow.mmd');
         if (fs.existsSync(path.join(this.flowsDir, flowFile))) {
-          results.push({ ...meta, flowPath: path.join(this.flowsDir, flowFile) });
+          results.push({
+            hash: meta.hash,
+            filename: meta.filename || meta.sourceFilename || '',
+            generatedAt: meta.generatedAt,
+            flowPath: path.join(this.flowsDir, flowFile),
+            taskIds: meta.taskIds || [],
+          });
         }
       }
       return results;

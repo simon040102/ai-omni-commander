@@ -268,6 +268,18 @@ export function DbSchemaExplorer() {
   // Active schema data
   const activeSchema = activeConnectionId ? schemas[activeConnectionId] : null;
 
+  // Auto-load persisted schemas from server on mount / project change
+  useEffect(() => {
+    if (!currentProjectId || dbConnections.length === 0) return;
+    for (const conn of dbConnections) {
+      if (schemas[conn.id]) continue; // already in store
+      fetch(`/api/schema/${currentProjectId}/${conn.id}`)
+        .then(r => r.ok ? r.json() : null)
+        .then(data => { if (data?.result) setSchema(conn.id, data.result); })
+        .catch(() => {});
+    }
+  }, [currentProjectId, dbConnections.length]);
+
   // Fetch ER diagram when switching to ER tab or changing table/mode
   useEffect(() => {
     if (activeTab !== 'er' || !activeConnectionId || !activeSchema || !currentProjectId) return;

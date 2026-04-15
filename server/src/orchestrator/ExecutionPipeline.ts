@@ -138,6 +138,7 @@ export class ExecutionPipeline {
         try {
           saFlowResult = await this.saFlowAnalyzer.analyze({
             projectId: task.projectId,
+            taskId,
             saContent: saDoc.content,
             sourceFilename: saDoc.filename,
             taskType: task.taskType,
