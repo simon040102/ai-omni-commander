@@ -295,6 +295,8 @@ export function useWebSocket() {
               title: 'Agent completed',
               message: `Cost: $${((payload['costUsd'] as number) || 0).toFixed(4)} | ${(totalTokens / 1000).toFixed(1)}k tokens`,
             });
+            // Free memory — outputs are persisted in DB and reloaded on demand
+            clearOutputs(payload['agentId'] as string);
             break;
           }
 
