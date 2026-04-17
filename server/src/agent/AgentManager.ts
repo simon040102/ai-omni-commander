@@ -222,15 +222,16 @@ export class AgentManager {
     updateAgent(agent.id, { status: 'starting' });
     if (config.taskId) {
       updateAgent(agent.id, { currentTaskId: config.taskId });
-      updateTask(config.taskId, { assignedAgentId: agent.id, status: 'in_progress' });
-
-      // Notify frontend of task status change
-      await this.eventBus.emit({
-        type: EventTypes.TASK_STATUS_CHANGED,
-        source: agent.id,
-        payload: { taskId: config.taskId, projectId: config.projectId, newStatus: 'in_progress', assignedAgentId: agent.id },
-        timestamp: new Date().toISOString(),
-      });
+      // Skip task status update for fullstack subagents (task status managed by FullstackController)
+      if (!config.skipTaskStatusUpdate) {
+        updateTask(config.taskId, { assignedAgentId: agent.id, status: 'in_progress' });
+        await this.eventBus.emit({
+          type: EventTypes.TASK_STATUS_CHANGED,
+          source: agent.id,
+          payload: { taskId: config.taskId, projectId: config.projectId, newStatus: 'in_progress', assignedAgentId: agent.id },
+          timestamp: new Date().toISOString(),
+        });
+      }
     }
 
     // Resolve MCP servers (global config + workspace .mcp.json) and build allowed tools list
@@ -1064,9 +1065,11 @@ export class AgentManager {
     }
 
     this.clearWatchdog(agentId);
+    const shouldSkipTaskStatus = this.skipStatusMap.get(agentId) === true;
+    this.skipStatusMap.delete(agentId);
     updateAgent(agentId, { status: 'error' });
 
-    if (taskId) {
+    if (taskId && !shouldSkipTaskStatus) {
       updateTask(taskId, { status: 'failed' });
       await this.eventBus.emit({
         type: EventTypes.TASK_STATUS_CHANGED,

@@ -1044,10 +1044,10 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
   onRemoveSvnFile?: (index: number) => void;
   onReloadSvn?: () => void;
 }) {
-  const ALL_LABELS = ['frontend', 'backend', 'fullstack', 'devops', 'review', 'architect'] as const;
   const ALL_TASK_TYPES: TaskType[] = ['bug', 'feature', 'refactor', 'testing', 'other'];
   const isAsana = task.source === 'asana';
   const client = useWsStore(s => s.client);
+  const projects = useProjectStore(s => s.projects);
   const [execModel, setExecModel] = useState<string>(task.preferredModel || 'sonnet');
   const [testOptions, setTestOptions] = useState<TestOptions>(() => ({
     frontend: { smokeTest: false, e2eSpec: false, consoleScript: false, useMock: true, useRealApi: false, headed: false },
@@ -1057,6 +1057,10 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
   // All file uploads within this session are scoped to this ID.
   const [executionRunId] = useState(() => crypto.randomUUID());
   const currentProjectId = useProjectStore(s => s.currentProjectId);
+  const editProject = projects.find(p => p.id === currentProjectId);
+  const ALL_LABELS = (['frontend', 'backend', 'fullstack', 'devops', 'review', 'architect'] as const).filter(
+    l => l !== 'fullstack' || (editProject?.frontendPath && editProject?.backendPath),
+  );
   const [editingDesc, setEditingDesc] = useState(false);
   const [descDraft, setDescDraft] = useState(task.description || '');
   const [pastedImages, setPastedImages] = useState<Array<{ name: string; dataUrl: string }>>([]);
