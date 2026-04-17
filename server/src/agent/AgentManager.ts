@@ -56,6 +56,8 @@ export class AgentManager {
   private inputDebounceTimer = new Map<string, ReturnType<typeof setTimeout>>();
   private inputDebounceResolvers = new Map<string, Array<(v: boolean) => void>>();
   private watchdogInterval: ReturnType<typeof setInterval>;
+  /** Agents that should NOT update task status on completion (fullstack subagents) */
+  private readonly skipStatusMap = new Map<string, boolean>();
 
   constructor(
     private eventBus: EventBus,
@@ -269,6 +271,9 @@ export class AgentManager {
     this.lastOutputAt.set(agent.id, Date.now());
     this.nudgeCount.set(agent.id, 0);
     this.autoResumeCount.set(agent.id, 0);
+    if (config.skipTaskStatusUpdate) {
+      this.skipStatusMap.set(agent.id, true);
+    }
 
     // Spawn the process
     await proc.spawn(config.prompt);
@@ -960,7 +965,10 @@ export class AgentManager {
       pid: null,
     });
 
-    if (taskId) {
+    const shouldSkipTaskStatus = this.skipStatusMap.get(agentId) === true;
+    this.skipStatusMap.delete(agentId);
+
+    if (taskId && !shouldSkipTaskStatus) {
       const status = result.is_error ? 'failed' : 'completed';
       updateTask(taskId, {
         status,

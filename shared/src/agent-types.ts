@@ -3,6 +3,7 @@ export type AgentRole =
   | 'architect'
   | 'backend'
   | 'frontend'
+  | 'coordinator'
   | 'devops'
   | 'testing'
   | 'review'
@@ -75,6 +76,7 @@ export interface AgentStartConfig {
   model?: string;
   workingDir?: string; // Override working directory (default: auto-detect from project config)
   useWorkspaceSkills?: boolean; // Whether to load CLAUDE.md/.claude/ from workspace (default: true)
+  skipTaskStatusUpdate?: boolean; // For fullstack subagents: don't update task status on completion
 }
 
 export interface AgentRoleConfig {

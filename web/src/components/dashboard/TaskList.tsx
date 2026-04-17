@@ -19,6 +19,7 @@ const TASK_TYPE_COLORS: Record<TaskType, string> = {
 const LABEL_COLORS: Record<string, string> = {
   frontend: 'bg-blue-500/100/15 text-blue-400',
   backend: 'bg-purple-500/15 text-purple-400',
+  fullstack: 'bg-violet-500/15 text-violet-400',
   devops: 'bg-green-500/15 text-green-400',
   testing: 'bg-teal-500/15 text-teal-400',
   review: 'bg-gray-500/15 text-gray-400',
@@ -112,6 +113,7 @@ export function TaskList({ selectedModel }: TaskListProps) {
   const availableLabels: string[] = [];
   if (project?.frontendPath) availableLabels.push('frontend');
   if (project?.backendPath) availableLabels.push('backend');
+  if (project?.frontendPath && project?.backendPath) availableLabels.push('fullstack');
   if (availableLabels.length === 0) availableLabels.push('frontend', 'backend');
 
   const projectTasks = currentProjectId
@@ -1042,7 +1044,7 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
   onRemoveSvnFile?: (index: number) => void;
   onReloadSvn?: () => void;
 }) {
-  const ALL_LABELS = ['frontend', 'backend', 'devops', 'review', 'architect'] as const;
+  const ALL_LABELS = ['frontend', 'backend', 'fullstack', 'devops', 'review', 'architect'] as const;
   const ALL_TASK_TYPES: TaskType[] = ['bug', 'feature', 'refactor', 'testing', 'other'];
   const isAsana = task.source === 'asana';
   const client = useWsStore(s => s.client);
