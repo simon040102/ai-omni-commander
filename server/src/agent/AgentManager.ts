@@ -56,8 +56,8 @@ export class AgentManager {
   private inputDebounceTimer = new Map<string, ReturnType<typeof setTimeout>>();
   private inputDebounceResolvers = new Map<string, Array<(v: boolean) => void>>();
   private watchdogInterval: ReturnType<typeof setInterval>;
-  /** Agents that should NOT update task status on completion (fullstack subagents) */
-  private readonly skipStatusMap = new Map<string, boolean>();
+  /** Agents that should NEVER update task status (fullstack subagents — persists across resumes) */
+  private readonly skipTaskStatusAgents = new Set<string>();
 
   constructor(
     private eventBus: EventBus,
@@ -273,7 +273,7 @@ export class AgentManager {
     this.nudgeCount.set(agent.id, 0);
     this.autoResumeCount.set(agent.id, 0);
     if (config.skipTaskStatusUpdate) {
-      this.skipStatusMap.set(agent.id, true);
+      this.skipTaskStatusAgents.add(agent.id);
     }
 
     // Spawn the process
@@ -301,6 +301,7 @@ export class AgentManager {
     this.nudgeCount.delete(agentId);
     this.autoResumeCount.delete(agentId);
     this.taskDoneAgents.delete(agentId);
+    this.skipTaskStatusAgents.delete(agentId);
   }
 
   /** Stop a specific agent.
@@ -959,6 +960,9 @@ export class AgentManager {
       logger.info({ agentId, taskId }, 'Self-review completed');
     }
 
+    // Read skip flag BEFORE clearWatchdog (which cleans it up)
+    const shouldSkipTaskStatus = this.skipTaskStatusAgents.has(agentId);
+
     this.clearWatchdog(agentId);
     updateAgent(agentId, {
       status: 'stopped',
@@ -968,9 +972,6 @@ export class AgentManager {
       totalOutputTokens: result.output_tokens || 0,
       pid: null,
     });
-
-    const shouldSkipTaskStatus = this.skipStatusMap.get(agentId) === true;
-    this.skipStatusMap.delete(agentId);
 
     if (taskId && !shouldSkipTaskStatus) {
       const status = result.is_error ? 'failed' : 'completed';
@@ -1067,9 +1068,8 @@ export class AgentManager {
       return;
     }
 
+    const shouldSkipTaskStatus = this.skipTaskStatusAgents.has(agentId);
     this.clearWatchdog(agentId);
-    const shouldSkipTaskStatus = this.skipStatusMap.get(agentId) === true;
-    this.skipStatusMap.delete(agentId);
     updateAgent(agentId, { status: 'error' });
 
     if (taskId && !shouldSkipTaskStatus) {
