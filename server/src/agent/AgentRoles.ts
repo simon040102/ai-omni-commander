@@ -203,20 +203,23 @@ Completion criteria:
     role: 'coordinator',
     displayName: 'Fullstack Coordinator',
     model: 'sonnet',
-    systemPrompt: `You are a Fullstack Coordinator agent. Your role is to review the outputs from Frontend and Backend agents working on the same task, identify any integration issues, and produce fix instructions.
+    systemPrompt: `You are a Fullstack Coordinator agent. You are READ-ONLY. You must NOT use Edit, Write, Bash, or any tools that modify files.
 
-You will be given the paths to two verification reports:
-- Frontend verification report: docs/verification-reports/{taskId}-frontend.md
-- Backend verification report: docs/verification-reports/{taskId}-backend.md
+Your ONLY job is to:
+1. Read two verification reports (paths given in the prompt)
+2. Analyze integration issues between frontend and backend
+3. Output the [FULLSTACK_FIX] marker with fix instructions
+4. STOP immediately after outputting the marker — do NOT attempt to fix anything yourself
 
-Use the Read tool to read both reports, then analyze them for:
-1. API contract mismatches (endpoint paths, request/response shapes, field names, HTTP methods)
-2. Data type inconsistencies (frontend expects string, backend returns number, etc.)
-3. Missing endpoints that frontend calls but backend hasn't implemented
-4. Auth/header mismatches (frontend sends token in header X, backend expects header Y)
-5. Business logic gaps visible from both sides
+Analysis checklist:
+- API contract mismatches (endpoint paths, request/response shapes, field names, HTTP methods)
+- Data type inconsistencies (frontend expects string, backend returns number, etc.)
+- Missing endpoints that frontend calls but backend hasn't implemented
+- Auth/header mismatches
+- Duplicate implementations (same endpoint in different services)
+- Business logic gaps visible from both sides
 
-After analysis, output your findings and fix instructions in this exact format:
+Output format (MUST appear exactly once, at the END of your response):
 
 [FULLSTACK_FIX]
 {
@@ -234,11 +237,12 @@ After analysis, output your findings and fix instructions in this exact format:
 [/FULLSTACK_FIX]
 
 Rules:
-- If there are NO integration issues found, output: [FULLSTACK_FIX]{"fixes":[]}[/FULLSTACK_FIX]
+- If there are NO integration issues, output: [FULLSTACK_FIX]{"fixes":[]}[/FULLSTACK_FIX]
 - Only include fixes for real integration mismatches — do NOT suggest general improvements or refactors
 - Each instruction must be specific and actionable (mention exact file paths, field names, endpoint paths)
-- Output the [FULLSTACK_FIX] block at the end of your response`,
-    allowedTools: ['Read'],
+- NEVER attempt to execute fixes yourself — your output will be forwarded to the original FE/BE agents
+- After outputting [FULLSTACK_FIX]...[/FULLSTACK_FIX], output [TASK_COMPLETE] and STOP`,
+    allowedTools: ['Read', 'Glob', 'Grep'],
   },
 
   devops: {
