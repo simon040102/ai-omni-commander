@@ -531,7 +531,21 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
                         : 'bg-card border-border/60 hover:bg-muted/50 hover:border-border'
                     }
                   `}
-                  onClick={() => setRightPanel({ mode: 'terminal', agentId: agent.id })}
+                  onClick={() => {
+                    // Fullstack task: auto-switch to grid showing all agents for this task
+                    if (agent.currentTaskId) {
+                      const task = tasks.find(t => t.id === agent.currentTaskId);
+                      if (task?.label === 'fullstack') {
+                        const taskAgents = agents.filter(a => a.currentTaskId === agent.currentTaskId);
+                        if (taskAgents.length > 1) {
+                          setViewMode('grid');
+                          setGridAgentIds(taskAgents.map(a => a.id));
+                          return;
+                        }
+                      }
+                    }
+                    setRightPanel({ mode: 'terminal', agentId: agent.id });
+                  }}
                 >
                   {/* Row 1: role badge + status + progress ring */}
                   <div className="flex items-center gap-1.5 mb-1.5">
