@@ -191,8 +191,8 @@ export class FullstackController {
     return [];
   }
 
-  /** Max wait time for agents (60 minutes) */
-  private static readonly AGENT_TIMEOUT_MS = 60 * 60 * 1000;
+  /** Max wait time for agents (4 hours — real tasks with auto-resume + self-review take long) */
+  private static readonly AGENT_TIMEOUT_MS = 4 * 60 * 60 * 1000;
 
   private waitForAgents(agentIds: string[]): Promise<void> {
     if (agentIds.length === 0) return Promise.resolve();
