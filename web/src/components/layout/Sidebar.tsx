@@ -183,7 +183,7 @@ export function Sidebar({ currentView, onViewChange, collapsed, onToggleCollapse
       )}
 
       {/* Navigation */}
-      <nav className={`${collapsed ? 'p-1' : 'p-2'}`}>
+      <nav className={`${collapsed ? 'p-1' : 'p-2'} overflow-y-auto flex-1 min-h-0`}>
         {navItems.map(item => {
           const isActive = currentView === item.view;
           return (
@@ -220,8 +220,7 @@ export function Sidebar({ currentView, onViewChange, collapsed, onToggleCollapse
         })}
       </nav>
 
-      {/* Spacer to push bottom items down */}
-      <div className="flex-1" />
+      {/* Spacer removed — nav is now flex-1 and scrollable */}
 
       {/* Bottom items - pinned */}
       <div className={`${collapsed ? 'p-1' : 'px-2 pb-1'} border-t border-border`}>

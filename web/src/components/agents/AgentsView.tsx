@@ -493,7 +493,7 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
       {viewMode === 'list' && (
       <div className="flex-1 min-h-0 flex gap-2">
         {/* ─── Left: Agent list ─── */}
-        <div className="w-56 flex-shrink-0 flex flex-col overflow-hidden">
+        <div className="w-56 flex-shrink-0 flex flex-col overflow-hidden border border-border rounded-lg">
           {/* Agent list */}
           <div className="flex-1 overflow-y-auto space-y-2 p-1">
             {agents.map(agent => {
@@ -649,19 +649,6 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
             )}
           </div>
 
-          {/* Add Agent button at bottom */}
-          <button
-            onClick={() => setRightPanel({ mode: 'add-agent' })}
-            className={`flex items-center justify-center gap-1.5 px-3 py-2.5 text-xs font-medium border-t border-border transition-colors
-              ${rightPanel.mode === 'add-agent'
-                ? 'bg-primary/10 text-primary'
-                : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
-              }
-            `}
-          >
-            <IconPlus className="w-3.5 h-3.5" />
-            Add Agent
-          </button>
         </div>
 
         {/* ─── Right: Terminal or Add Agent form ─── */}
