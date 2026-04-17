@@ -4,9 +4,10 @@ import { useWsStore } from '../../stores/wsStore';
 import { useToastStore } from '../../stores/toastStore';
 import { AsanaImportDrawer } from './AsanaImportDrawer';
 import { SvnBrowser } from './SvnBrowser';
-import { IconPlus, IconPlay, IconTrash, IconX, IconChevronDown, IconChevronRight, IconAsana, IconDocument, IconExternalLink, IconUpload, IconCheck, IconRefresh } from '../ui/Icons';
+import { IconPlus, IconPlay, IconTrash, IconX, IconChevronDown, IconChevronRight, IconAsana, IconDocument, IconExternalLink, IconUpload, IconCheck, IconRefresh, IconGrid } from '../ui/Icons';
 import type { TaskType, Task } from '../../stores/projectStore';
 import type { TestOptions } from '@omni/shared';
+import type { View } from '../layout/AppShell';
 
 const TASK_TYPE_COLORS: Record<TaskType, string> = {
   bug: 'bg-red-500/100/20 text-red-400',
@@ -66,9 +67,10 @@ function getSpecTypeBadge(url: string): { label: string; className: string } {
 
 interface TaskListProps {
   selectedModel: string;
+  onViewChange?: (view: View) => void;
 }
 
-export function TaskList({ selectedModel }: TaskListProps) {
+export function TaskList({ selectedModel, onViewChange }: TaskListProps) {
   const currentProjectId = useProjectStore(s => s.currentProjectId);
   const tasks = useProjectStore(s => s.tasks);
   const project = useProjectStore(s => s.projects.find(p => p.id === s.currentProjectId));
@@ -414,6 +416,10 @@ export function TaskList({ selectedModel }: TaskListProps) {
                     svnBrowserEditCallback.current = onSelect;
                     setShowSvnBrowserForEdit(type);
                   }}
+                  onViewAgents={onViewChange ? (taskId) => {
+                    useProjectStore.getState().setAgentsFilterTaskId(taskId);
+                    onViewChange('agents');
+                  } : undefined}
                 />
               ));
               return (
@@ -826,7 +832,7 @@ interface SvnPreviewFile {
 }
 
 /* ─── Single task row with expandable detail ─── */
-function TaskRow({ task, expandedTaskId, onExecute, onDelete, onToggleExpand, onUpdate, onUploadDoc, onUploadImage, hasSvnConfig, onBrowseSvn }: {
+function TaskRow({ task, expandedTaskId, onExecute, onDelete, onToggleExpand, onUpdate, onUploadDoc, onUploadImage, hasSvnConfig, onBrowseSvn, onViewAgents }: {
   task: Task;
   expandedTaskId: string | null;
   onExecute: (id: string, model?: string, mockupFiles?: string[], testOptions?: TestOptions, executionRunId?: string) => void;
@@ -837,6 +843,7 @@ function TaskRow({ task, expandedTaskId, onExecute, onDelete, onToggleExpand, on
   onUploadImage: (taskId: string, file: File, executionRunId?: string) => void;
   hasSvnConfig?: boolean;
   onBrowseSvn?: (specType: 'frontend' | 'backend', onSelect: (url: string) => void) => void;
+  onViewAgents?: (taskId: string) => void;
 }) {
   const isRunning = task.status === 'in_progress' || task.status === 'assigned';
   const isExpanded = expandedTaskId === task.id;
@@ -961,8 +968,8 @@ function TaskRow({ task, expandedTaskId, onExecute, onDelete, onToggleExpand, on
           {task.status.replace(/_/g, ' ')}
         </span>
 
-        {/* Execute button — always visible when task is executable */}
-        <div className="flex-shrink-0 w-[2rem] flex justify-center" onClick={e => e.stopPropagation()}>
+        {/* Execute / View Agents buttons */}
+        <div className="flex-shrink-0 flex items-center gap-0.5" onClick={e => e.stopPropagation()}>
           {!isRunning && task.status !== 'completed' && (
             <button
               onClick={() => onExecute(task.id)}
@@ -970,6 +977,15 @@ function TaskRow({ task, expandedTaskId, onExecute, onDelete, onToggleExpand, on
               title="Execute task"
             >
               <IconPlay className="w-4 h-4" />
+            </button>
+          )}
+          {task.label === 'fullstack' && isRunning && onViewAgents && (
+            <button
+              onClick={() => onViewAgents(task.id)}
+              className="p-1.5 rounded-md bg-violet-500/15 text-violet-400 hover:bg-violet-500/25 hover:text-violet-300 transition-colors"
+              title="View FE + BE agents"
+            >
+              <IconGrid className="w-4 h-4" />
             </button>
           )}
         </div>

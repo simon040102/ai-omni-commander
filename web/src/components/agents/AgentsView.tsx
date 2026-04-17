@@ -15,6 +15,7 @@ import type { View } from '../layout/AppShell';
 const ROLE_DOT: Record<string, string> = {
   frontend: 'bg-blue-500',
   backend: 'bg-purple-500',
+  coordinator: 'bg-violet-500',
   master: 'bg-yellow-500',
   architect: 'bg-orange-500',
   devops: 'bg-green-500',
@@ -26,6 +27,7 @@ const ROLE_DOT: Record<string, string> = {
 const ROLE_BG: Record<string, string> = {
   frontend: 'bg-blue-500/10 text-blue-400',
   backend: 'bg-purple-500/10 text-purple-400',
+  coordinator: 'bg-violet-500/10 text-violet-400',
   master: 'bg-yellow-500/10 text-yellow-400',
   architect: 'bg-orange-500/10 text-orange-400',
   devops: 'bg-green-500/10 text-green-400',
@@ -58,6 +60,8 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
   const progress = useAgentStore(s => s.progress);
   const client = useWsStore(s => s.client);
   const addToast = useToastStore(s => s.addToast);
+  const agentsFilterTaskId = useProjectStore(s => s.agentsFilterTaskId);
+  const setAgentsFilterTaskId = useProjectStore(s => s.setAgentsFilterTaskId);
 
   const agents = (currentProjectId
     ? allAgents.filter(a => a.projectId === currentProjectId)
@@ -73,6 +77,18 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
   const [gridAgentIds, setGridAgentIds] = useState<string[]>([]);
   const [dragIdx, setDragIdx] = useState<number | null>(null);
   const [dropIdx, setDropIdx] = useState<number | null>(null);
+
+  // Fullstack filter: auto-switch to grid mode showing only agents for this task
+  useEffect(() => {
+    if (!agentsFilterTaskId) return;
+    const taskAgents = agents.filter(a => a.currentTaskId === agentsFilterTaskId);
+    if (taskAgents.length > 0) {
+      setViewMode('grid');
+      setGridAgentIds(taskAgents.map(a => a.id));
+    }
+    // Clear the filter after applying (one-shot)
+    setAgentsFilterTaskId(null);
+  }, [agentsFilterTaskId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Clear grid when project changes
   useEffect(() => {
