@@ -415,10 +415,55 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
                 );
               }
 
+              // Detect fullstack layout: FE+BE on top, coordinator on bottom
+              const isFullstackLayout = visibleAgents.length >= 2 && visibleAgents.some(a => a.role === 'coordinator');
               const cols = visibleAgents.length === 1 ? 1 : 2;
               const rows = Math.ceil(visibleAgents.length / cols);
               // If more than 2 rows, enable scrolling with fixed row height
-              const needsScroll = rows > 2;
+              const needsScroll = !isFullstackLayout && rows > 2;
+
+              // Fullstack layout: top row FE+BE (50/50), bottom row coordinator (full width)
+              if (isFullstackLayout) {
+                const feBeAgents = visibleAgents.filter(a => a.role !== 'coordinator');
+                const coordAgents = visibleAgents.filter(a => a.role === 'coordinator');
+                const renderFsAgent = (agent: NonNullable<typeof visibleAgents[0]>, span2?: boolean) => {
+                  const ct = agent.currentTaskId ? tasks.find(t => t.id === agent.currentTaskId) : null;
+                  return (
+                    <div
+                      key={agent.id}
+                      className="min-h-0 min-w-0 flex flex-col rounded-lg overflow-hidden border border-transparent"
+                      style={span2 ? { gridColumn: '1 / -1' } : undefined}
+                    >
+                      <div className="flex-1 min-h-0">
+                        <TerminalOutput
+                          outputs={outputs[agent.id] || []}
+                          title={`${agent.role.charAt(0).toUpperCase() + agent.role.slice(1)} Agent${ct?.title ? ` — ${ct.title}` : ''}`}
+                          role={agent.role}
+                          status={agent.status}
+                          agentId={agent.id}
+                          projectId={currentProjectId ?? undefined}
+                          taskId={agent.currentTaskId || undefined}
+                          model={agent.model}
+                          totalInputTokens={agent.totalInputTokens}
+                          totalOutputTokens={agent.totalOutputTokens}
+                          onSendCommand={handleSendCommand}
+                          onAction={handleAgentAction}
+                          compact
+                        />
+                      </div>
+                    </div>
+                  );
+                };
+                return (
+                  <div className="h-full grid gap-2" style={{
+                    gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+                    gridTemplateRows: '1fr 1fr',
+                  }}>
+                    {feBeAgents.map(a => renderFsAgent(a))}
+                    {coordAgents.map(a => renderFsAgent(a, true))}
+                  </div>
+                );
+              }
 
               return (
                 <div
