@@ -363,7 +363,7 @@ export class ExecutionPipeline {
     }
 
     // Layer 3: Task prompt
-    const taskPrompt = this.buildTaskPrompt(opts.taskTitle, opts.taskDescription, opts.taskType, opts.role, opts.testOptions);
+    const taskPrompt = this.buildTaskPrompt(opts.taskTitle, opts.taskDescription, opts.taskType, opts.role, opts.testOptions, opts.taskId);
     parts.push(taskPrompt);
 
     return parts.join('\n\n---\n\n');
@@ -699,7 +699,7 @@ ${flowDiagram}
   /**
    * Build the task-specific prompt section.
    */
-  private buildTaskPrompt(title: string, description: string, taskType: TaskType, role?: string, testOptions?: TestOptions): string {
+  private buildTaskPrompt(title: string, description: string, taskType: TaskType, role?: string, testOptions?: TestOptions, taskId?: string): string {
     const typeLabels: Record<TaskType, string> = {
       bug: 'Bug Fix',
       feature: 'New Feature',
@@ -765,11 +765,11 @@ ${strategies[taskType]}
 
 ## 完成標準
 
-${this.buildCompletionCriteria(role, testOptions)}
+${this.buildCompletionCriteria(role, testOptions, taskId)}
 - 如果遇到需要人工決策的問題，請加上 [NEEDS_HUMAN] 並說明原因`;
   }
 
-  private buildCompletionCriteria(role?: string, testOptions?: TestOptions): string {
+  private buildCompletionCriteria(role?: string, testOptions?: TestOptions, taskId?: string): string {
     if (role === 'frontend') {
       const opts = testOptions?.frontend;
       const lines: string[] = [
@@ -817,7 +817,10 @@ ${this.buildCompletionCriteria(role, testOptions)}
           `最後 \`console.table(results)\` 輸出 pass/fail 摘要。腳本必須可直接貼到瀏覽器 Console 執行，無需任何 npm 套件。`,
         );
       }
-      lines.push('- 所有步驟完成後，在回應末尾加上 [TASK_COMPLETE]');
+      lines.push(
+        `- 所有驗證步驟完成後，將完整驗證結果（規格逐項確認、build 結果、測試結果、截圖路徑）以 Markdown 格式寫入 \`docs/verification-reports/${taskId}.md\`（目錄不存在則建立）`,
+        '- 所有步驟完成後，在回應末尾加上 [TASK_COMPLETE]',
+      );
       return lines.join('\n');
     }
 
@@ -845,7 +848,10 @@ ${this.buildCompletionCriteria(role, testOptions)}
           '- 將本次開發的端點合約寫入 `.ai_context/api-contracts/{module}.json`（如目錄不存在請建立）',
         );
       }
-      lines.push('- 所有步驟完成後，在回應末尾加上 [TASK_COMPLETE]');
+      lines.push(
+        `- 所有驗證步驟完成後，將完整驗證結果（規格逐項確認、build 結果、測試結果）以 Markdown 格式寫入 \`docs/verification-reports/${taskId}.md\`（目錄不存在則建立）`,
+        '- 所有步驟完成後，在回應末尾加上 [TASK_COMPLETE]',
+      );
       return lines.join('\n');
     }
 

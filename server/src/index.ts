@@ -452,6 +452,20 @@ async function main() {
     res.type('text/plain').send(fs.readFileSync(flowPath, 'utf-8'));
   });
 
+  // GET /api/task/:taskId/verification-report — serve verification report MD
+  app.get('/api/task/:taskId/verification-report', (req, res) => {
+    const { taskId } = req.params;
+    const task = getTask(taskId as string);
+    if (!task) { res.status(404).json({ error: 'Task not found' }); return; }
+    const project = getProject(task.projectId);
+    if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+    // Determine workspace dir (frontend_path or backend_path or working_dir)
+    const workspaceDir = (task.label === 'frontend' ? project.frontendPath : project.backendPath) || project.workingDir;
+    const reportPath = path.join(workspaceDir, 'docs', 'verification-reports', `${taskId}.md`);
+    if (!fs.existsSync(reportPath)) { res.status(404).json({ error: 'Report not found' }); return; }
+    res.type('text/plain').send(fs.readFileSync(reportPath, 'utf-8'));
+  });
+
   // POST /api/schema/test-connection — test DB connectivity
   app.post('/api/schema/test-connection', async (req, res) => {
     const { connectionString, dbType } = req.body as { connectionString: string; dbType: string };
