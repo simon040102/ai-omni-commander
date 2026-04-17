@@ -75,9 +75,11 @@ async function main() {
   dispatcher.onDispatch(async (taskId, role, prompt) => {
     const task = db.prepare('SELECT project_id FROM tasks WHERE id = ?').get(taskId) as { project_id: string } | undefined;
     if (!task) return;
+    // fullstack label is handled by ExecutionPipeline.executeTask → FullstackController
+    if (role === 'fullstack') return;
     await agentManager.startAgent({
       projectId: task.project_id,
-      role,
+      role: role as import('@omni/shared').AgentRole,
       taskId,
       prompt,
     });

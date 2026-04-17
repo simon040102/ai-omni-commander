@@ -5,6 +5,7 @@ export type TaskSource = 'manual' | 'asana';
 export type TaskLabel =
   | 'backend'
   | 'frontend'
+  | 'fullstack'
   | 'devops'
   | 'testing'
   | 'review'

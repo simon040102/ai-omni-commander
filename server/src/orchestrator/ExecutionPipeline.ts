@@ -2,6 +2,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import type { AgentRole, SuperpowersFeature, TaskType, ProjectConfig, TestOptions } from '@omni/shared';
 import type { AgentManager } from '../agent/AgentManager.js';
+import { FullstackController } from './FullstackController.js';
 import type { EventBus } from '../eventbus/EventBus.js';
 import type { DocumentParser } from '../documents/DocumentParser.js';
 import { type SvnSpecService, extractFunctionCode } from '../svn/SvnSpecService.js';
@@ -62,6 +63,13 @@ export class ExecutionPipeline {
 
     updateProject(task.projectId, { status: 'executing' });
     updateTask(taskId, { status: 'in_progress' });
+
+    // Fullstack: delegate to FullstackController
+    if (task.label === 'fullstack') {
+      const controller = new FullstackController(this.agentManager, this.eventBus, this);
+      await controller.execute(task, project, { model, mockupFiles, testOptions, executionRunId });
+      return '';
+    }
 
     // Auto-select superpowers based on task type
     const superpowers = this.selectSuperpowers(task.taskType);
@@ -201,6 +209,121 @@ export class ExecutionPipeline {
   }
 
   /**
+   * Build the assembled prompt for a task with a given role override.
+   * Used by FullstackController to build FE/BE prompts from a fullstack task.
+   */
+  async preparePromptForRole(
+    taskId: string,
+    forRole: 'frontend' | 'backend',
+    opts?: {
+      model?: string;
+      mockupFiles?: string[];
+      testOptions?: TestOptions;
+      executionRunId?: string;
+      reportTaskId?: string;
+    },
+  ): Promise<{ prompt: string; workingDir: string; model: string }> {
+    const task = getTask(taskId);
+    if (!task) throw new Error(`Task ${taskId} not found`);
+    const project = getProject(task.projectId);
+    if (!project) throw new Error(`Project ${task.projectId} not found`);
+
+    const projectConfig = project.configJson ? JSON.parse(project.configJson) as ProjectConfig : null;
+    const extraPrompt = forRole === 'frontend'
+      ? (projectConfig as any)?.frontendExtraPrompt as string | undefined
+      : forRole === 'backend'
+      ? (projectConfig as any)?.backendExtraPrompt as string | undefined
+      : undefined;
+
+    const superpowers = this.selectSuperpowers(task.taskType);
+
+    let specResult: SpecResult | null = null;
+    if (task.specUrl) {
+      try {
+        specResult = await this.specFetcher.fetch(task.specUrl, projectConfig?.svnConfig);
+      } catch { /* ignore */ }
+    }
+
+    let svnDocIds: string[] = [];
+    const functionCode = task.parentName || extractFunctionCode(task.title);
+    if (task.taskType !== 'testing' && functionCode && projectConfig?.svnConfig && this.svnSpecService) {
+      try {
+        svnDocIds = await this.svnSpecService.fetchSpecsForTask(
+          task.projectId, taskId, functionCode, projectConfig.svnConfig, forRole,
+        );
+      } catch { /* ignore */ }
+    }
+
+    const taskAttachments = this.getTaskAttachments(task.projectId, taskId, opts?.executionRunId);
+    const allSvnDocs = svnDocIds.length > 0 ? getDocumentsForTask(taskId).filter(d => d.source === 'svn') : [];
+    const svnDocuments = forRole === 'backend'
+      ? allSvnDocs.filter(d => d.docType === 'SD')
+      : allSvnDocs;
+
+    const schemaBasePath = path.join(path.dirname(getConfig().dbPath), 'schemas', task.projectId);
+    const dbSchemaFiles: Array<{ label: string; schemaPath: string; erPath: string }> = [];
+    if (fs.existsSync(schemaBasePath)) {
+      const cfg: ProjectConfig = project.configJson ? JSON.parse(project.configJson) : {};
+      const connections = cfg.dbConnections ?? [];
+      for (const connDir of fs.readdirSync(schemaBasePath)) {
+        const schemaFile = path.join(schemaBasePath, connDir, 'schema.json');
+        const erFile = path.join(schemaBasePath, connDir, 'er-diagram.mmd');
+        if (fs.existsSync(schemaFile)) {
+          const conn = connections.find((c: { id: string }) => c.id === connDir);
+          dbSchemaFiles.push({
+            label: conn?.label ?? connDir,
+            schemaPath: schemaFile,
+            erPath: fs.existsSync(erFile) ? erFile : '',
+          });
+        }
+      }
+    }
+
+    let saFlowResult = null;
+    if (forRole === 'frontend') {
+      const saDoc = this.findSaDocument(taskId, task.projectId, allSvnDocs);
+      if (saDoc) {
+        try {
+          saFlowResult = await this.saFlowAnalyzer.analyze({
+            projectId: task.projectId,
+            taskId,
+            saContent: saDoc.content,
+            sourceFilename: saDoc.filename,
+            taskType: task.taskType,
+            taskDescription: task.description || '',
+          });
+        } catch { /* ignore */ }
+      }
+    }
+
+    const prompt = this.assembleContext({
+      superpowers,
+      projectId: task.projectId,
+      taskId,
+      reportTaskId: opts?.reportTaskId,
+      role: forRole,
+      taskTitle: task.title,
+      taskDescription: task.description || '',
+      taskType: task.taskType,
+      specResult,
+      dbConnectionString: project.dbConnectionString,
+      dbSchemaFiles: dbSchemaFiles.length > 0 ? dbSchemaFiles : undefined,
+      taskAttachments,
+      svnDocuments,
+      mockupFiles: opts?.mockupFiles,
+      testOptions: opts?.testOptions,
+      extraPrompt,
+      saFlowResult: saFlowResult ?? undefined,
+    });
+
+    const workingDir = this.resolveWorkingDir(project, forRole);
+    const { model: autoModel } = this.modelRouter.selectModel(task);
+    const finalModel = opts?.model || autoModel;
+
+    return { prompt, workingDir, model: finalModel };
+  }
+
+  /**
    * Execute an ad-hoc requirement (not tied to a task record).
    * Backward-compatible with v1 execution flow.
    */
@@ -295,6 +418,8 @@ export class ExecutionPipeline {
     superpowers: SuperpowersFeature[];
     projectId: string;
     taskId?: string;
+    /** Override taskId used for verification report path only (e.g. `${taskId}-frontend`) */
+    reportTaskId?: string;
     role: string;
     taskTitle: string;
     taskDescription: string;
@@ -362,8 +487,8 @@ export class ExecutionPipeline {
       parts.push(this.buildSaFlowSection(opts.saFlowResult.relevantFlow, opts.taskType));
     }
 
-    // Layer 3: Task prompt
-    const taskPrompt = this.buildTaskPrompt(opts.taskTitle, opts.taskDescription, opts.taskType, opts.role, opts.testOptions, opts.taskId);
+    // Layer 3: Task prompt (use reportTaskId for verification report path if provided)
+    const taskPrompt = this.buildTaskPrompt(opts.taskTitle, opts.taskDescription, opts.taskType, opts.role, opts.testOptions, opts.reportTaskId ?? opts.taskId);
     parts.push(taskPrompt);
 
     return parts.join('\n\n---\n\n');
@@ -699,7 +824,7 @@ ${flowDiagram}
   /**
    * Build the task-specific prompt section.
    */
-  private buildTaskPrompt(title: string, description: string, taskType: TaskType, role?: string, testOptions?: TestOptions, taskId?: string): string {
+  buildTaskPrompt(title: string, description: string, taskType: TaskType, role?: string, testOptions?: TestOptions, taskId?: string): string {
     const typeLabels: Record<TaskType, string> = {
       bug: 'Bug Fix',
       feature: 'New Feature',
