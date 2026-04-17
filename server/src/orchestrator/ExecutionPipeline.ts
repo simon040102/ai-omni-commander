@@ -849,7 +849,13 @@ ${this.buildCompletionCriteria(role, testOptions, taskId)}
         );
       }
       lines.push(
-        `- 所有驗證步驟完成後，將完整驗證結果（規格逐項確認、build 結果、測試結果）以 Markdown 格式寫入 \`docs/verification-reports/${taskId}.md\`（目錄不存在則建立）`,
+        `- 所有驗證步驟完成後，將完整驗證結果以 Markdown 格式寫入 \`docs/verification-reports/${taskId}.md\`（目錄不存在則建立），內容包含：\n` +
+        `  1. 規格逐項確認結果\n` +
+        `  2. Build 結果\n` +
+        `  3. 測試結果\n` +
+        `  4. **測試用 SQL 指令**（獨立的 code block）：\n` +
+        `     - \`-- [SETUP] 新增假資料\`：針對本次 API 所需的 INSERT 語句，讓測試人員可直接執行建立測試資料\n` +
+        `     - \`-- [TEARDOWN] 清除假資料\`：對應的 DELETE 語句，條件需精確（用剛才 INSERT 的識別欄位），確保不誤刪其他資料`,
         '- 所有步驟完成後，在回應末尾加上 [TASK_COMPLETE]',
       );
       return lines.join('\n');
