@@ -172,6 +172,8 @@ export function TerminalOutput({ outputs, title, role, status, agentId, projectI
   const [filterType, setFilterType] = useState<string | null>(null);
   const [showFlow, setShowFlow] = useState(false);
   const [showSaFlow, setShowSaFlow] = useState(false);
+  const [reportContent, setReportContent] = useState<string | null>(null);
+  const [showReport, setShowReport] = useState(false);
 
   // Use store for command input to persist across project switches
   const commandInputs = useAgentStore((s) => s.commandInputs);
@@ -329,7 +331,9 @@ export function TerminalOutput({ outputs, title, role, status, agentId, projectI
   const filteredOutputs = useMemo(() => {
     let result = outputs;
     if (filterType) {
-      result = result.filter(o => o.streamType === filterType);
+      // TXT also includes user instructions
+      const types = filterType === 'text' ? ['text', 'user'] : [filterType];
+      result = result.filter(o => types.includes(o.streamType));
     }
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
@@ -358,12 +362,6 @@ export function TerminalOutput({ outputs, title, role, status, agentId, projectI
           {model && (
             <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-600 dark:text-purple-400">
               {model.replace('claude-', '').replace(/-\d{8}$/, '')}
-            </span>
-          )}
-          {/* Token usage display */}
-          {!compact && (totalInputTokens !== undefined && totalInputTokens > 0) && (
-            <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-600 dark:text-blue-400">
-              {((totalInputTokens + (totalOutputTokens || 0)) / 1000).toFixed(1)}k tokens
             </span>
           )}
           {/* Context usage bar */}
@@ -421,6 +419,22 @@ export function TerminalOutput({ outputs, title, role, status, agentId, projectI
               title="查看 SA 操作流程圖"
             >
               SA Flow
+            </button>
+          )}
+
+          {/* Verification Report button */}
+          {taskId && (
+            <button
+              onClick={() => {
+                fetch(`/api/task/${taskId}/verification-report`)
+                  .then(r => r.ok ? r.text() : Promise.reject())
+                  .then(text => { setReportContent(text); setShowReport(true); })
+                  .catch(() => { setReportContent(null); setShowReport(true); });
+              }}
+              className="px-2 py-1 rounded text-[11px] font-medium transition-colors border text-emerald-600 dark:text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/10"
+              title="查看驗證報告"
+            >
+              Report
             </button>
           )}
 
@@ -714,6 +728,24 @@ export function TerminalOutput({ outputs, title, role, status, agentId, projectI
           taskId={taskId}
           onClose={() => setShowSaFlow(false)}
         />
+      )}
+
+      {/* Verification Report Modal */}
+      {showReport && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setShowReport(false)}>
+          <div className="bg-card border border-border rounded-xl shadow-2xl w-[700px] max-h-[80vh] flex flex-col" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 py-3 border-b border-border flex-shrink-0">
+              <span className="text-sm font-semibold text-emerald-500">驗證報告</span>
+              <button onClick={() => setShowReport(false)} className="p-1 rounded hover:bg-muted text-muted-foreground">✕</button>
+            </div>
+            <div className="overflow-y-auto flex-1 p-5">
+              {reportContent
+                ? <pre className="text-xs text-foreground whitespace-pre-wrap font-mono leading-5">{reportContent}</pre>
+                : <p className="text-sm text-muted-foreground text-center py-8">尚未產生驗證報告<br/><span className="text-xs">Agent 完成任務後會自動寫入 docs/verification-reports/</span></p>
+              }
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
