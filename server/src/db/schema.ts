@@ -21,7 +21,7 @@ export function runMigrations(db: Database.Database): void {
       id              TEXT PRIMARY KEY,
       project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
       role            TEXT NOT NULL CHECK(role IN ('master', 'architect', 'backend',
-                                                    'frontend', 'devops', 'testing', 'review', 'quick', 'axure')),
+                                                    'frontend', 'coordinator', 'devops', 'testing', 'review', 'quick', 'axure')),
       status          TEXT NOT NULL DEFAULT 'idle'
                         CHECK(status IN ('idle', 'starting', 'running', 'reviewing', 'paused',
                                           'stopping', 'stopped', 'error')),
@@ -45,7 +45,7 @@ export function runMigrations(db: Database.Database): void {
       project_id        TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
       title             TEXT NOT NULL,
       description       TEXT,
-      label             TEXT NOT NULL CHECK(label IN ('backend', 'frontend', 'devops',
+      label             TEXT NOT NULL CHECK(label IN ('backend', 'frontend', 'fullstack', 'devops',
                                                        'testing', 'review', 'architect')),
       status            TEXT NOT NULL DEFAULT 'pending'
                           CHECK(status IN ('pending', 'blocked', 'queued', 'assigned',
@@ -322,13 +322,14 @@ export function runMigrations(db: Database.Database): void {
     );
   `);
 
-  // Migration: add 'quick' role to agents table
+  // Migration: add 'quick'/'axure'/'coordinator' role to agents table
   const tableInfo = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='agents'").get() as { sql: string } | undefined;
   const needsQuickRoleMigration = tableInfo?.sql && (!tableInfo.sql.includes("'quick'") || !tableInfo.sql.includes("'axure'"));
+  const needsCoordinatorRoleMigration = tableInfo?.sql && !tableInfo.sql.includes("'coordinator'");
 
   const needsReviewingStatusMigration = tableInfo?.sql && !tableInfo.sql.includes("'reviewing'");
 
-  if (needsQuickRoleMigration || needsReviewingStatusMigration) {
+  if (needsQuickRoleMigration || needsReviewingStatusMigration || needsCoordinatorRoleMigration) {
     try {
       db.exec(`
         PRAGMA foreign_keys = OFF;
@@ -337,7 +338,7 @@ export function runMigrations(db: Database.Database): void {
           id              TEXT PRIMARY KEY,
           project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
           role            TEXT NOT NULL CHECK(role IN ('master', 'architect', 'backend',
-                                                        'frontend', 'devops', 'testing', 'review', 'quick', 'axure')),
+                                                        'frontend', 'coordinator', 'devops', 'testing', 'review', 'quick', 'axure')),
           status          TEXT NOT NULL DEFAULT 'idle'
                             CHECK(status IN ('idle', 'starting', 'running', 'reviewing', 'paused',
                                               'stopping', 'stopped', 'error')),
@@ -366,6 +367,59 @@ export function runMigrations(db: Database.Database): void {
         DROP TABLE agents;
         ALTER TABLE agents_new RENAME TO agents;
         CREATE INDEX IF NOT EXISTS idx_agents_project ON agents(project_id);
+
+        PRAGMA foreign_keys = ON;
+      `);
+    } catch {
+      db.exec('PRAGMA foreign_keys = ON');
+    }
+  }
+
+  // Migration: add 'fullstack' label to tasks table
+  const tasksInfo = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'").get() as { sql: string } | undefined;
+  if (tasksInfo?.sql && !tasksInfo.sql.includes("'fullstack'")) {
+    try {
+      db.exec(`
+        PRAGMA foreign_keys = OFF;
+
+        CREATE TABLE IF NOT EXISTS tasks_new (
+          id                TEXT PRIMARY KEY,
+          project_id        TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          title             TEXT NOT NULL,
+          description       TEXT,
+          label             TEXT NOT NULL CHECK(label IN ('backend', 'frontend', 'fullstack', 'devops',
+                                                           'testing', 'review', 'architect')),
+          status            TEXT NOT NULL DEFAULT 'pending'
+                              CHECK(status IN ('pending', 'blocked', 'queued', 'assigned',
+                                                'in_progress', 'needs_review', 'needs_intervention',
+                                                'completed', 'failed')),
+          assigned_agent_id TEXT REFERENCES agents(id),
+          priority          INTEGER NOT NULL DEFAULT 0,
+          prompt            TEXT,
+          result_summary    TEXT,
+          retry_count       INTEGER NOT NULL DEFAULT 0,
+          max_retries       INTEGER NOT NULL DEFAULT 2,
+          task_type         TEXT NOT NULL DEFAULT 'other',
+          source            TEXT NOT NULL DEFAULT 'manual',
+          source_ref        TEXT,
+          branch_name       TEXT,
+          spec_url          TEXT,
+          preferred_model   TEXT,
+          parent_name       TEXT,
+          created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        INSERT OR IGNORE INTO tasks_new
+          SELECT id, project_id, title, description, label, status,
+                 assigned_agent_id, priority, prompt, result_summary,
+                 retry_count, max_retries, task_type, source, source_ref,
+                 branch_name, spec_url, preferred_model, parent_name,
+                 created_at, updated_at
+          FROM tasks;
+        DROP TABLE tasks;
+        ALTER TABLE tasks_new RENAME TO tasks;
+        CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
 
         PRAGMA foreign_keys = ON;
       `);
