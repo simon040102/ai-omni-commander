@@ -189,7 +189,7 @@ export function Dashboard({ onViewChange }: DashboardProps) {
       )}
 
       {/* ─── Task list ─── */}
-      <TaskList selectedModel={selectedModel} />
+      <TaskList selectedModel={selectedModel} onViewChange={onViewChange} />
 
       {/* ─── Asana Sync controls (bottom) ─── */}
       {project?.asanaProjectGid && (

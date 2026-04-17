@@ -104,8 +104,11 @@ interface ProjectState {
   reviewResults: Record<string, ReviewResult>;
   /** Projects that have new activity since last viewed */
   projectsWithActivity: Set<string>;
+  /** When set, AgentsView shows only agents for this task (fullstack grid) */
+  agentsFilterTaskId: string | null;
 
   setProjects: (projects: Project[]) => void;
+  setAgentsFilterTaskId: (taskId: string | null) => void;
   setCurrentProject: (id: string | null) => void;
   setProjectState: (data: {
     project: Project;
@@ -142,7 +145,9 @@ export const useProjectStore = create<ProjectState>((set) => ({
   plans: [],
   reviewResults: {},
   projectsWithActivity: new Set<string>(),
+  agentsFilterTaskId: null,
 
+  setAgentsFilterTaskId: (taskId) => set({ agentsFilterTaskId: taskId }),
   setProjects: (projects) => set((state) => {
     // If current project was deleted, clear selection
     if (state.currentProjectId && !projects.some(p => p.id === state.currentProjectId)) {
