@@ -846,7 +846,10 @@ export class AgentManager {
     this.progressDetector.clear(agentId);
 
     // --- Auto-resume: if task-based and not errored, resume a few times before accepting completion ---
-    if (taskId && !result.is_error && !this.reviewingAgents.has(agentId) && !this.taskDoneAgents.has(agentId)) {
+    // Skip auto-resume for coordinator agents (they run once and produce structured output)
+    const agentForResume = getAgent(agentId);
+    const isCoordinator = agentForResume?.role === 'coordinator';
+    if (taskId && !result.is_error && !this.reviewingAgents.has(agentId) && !this.taskDoneAgents.has(agentId) && !isCoordinator) {
       const resumes = this.autoResumeCount.get(agentId) ?? 0;
       if (resumes < MAX_AUTO_RESUMES) {
         this.autoResumeCount.set(agentId, resumes + 1);

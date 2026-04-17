@@ -5,7 +5,6 @@ import type { AgentManager } from '../agent/AgentManager.js';
 import type { EventBus } from '../eventbus/EventBus.js';
 import type { ExecutionPipeline } from './ExecutionPipeline.js';
 import { updateTask } from '../db/queries/tasks.js';
-import { getAgentOutputs } from '../db/queries/events.js';
 import { createChildLogger } from '../utils/logger.js';
 
 const logger = createChildLogger('FullstackController');
@@ -136,6 +135,9 @@ export class FullstackController {
     workingDir: string,
     prompt: string,
   ): Promise<FixInstruction[]> {
+    // Collect coordinator text output in real-time via EventBus (no DB limit)
+    const collectedText: string[] = [];
+
     const coordinatorAgentId = await this.agentManager.startAgent({
       projectId,
       role: 'coordinator',
@@ -147,17 +149,21 @@ export class FullstackController {
       skipTaskStatusUpdate: true,
     });
 
-    await this.waitForAgents([coordinatorAgentId]);
+    const unsubOutput = this.eventBus.on(EventTypes.AGENT_OUTPUT, (event) => {
+      const payload = event.payload as Record<string, unknown>;
+      if (payload.agentId === coordinatorAgentId && payload.streamType === 'text') {
+        collectedText.push(payload.content as string);
+      }
+    });
 
-    // Read coordinator output from DB (DESC order, need to reverse)
-    const outputs = getAgentOutputs(coordinatorAgentId, 300);
-    const textContent = outputs
-      .filter(o => o.streamType === 'text')
-      .reverse()
-      .map(o => o.content)
-      .join('\n');
+    try {
+      await this.waitForAgents([coordinatorAgentId]);
+    } finally {
+      unsubOutput();
+    }
 
-    return this.parseFixInstructions(textContent);
+    const fullText = collectedText.join('\n');
+    return this.parseFixInstructions(fullText);
   }
 
   private parseFixInstructions(output: string): FixInstruction[] {
