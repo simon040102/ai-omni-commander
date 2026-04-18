@@ -21,7 +21,7 @@ export function runMigrations(db: Database.Database): void {
       id              TEXT PRIMARY KEY,
       project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
       role            TEXT NOT NULL CHECK(role IN ('master', 'architect', 'backend',
-                                                    'frontend', 'coordinator', 'devops', 'testing', 'review', 'quick', 'axure')),
+                                                    'frontend', 'coordinator', 'integration-test', 'devops', 'testing', 'review', 'quick', 'axure')),
       status          TEXT NOT NULL DEFAULT 'idle'
                         CHECK(status IN ('idle', 'starting', 'running', 'reviewing', 'paused',
                                           'stopping', 'stopped', 'error')),
@@ -325,7 +325,7 @@ export function runMigrations(db: Database.Database): void {
   // Migration: add 'quick'/'axure'/'coordinator' role to agents table
   const tableInfo = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='agents'").get() as { sql: string } | undefined;
   const needsQuickRoleMigration = tableInfo?.sql && (!tableInfo.sql.includes("'quick'") || !tableInfo.sql.includes("'axure'"));
-  const needsCoordinatorRoleMigration = tableInfo?.sql && !tableInfo.sql.includes("'coordinator'");
+  const needsCoordinatorRoleMigration = tableInfo?.sql && (!tableInfo.sql.includes("'coordinator'") || !tableInfo.sql.includes("'integration-test'"));
 
   const needsReviewingStatusMigration = tableInfo?.sql && !tableInfo.sql.includes("'reviewing'");
 
@@ -338,7 +338,7 @@ export function runMigrations(db: Database.Database): void {
           id              TEXT PRIMARY KEY,
           project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
           role            TEXT NOT NULL CHECK(role IN ('master', 'architect', 'backend',
-                                                        'frontend', 'coordinator', 'devops', 'testing', 'review', 'quick', 'axure')),
+                                                        'frontend', 'coordinator', 'integration-test', 'devops', 'testing', 'review', 'quick', 'axure')),
           status          TEXT NOT NULL DEFAULT 'idle'
                             CHECK(status IN ('idle', 'starting', 'running', 'reviewing', 'paused',
                                               'stopping', 'stopped', 'error')),

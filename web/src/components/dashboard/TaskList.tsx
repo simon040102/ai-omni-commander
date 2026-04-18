@@ -86,7 +86,7 @@ export function TaskList({ selectedModel, onViewChange }: TaskListProps) {
   const [newLabel, setNewLabel] = useState('frontend');
   const [newSpecUrl, setNewSpecUrl] = useState('');
   const [newBackendSpecUrl, setNewBackendSpecUrl] = useState('');
-  const [newTestOptions, setNewTestOptions] = useState({ smokeTest: false, e2eSpec: false, consoleScript: false, useMock: true, useRealApi: false, headed: false });
+  const [newTestOptions, setNewTestOptions] = useState({ smokeTest: false, e2eSpec: false, consoleScript: false, useMock: true, useRealApi: false, headed: false, integrationTest: false });
   const [stagedFiles, setStagedFiles] = useState<Array<{ file: File; docType: 'SA' | 'SD' | 'image' }>>([]);
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
   const [confirmClearAsana, setConfirmClearAsana] = useState(false);
@@ -767,7 +767,7 @@ export function TaskList({ selectedModel, onViewChange }: TaskListProps) {
                 onClick={() => {
                   const executionRunId = crypto.randomUUID();
                   const testOptions: TestOptions = {
-                    frontend: { smokeTest: newTestOptions.smokeTest, e2eSpec: newTestOptions.e2eSpec, consoleScript: newTestOptions.consoleScript, useMock: newTestOptions.useMock, useRealApi: newTestOptions.useRealApi, headed: newTestOptions.headed },
+                    frontend: { smokeTest: newTestOptions.smokeTest, e2eSpec: newTestOptions.e2eSpec, consoleScript: newTestOptions.consoleScript, useMock: newTestOptions.useMock, useRealApi: newTestOptions.useRealApi, headed: newTestOptions.headed, integrationTest: newTestOptions.integrationTest },
                     backend: { unitTests: true, apiSmokeTest: false, apiContract: false },
                   };
                   autoExecuteAfterCreate.current = { testOptions, executionRunId };
@@ -1066,7 +1066,7 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
   const projects = useProjectStore(s => s.projects);
   const [execModel, setExecModel] = useState<string>(task.preferredModel || 'sonnet');
   const [testOptions, setTestOptions] = useState<TestOptions>(() => ({
-    frontend: { smokeTest: false, e2eSpec: false, consoleScript: false, useMock: true, useRealApi: false, headed: false },
+    frontend: { smokeTest: false, e2eSpec: false, consoleScript: false, useMock: true, useRealApi: false, headed: false, integrationTest: false },
     backend: { unitTests: true, apiSmokeTest: false, apiContract: false },
   }));
   // Each time the task panel is opened, generate a fresh execution run ID.
@@ -1583,6 +1583,20 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
               ))}
             </div>
             </>
+          )}
+          {task.label === 'fullstack' && (
+            <div className="flex items-center gap-1.5 mt-2 pt-1.5 border-t border-border/30">
+              <label className="flex items-center gap-1.5 text-xs text-cyan-400 hover:text-cyan-300 cursor-pointer select-none font-medium">
+                <input
+                  type="checkbox"
+                  checked={testOptions.frontend.integrationTest}
+                  onChange={e => setTestOptions(prev => ({ ...prev, frontend: { ...prev.frontend, integrationTest: e.target.checked } }))}
+                  className="w-3 h-3 accent-cyan-500"
+                />
+                API 整合測試（Playwright）
+              </label>
+              <span className="text-[9px] text-muted-foreground">前端打 API → 驗證 request/response + UI 顯示</span>
+            </div>
           )}
         </div>
       )}

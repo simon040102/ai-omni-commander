@@ -90,8 +90,19 @@ export class FullstackController {
 
 完成分析後，輸出 [FULLSTACK_FIX] marker（即使沒有問題也必須輸出）。`;
 
-      const fixes = await this.runCoordinator(taskId, projectId, project.workingDir, coordinatorPrompt);
-      logger.info({ taskId, fixCount: fixes.length }, 'Coordinator completed');
+      const coordinatorFixes = await this.runCoordinator(taskId, projectId, project.workingDir, coordinatorPrompt);
+      logger.info({ taskId, fixCount: coordinatorFixes.length }, 'Coordinator completed');
+
+      // Phase 3b: Integration test with Playwright (if enabled)
+      let integrationFixes: FixInstruction[] = [];
+      const integrationTestEnabled = opts.testOptions?.frontend?.integrationTest === true;
+      if (integrationTestEnabled) {
+        integrationFixes = await this.runIntegrationTest(taskId, projectId, project, fePath, bePath, opts);
+        logger.info({ taskId, integrationFixCount: integrationFixes.length }, 'Integration test completed');
+      }
+
+      // Merge fixes from coordinator + integration test
+      const fixes = [...coordinatorFixes, ...integrationFixes];
 
       // Phase 4: Run fix agents (or complete immediately if no fixes needed)
       if (fixes.length === 0) {
@@ -187,6 +198,108 @@ export class FullstackController {
       }
     } catch (err) {
       logger.warn({ err }, 'Failed to parse [FULLSTACK_FIX] JSON — treating as no fixes');
+    }
+    return [];
+  }
+
+  private async runIntegrationTest(
+    taskId: string,
+    projectId: string,
+    project: { workingDir: string; frontendPath: string | null; backendPath: string | null },
+    feReportPath: string,
+    beReportPath: string,
+    opts: FullstackExecOptions,
+  ): Promise<FixInstruction[]> {
+    const collectedText: string[] = [];
+
+    const prompt = `你是整合測試 Agent。請用 Playwright 驗證前端是否能正確呼叫後端 API 並顯示正確資料。
+
+## 測試資訊來源
+- 前端驗證報告：\`${feReportPath}\`
+- 後端驗證報告：\`${beReportPath}\`
+- 前端工作目錄：\`${(project.frontendPath || project.workingDir).replace(/\\/g, '/')}\`
+
+## 測試步驟
+1. 先用 Read 工具讀取兩份報告，了解有哪些 API endpoint 和 UI 頁面
+2. 確認前端 dev server 是否在跑（若沒有，用 Bash 啟動）
+3. 用 browser_navigate 打開前端頁面
+4. 用 browser_network_requests 開始監控 API 呼叫
+5. 用 browser_click / browser_type 操作 UI 觸發 API 呼叫
+6. 驗證：
+   - Request URL、method、payload 是否正確
+   - Response status code 是否為 2xx
+   - Response body 欄位和型別是否符合預期
+   - UI 是否正確顯示 API 回傳的資料
+7. 用 browser_take_screenshot 截圖作為證據
+
+## 輸出格式
+完成後輸出：
+
+[INTEGRATION_TEST_RESULT]
+{
+  "passed": true/false,
+  "tests": [
+    { "name": "API 名稱", "passed": true/false, "detail": "測試細節" }
+  ],
+  "fixes": [
+    { "target": "frontend|backend", "instruction": "修正說明" }
+  ]
+}
+[/INTEGRATION_TEST_RESULT]
+
+rules:
+- 全部通過 → "fixes": []
+- 有失敗 → 具體說明哪裡不對、怎麼修
+- 截圖存到 docs/integration-tests/ 目錄
+- 輸出完 marker 後加 [TASK_COMPLETE]`;
+
+    const testAgentId = await this.agentManager.startAgent({
+      projectId,
+      role: 'integration-test',
+      taskId,
+      prompt,
+      model: opts.model || 'sonnet',
+      workingDir: project.frontendPath || project.workingDir,
+      useWorkspaceSkills: false,
+      skipTaskStatusUpdate: true,
+    });
+
+    const unsubOutput = this.eventBus.on(EventTypes.AGENT_OUTPUT, (event) => {
+      const payload = event.payload as Record<string, unknown>;
+      if (payload.agentId === testAgentId && payload.streamType === 'text') {
+        collectedText.push(payload.content as string);
+      }
+    });
+
+    try {
+      await this.waitForAgents([testAgentId]);
+    } finally {
+      unsubOutput();
+    }
+
+    const fullText = collectedText.join('\n');
+    return this.parseIntegrationTestResult(fullText);
+  }
+
+  private parseIntegrationTestResult(output: string): FixInstruction[] {
+    const match = output.match(/\[INTEGRATION_TEST_RESULT\]([\s\S]*?)\[\/INTEGRATION_TEST_RESULT\]/);
+    if (!match) {
+      logger.warn('No [INTEGRATION_TEST_RESULT] marker found — assuming no issues');
+      return [];
+    }
+
+    try {
+      const json = JSON.parse(match[1].trim());
+      if (Array.isArray(json.fixes)) {
+        return json.fixes.filter(
+          (f: unknown): f is FixInstruction =>
+            typeof f === 'object' && f !== null &&
+            ('frontend' === (f as FixInstruction).target || 'backend' === (f as FixInstruction).target) &&
+            typeof (f as FixInstruction).instruction === 'string',
+        );
+      }
+    } catch (err) {
+      logger.warn({ err }, 'Failed to parse [INTEGRATION_TEST_RESULT] JSON');
     }
     return [];
   }
