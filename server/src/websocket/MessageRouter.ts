@@ -355,6 +355,26 @@ export function registerHandlers(
 
     await agentManager.stopAgent(payload.agentId);
     deleteAgent(payload.agentId);
+
+    // For fullstack tasks: if no other agents remain for this task, reset task to pending
+    if (projectId && agentRecord?.currentTaskId) {
+      const task = getTask(agentRecord.currentTaskId);
+      if (task && (task.status === 'in_progress' || task.status === 'assigned')) {
+        const remainingAgents = getAgentsByProject(projectId).filter(
+          a => a.currentTaskId === task.id,
+        );
+        if (remainingAgents.length === 0) {
+          updateTask(task.id, { status: 'pending', assignedAgentId: null });
+          // Notify frontend
+          wsServer.broadcast({
+            type: 'task.statusChange',
+            id: genId(),
+            timestamp: new Date().toISOString(),
+            payload: { taskId: task.id, projectId, newStatus: 'pending' },
+          } as WsMessage);
+        }
+      }
+    }
     logger.info({ agentId: payload.agentId }, 'Agent deleted');
 
     // Clean up per-agent upload folder
