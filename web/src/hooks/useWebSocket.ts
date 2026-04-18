@@ -275,16 +275,17 @@ export function useWebSocket() {
 
           case 'agent.completed': {
             const completedProjectId = payload['projectId'] as string;
+            const completedAgentId = payload['agentId'] as string;
             // Mark activity for non-current projects
             markProjectActivity(completedProjectId);
             const inputTokens = (payload['inputTokens'] as number) || 0;
             const outputTokens = (payload['outputTokens'] as number) || 0;
             const totalTokens = inputTokens + outputTokens;
+            // Keep currentTaskId so fullstack grid view and agent cards still show task info
             addOrUpdateAgent({
-              id: payload['agentId'] as string,
+              id: completedAgentId,
               projectId: completedProjectId,
               status: 'stopped',
-              currentTaskId: null,
               totalCostUsd: (payload['costUsd'] as number) || 0,
               totalTurns: (payload['turns'] as number) || 0,
               totalInputTokens: inputTokens,
@@ -296,7 +297,16 @@ export function useWebSocket() {
               message: `Cost: $${((payload['costUsd'] as number) || 0).toFixed(4)} | ${(totalTokens / 1000).toFixed(1)}k tokens`,
             });
             // Free memory — outputs are persisted in DB and reloaded on demand
-            clearOutputs(payload['agentId'] as string);
+            // But keep outputs for fullstack agents (they share a grid view)
+            const { agents: allAgentsNow } = useProjectStore.getState();
+            const { tasks: allTasksNow } = useProjectStore.getState();
+            const completedAgent = allAgentsNow.find(a => a.id === completedAgentId);
+            const agentTask = completedAgent?.currentTaskId
+              ? allTasksNow.find(t => t.id === completedAgent.currentTaskId)
+              : null;
+            if (agentTask?.label !== 'fullstack') {
+              clearOutputs(completedAgentId);
+            }
             break;
           }
 
