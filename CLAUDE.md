@@ -58,6 +58,7 @@ A dual-mode AI collaborative development system that orchestrates multiple Claud
 | `CreativeModeHandler.ts` | **Creative mode**: Architect agent interviews user, generates SA/SD, then hands off to execution. |
 | `TaskDispatcher.ts` | Legacy task queue (used by creative mode). Respects dependency graphs. |
 | `DependencyGraph.ts` | Topological sort for task dependencies. |
+| `FullstackController.ts` | **Fullstack mode**: 4-phase execution for `fullstack` label tasks. Phase 1: FE+BE parallel agents. Phase 2: wait both. Phase 3a: coordinator analyzes reports. Phase 3b: Playwright integration test (optional). Phase 4: fix agents if needed. Uses `skipTaskStatusUpdate` to prevent subagents from marking task completed. |
 
 #### `server/src/db/` — SQLite persistence
 | File | Purpose |
@@ -314,3 +315,4 @@ Use `/brainstorming`, `/systematic-debugging`, etc. to invoke.
 - **z-index stacking**: Fixed overlays use `z-10`. Confirm dialogs inside overlays must use `relative z-20` or higher to receive click events.
 - **Two separate Asana import paths**: `AsanaImportDrawer.tsx` sends `task.create` directly (client-side label decision). `AsanaSyncService.syncOnce()` is used by auto-sync / `asana.syncNow`. Changes to server-side classification only affect the sync path — NOT the manual import drawer.
 - **tsx watch unreliable on Windows**: `pnpm dev` uses `tsx watch` which may not detect file changes on Windows. Always **manually restart the server** after editing `.ts` files to guarantee the new code is loaded.
+- **Fullstack task label**: `fullstack` label triggers `FullstackController` (4-phase flow). Requires both `frontendPath` AND `backendPath` on the project. Uses `skipTaskStatusUpdate` flag (persistent `Set` in AgentManager) to prevent subagents from marking task completed. Coordinator and integration-test agents skip auto-resume (one-shot execution). Markers: `[FULLSTACK_FIX]{json}[/FULLSTACK_FIX]` for coordinator, `[INTEGRATION_TEST_RESULT]{json}[/INTEGRATION_TEST_RESULT]` for Playwright agent. Reports: `docs/verification-reports/{taskId}-frontend.md` and `{taskId}-backend.md`.
