@@ -40,6 +40,28 @@ export class FullstackController {
     }
 
     try {
+      // Phase 0: Start coordinator FIRST (visible from the beginning)
+      const coordinatorAgentId = await this.agentManager.startAgent({
+        projectId,
+        role: 'coordinator',
+        taskId,
+        prompt: `你是 Fullstack Coordinator（主控 Agent）。前後端 Agent 正在開發中，請等待系統通知。\n\n你會在前後端完成後收到驗證報告路徑，届時請用 Read 工具讀取報告並分析整合問題。\n\n目前狀態：⏳ 等待前後端 Agent 完成...`,
+        model: 'sonnet',
+        workingDir: project.workingDir,
+        useWorkspaceSkills: false,
+        skipTaskStatusUpdate: true,
+      });
+      logger.info({ taskId, coordinatorAgentId }, 'Coordinator started (waiting for FE+BE)');
+
+      // Collect coordinator text output in real-time
+      const collectedText: string[] = [];
+      const unsubOutput = this.eventBus.on(EventTypes.AGENT_OUTPUT, (event) => {
+        const payload = event.payload as Record<string, unknown>;
+        if (payload.agentId === coordinatorAgentId && payload.streamType === 'text') {
+          collectedText.push(payload.content as string);
+        }
+      });
+
       // Phase 1: Build FE + BE prompts, start subagents in parallel
       const [feData, beData] = await Promise.all([
         this.pipeline.preparePromptForRole(taskId, 'frontend', {
@@ -81,11 +103,11 @@ export class FullstackController {
       await this.waitForAgents([feAgentId, beAgentId]);
       logger.info({ taskId }, 'Both fullstack subagents completed');
 
-      // Phase 3: Run coordinator to analyze reports and produce fix instructions
+      // Phase 3: Send report paths to coordinator via sendInput
       const fePath = path.join(feData.workingDir, 'docs', 'verification-reports', `${taskId}-frontend.md`).replace(/\\/g, '/');
       const bePath = path.join(beData.workingDir, 'docs', 'verification-reports', `${taskId}-backend.md`).replace(/\\/g, '/');
 
-      const coordinatorPrompt = `你是 Fullstack Coordinator。請分析以下兩份驗證報告，找出前後端整合問題。
+      const analyzePrompt = `前後端 Agent 已完成開發。請分析以下兩份驗證報告，找出整合問題。
 
 前端驗證報告路徑：\`${fePath}\`
 後端驗證報告路徑：\`${bePath}\`
@@ -94,8 +116,16 @@ export class FullstackController {
 
 完成分析後，輸出 [FULLSTACK_FIX] marker（即使沒有問題也必須輸出）。`;
 
-      const coordinatorFixes = await this.runCoordinator(taskId, projectId, project.workingDir, coordinatorPrompt);
-      logger.info({ taskId, fixCount: coordinatorFixes.length }, 'Coordinator completed');
+      // Reset collected text for the analysis phase
+      collectedText.length = 0;
+      await this.agentManager.sendInputToAgent(coordinatorAgentId, analyzePrompt);
+
+      // Wait for coordinator to complete
+      await this.waitForAgents([coordinatorAgentId]);
+      unsubOutput();
+
+      const coordinatorFixes = this.parseFixInstructions(collectedText.join('\n'));
+      logger.info({ taskId, fixCount: coordinatorFixes.length }, 'Coordinator analysis completed');
 
       // Phase 3b: Integration test with Playwright (if enabled)
       let integrationFixes: FixInstruction[] = [];
@@ -113,6 +143,10 @@ export class FullstackController {
         await this.completeTask(taskId, projectId, 'fullstack-coordinator');
         return;
       }
+
+      // Notify coordinator about fix dispatch
+      const fixSummary = fixes.map(f => `- [${f.target}] ${f.instruction.slice(0, 100)}...`).join('\n');
+      this.agentManager.sendInputToAgent(coordinatorAgentId, `發現 ${fixes.length} 個整合問題，已派遣 Fix Agent 修正：\n${fixSummary}\n\n等待修正完成...`).catch(() => {});
 
       const fixAgentIds: string[] = [];
       for (const fix of fixes) {
@@ -137,73 +171,14 @@ export class FullstackController {
       await this.waitForAgents(fixAgentIds);
       logger.info({ taskId, fixAgentCount: fixAgentIds.length }, 'All fix agents completed');
 
+      // Notify coordinator that all fixes are done
+      this.agentManager.sendInputToAgent(coordinatorAgentId, `所有 Fix Agent 已完成修正。任務完成。[TASK_COMPLETE]`).catch(() => {});
+
       await this.completeTask(taskId, projectId, 'fullstack-fix');
     } catch (err) {
       logger.error({ err, taskId }, 'Fullstack execution failed');
       await this.failTask(taskId, projectId, err instanceof Error ? err.message : String(err));
     }
-  }
-
-  private async runCoordinator(
-    taskId: string,
-    projectId: string,
-    workingDir: string,
-    prompt: string,
-  ): Promise<FixInstruction[]> {
-    // Collect coordinator text output in real-time via EventBus (no DB limit)
-    const collectedText: string[] = [];
-
-    const coordinatorAgentId = await this.agentManager.startAgent({
-      projectId,
-      role: 'coordinator',
-      taskId,
-      prompt,
-      model: 'sonnet',
-      workingDir,
-      useWorkspaceSkills: false,
-      skipTaskStatusUpdate: true,
-    });
-
-    const unsubOutput = this.eventBus.on(EventTypes.AGENT_OUTPUT, (event) => {
-      const payload = event.payload as Record<string, unknown>;
-      if (payload.agentId === coordinatorAgentId && payload.streamType === 'text') {
-        collectedText.push(payload.content as string);
-      }
-    });
-
-    try {
-      await this.waitForAgents([coordinatorAgentId]);
-    } finally {
-      unsubOutput();
-    }
-
-    const fullText = collectedText.join('\n');
-    return this.parseFixInstructions(fullText);
-  }
-
-  private parseFixInstructions(output: string): FixInstruction[] {
-    const match = output.match(/\[FULLSTACK_FIX\]([\s\S]*?)\[\/FULLSTACK_FIX\]/);
-    if (!match) {
-      logger.warn('No [FULLSTACK_FIX] marker found in coordinator output — assuming no fixes');
-      return [];
-    }
-
-    try {
-      const raw = match[1].trim();
-      const json = JSON.parse(raw);
-      if (Array.isArray(json.fixes)) {
-        const fixes = json.fixes.filter(
-          (f: unknown): f is FixInstruction =>
-            typeof f === 'object' && f !== null &&
-            ('frontend' === (f as FixInstruction).target || 'backend' === (f as FixInstruction).target) &&
-            typeof (f as FixInstruction).instruction === 'string',
-        );
-        return fixes;
-      }
-    } catch (err) {
-      logger.warn({ err }, 'Failed to parse [FULLSTACK_FIX] JSON — treating as no fixes');
-    }
-    return [];
   }
 
   private async runIntegrationTest(
@@ -285,6 +260,32 @@ rules:
     return this.parseIntegrationTestResult(fullText);
   }
 
+  // ── Marker parsers ──
+
+  private parseFixInstructions(output: string): FixInstruction[] {
+    const match = output.match(/\[FULLSTACK_FIX\]([\s\S]*?)\[\/FULLSTACK_FIX\]/);
+    if (!match) {
+      logger.warn('No [FULLSTACK_FIX] marker found in coordinator output — assuming no fixes');
+      return [];
+    }
+
+    try {
+      const raw = match[1].trim();
+      const json = JSON.parse(raw);
+      if (Array.isArray(json.fixes)) {
+        return json.fixes.filter(
+          (f: unknown): f is FixInstruction =>
+            typeof f === 'object' && f !== null &&
+            ('frontend' === (f as FixInstruction).target || 'backend' === (f as FixInstruction).target) &&
+            typeof (f as FixInstruction).instruction === 'string',
+        );
+      }
+    } catch (err) {
+      logger.warn({ err }, 'Failed to parse [FULLSTACK_FIX] JSON — treating as no fixes');
+    }
+    return [];
+  }
+
   private parseIntegrationTestResult(output: string): FixInstruction[] {
     const match = output.match(/\[INTEGRATION_TEST_RESULT\]([\s\S]*?)\[\/INTEGRATION_TEST_RESULT\]/);
     if (!match) {
@@ -308,7 +309,9 @@ rules:
     return [];
   }
 
-  /** Max wait time for agents (4 hours — real tasks with auto-resume + self-review take long) */
+  // ── Wait & status helpers ──
+
+  /** Max wait time for agents (4 hours) */
   private static readonly AGENT_TIMEOUT_MS = 4 * 60 * 60 * 1000;
 
   private waitForAgents(agentIds: string[]): Promise<void> {
@@ -345,17 +348,13 @@ rules:
           ?? (event.source ?? '');
         if (agentId && remaining.has(agentId)) {
           cleanup();
-          // Stop remaining agents to avoid orphaned processes
           for (const id of remaining) {
-            if (id !== agentId) {
-              this.agentManager.stopAgent(id).catch(() => {});
-            }
+            if (id !== agentId) this.agentManager.stopAgent(id).catch(() => {});
           }
           reject(new Error(`Agent ${agentId} failed with error`));
         }
       });
 
-      // Handle manual stop (user clicked Stop in UI)
       const unsubStopped = this.eventBus.on(EventTypes.AGENT_STOPPED, (event) => {
         const agentId = ((event.payload as Record<string, unknown>)?.agentId as string | undefined)
           ?? (event.source ?? '');
