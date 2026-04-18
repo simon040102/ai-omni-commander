@@ -37,8 +37,8 @@ import type { WsMessage } from '@omni/shared';
 import { EventTypes, CURRENT_MODELS, LEGACY_MODELS } from '@omni/shared';
 
 async function main() {
-  // Allow self-signed TLS certs for internal DB connections (MSSQL/PostgreSQL)
-  process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '0';
+  // NOTE: Self-signed cert handling is done per-connection in externalDb.ts
+  // Do NOT set NODE_TLS_REJECT_UNAUTHORIZED globally — it disables TLS for ALL requests
 
   const config = getConfig();
   logger.info({ port: config.port }, 'Starting AI-OmniCommander (SDK mode)');
@@ -136,6 +136,9 @@ async function main() {
   // 3. Create Express app for HTTP
   const app = express();
   app.use(express.json({ limit: '50mb' }));
+
+  /** Validate path parameters to prevent directory traversal */
+  const isSafePathParam = (v: string): boolean => !v.includes('..') && !v.includes('/') && !v.includes('\\');
 
   // Health check
   app.get('/api/health', (_req, res) => {
@@ -246,6 +249,7 @@ async function main() {
   const SNAPSHOTS_DIR = path.join(path.dirname(config.dbPath), '..', 'docs', 'axure-snapshots');
 
   app.get('/api/projects/:id/mockups', (req, res) => {
+    if (!isSafePathParam(req.params['id'])) { res.status(400).json({ error: 'Invalid project ID' }); return; }
     const dir = path.join(SNAPSHOTS_DIR, req.params['id']);
     const codeFilter = (req.query['code'] as string | undefined)?.toLowerCase().trim();
     try {
@@ -271,6 +275,7 @@ async function main() {
   });
 
   app.get('/api/projects/:id/mockups/:filename', (req, res) => {
+    if (!isSafePathParam(req.params['id'])) { res.status(400).json({ error: 'Invalid project ID' }); return; }
     const filename = path.basename(req.params['filename']); // prevent path traversal
     const filepath = path.join(SNAPSHOTS_DIR, req.params['id'], filename);
     try {
@@ -446,12 +451,15 @@ async function main() {
     res.json({ flows });
   });
 
-  // GET /api/sa-flow/:projectId/file?path= — serve a .mmd file
+  // GET /api/sa-flow/:projectId/file?path= — serve a .mmd file (must be within data/sa-flows/)
+  const SA_FLOWS_DIR = path.resolve(path.join(path.dirname(config.dbPath), 'sa-flows'));
   app.get('/api/sa-flow/:projectId/file', (req, res) => {
     const flowPath = req.query['path'] as string;
     if (!flowPath || !flowPath.endsWith('.mmd')) { res.status(400).json({ error: 'Invalid path' }); return; }
-    if (!fs.existsSync(flowPath)) { res.status(404).json({ error: 'Flow file not found' }); return; }
-    res.type('text/plain').send(fs.readFileSync(flowPath, 'utf-8'));
+    const resolved = path.resolve(flowPath);
+    if (!resolved.startsWith(SA_FLOWS_DIR)) { res.status(403).json({ error: 'Access denied' }); return; }
+    if (!fs.existsSync(resolved)) { res.status(404).json({ error: 'Flow file not found' }); return; }
+    res.type('text/plain').send(fs.readFileSync(resolved, 'utf-8'));
   });
 
   // GET /api/task/:taskId/verification-report — serve verification report MD

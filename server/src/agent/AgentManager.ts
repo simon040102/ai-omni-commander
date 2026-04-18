@@ -302,6 +302,8 @@ export class AgentManager {
     this.autoResumeCount.delete(agentId);
     this.taskDoneAgents.delete(agentId);
     this.skipTaskStatusAgents.delete(agentId);
+    this.initialPrompts.delete(agentId);
+    this.progressDetector.clear(agentId);
   }
 
   /** Stop a specific agent.
@@ -347,10 +349,14 @@ export class AgentManager {
   /** Stop all agents for a project */
   async stopAllForProject(projectId: string): Promise<void> {
     const toStop: string[] = [];
-    for (const [agentId, proc] of this.processes) {
-      const agent = getAgent(agentId);
-      if (agent && agent.projectId === projectId) {
+    for (const [agentId] of this.processes) {
+      if (projectId === '*') {
         toStop.push(agentId);
+      } else {
+        const agent = getAgent(agentId);
+        if (agent && agent.projectId === projectId) {
+          toStop.push(agentId);
+        }
       }
     }
     await Promise.all(toStop.map(id => this.stopAgent(id)));

@@ -74,6 +74,7 @@ export class ExternalSchemaFetcher {
       connectionString,
       connectionTimeoutMillis: CONNECT_TIMEOUT,
       statement_timeout: QUERY_TIMEOUT,
+      ssl: connectionString.includes('sslmode=require') ? { rejectUnauthorized: false } : undefined,
     });
 
     try {
