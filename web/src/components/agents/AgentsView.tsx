@@ -424,10 +424,17 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
               // If more than 2 rows, enable scrolling with fixed row height
               const needsScroll = !isFullstackLayout && rows > 2;
 
-              // Fullstack layout: top row FE+BE (50/50), bottom row coordinator (full width)
+              // Fullstack layout: 2x2 grid or 2-over-1
               if (isFullstackLayout) {
-                const feBeAgents = visibleAgents.filter(a => a.role !== 'coordinator');
-                const coordAgents = visibleAgents.filter(a => a.role === 'coordinator');
+                const hasIntegrationTest = visibleAgents.some(a => a.role === 'integration-test');
+                // Order: FE, BE (top row), Coordinator, Integration-test (bottom row)
+                const roleOrder = ['frontend', 'backend', 'coordinator', 'integration-test'];
+                const sorted = [...visibleAgents].sort((a, b) => {
+                  const ai = roleOrder.indexOf(a.role);
+                  const bi = roleOrder.indexOf(b.role);
+                  return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+                });
+
                 const renderFsAgent = (agent: NonNullable<typeof visibleAgents[0]>, span2?: boolean) => {
                   const ct = agent.currentTaskId ? tasks.find(t => t.id === agent.currentTaskId) : null;
                   return (
@@ -456,13 +463,28 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
                     </div>
                   );
                 };
+
+                if (hasIntegrationTest) {
+                  // 4 panels: 2x2 grid (FE|BE top, Coordinator|Integration bottom)
+                  return (
+                    <div className="h-full grid gap-2" style={{
+                      gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+                      gridTemplateRows: '1fr 1fr',
+                    }}>
+                      {sorted.map(a => renderFsAgent(a))}
+                    </div>
+                  );
+                }
+                // 3 panels: FE+BE top, Coordinator bottom (full width)
+                const topAgents = sorted.filter(a => a.role === 'frontend' || a.role === 'backend');
+                const bottomAgents = sorted.filter(a => a.role !== 'frontend' && a.role !== 'backend');
                 return (
                   <div className="h-full grid gap-2" style={{
                     gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
                     gridTemplateRows: '1fr 1fr',
                   }}>
-                    {feBeAgents.map(a => renderFsAgent(a))}
-                    {coordAgents.map(a => renderFsAgent(a, true))}
+                    {topAgents.map(a => renderFsAgent(a))}
+                    {bottomAgents.map(a => renderFsAgent(a, true))}
                   </div>
                 );
               }
