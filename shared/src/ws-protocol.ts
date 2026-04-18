@@ -56,6 +56,7 @@ export interface TestOptions {
     useMock: boolean;        // run with mock data
     useRealApi: boolean;     // run with real backend API
     headed: boolean;         // run E2E spec with visible browser (--headed)
+    integrationTest: boolean; // fullstack: Playwright integration test (verify FE→BE API calls)
   };
   backend: {
     unitTests: boolean;   // write and run unit tests

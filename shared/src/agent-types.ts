@@ -4,6 +4,7 @@ export type AgentRole =
   | 'backend'
   | 'frontend'
   | 'coordinator'
+  | 'integration-test'
   | 'devops'
   | 'testing'
   | 'review'
