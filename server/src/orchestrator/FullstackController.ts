@@ -320,6 +320,7 @@ rules:
       const cleanup = () => {
         unsubComplete();
         unsubError();
+        unsubStopped();
         clearTimeout(timer);
       };
 
@@ -351,6 +352,19 @@ rules:
             }
           }
           reject(new Error(`Agent ${agentId} failed with error`));
+        }
+      });
+
+      // Handle manual stop (user clicked Stop in UI)
+      const unsubStopped = this.eventBus.on(EventTypes.AGENT_STOPPED, (event) => {
+        const agentId = ((event.payload as Record<string, unknown>)?.agentId as string | undefined)
+          ?? (event.source ?? '');
+        if (agentId && remaining.has(agentId)) {
+          cleanup();
+          for (const id of remaining) {
+            if (id !== agentId) this.agentManager.stopAgent(id).catch(() => {});
+          }
+          reject(new Error(`Agent ${agentId} was manually stopped`));
         }
       });
 

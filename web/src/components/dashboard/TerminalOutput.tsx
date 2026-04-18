@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useMemo, useCallback, memo } from 'react';
 import { marked } from 'marked';
+import DOMPurify from 'dompurify';
 import type { AgentOutput } from '../../stores/agentStore';
 import { useAgentStore } from '../../stores/agentStore';
 import { IconSearch, IconStop, IconRefresh, IconSend, IconChevronDown, IconChevronRight, IconX } from '../ui/Icons';
@@ -29,7 +30,7 @@ function renderMarkdown(content: string): string {
 
 /** Memoized markdown content component */
 const MarkdownContent = memo(function MarkdownContent({ content }: { content: string }) {
-  const html = useMemo(() => renderMarkdown(content), [content]);
+  const html = useMemo(() => DOMPurify.sanitize(renderMarkdown(content)), [content]);
   return (
     <span
       className="terminal-markdown"
