@@ -1499,10 +1499,12 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
       </div>
 
       {/* Test options (per-role checkboxes) */}
-      {onExecute && task.status !== 'in_progress' && task.status !== 'assigned' && (task.label === 'frontend' || task.label === 'backend') && (
+      {onExecute && task.status !== 'in_progress' && task.status !== 'assigned' && (task.label === 'frontend' || task.label === 'backend' || task.label === 'fullstack') && (
         <div className="pt-2 border-t border-border/50 mt-2">
           <div className="text-[10px] text-muted-foreground font-medium mb-1.5 uppercase tracking-wide">測試選項</div>
-          {task.label === 'frontend' && (
+          {(task.label === 'frontend' || task.label === 'fullstack') && (
+            <>
+            {task.label === 'fullstack' && <div className="text-[10px] text-blue-400 font-medium mb-0.5">Frontend</div>}
             <div className="flex flex-wrap gap-x-4 gap-y-1">
               {([
                 { key: 'smokeTest', label: 'Smoke Test' },
@@ -1558,8 +1560,11 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
                 </div>
               )}
             </div>
+            </>
           )}
-          {task.label === 'backend' && (
+          {(task.label === 'backend' || task.label === 'fullstack') && (
+            <>
+            {task.label === 'fullstack' && <div className="text-[10px] text-purple-400 font-medium mb-0.5 mt-1.5">Backend</div>}
             <div className="flex flex-wrap gap-x-4 gap-y-1">
               {([
                 { key: 'unitTests', label: '單元測試' },
@@ -1577,6 +1582,7 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
                 </label>
               ))}
             </div>
+            </>
           )}
         </div>
       )}
