@@ -35,6 +35,10 @@ export class FullstackController {
   ): Promise<void> {
     const { id: taskId, projectId } = task;
 
+    if (!project.frontendPath || !project.backendPath) {
+      throw new Error('Fullstack tasks require both frontendPath and backendPath to be configured');
+    }
+
     try {
       // Phase 1: Build FE + BE prompts, start subagents in parallel
       const [feData, beData] = await Promise.all([
@@ -340,6 +344,12 @@ rules:
           ?? (event.source ?? '');
         if (agentId && remaining.has(agentId)) {
           cleanup();
+          // Stop remaining agents to avoid orphaned processes
+          for (const id of remaining) {
+            if (id !== agentId) {
+              this.agentManager.stopAgent(id).catch(() => {});
+            }
+          }
           reject(new Error(`Agent ${agentId} failed with error`));
         }
       });
