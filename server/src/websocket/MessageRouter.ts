@@ -988,7 +988,24 @@ export function registerHandlers(
   });
 
   // Test SVN credentials by running `svn info` on a known SVN path
-  wsServer.registerHandler('config.testSvn', async (msg: WsMessage, ws: WebSocket) => {
+  wsServer.registerHandler('config.testSvn', async (_msg: WsMessage, ws: WebSocket) => {
+    const { spawnSync } = await import('node:child_process');
+    const { detectSvnBinary, isSvnAvailable } = await import('../svn/SvnSpecService.js');
+
+    // Check svn binary exists
+    if (!isSvnAvailable()) {
+      const hint = process.platform === 'win32'
+        ? 'SVN not found. Install TortoiseSVN (enable command-line tools) or SilkSVN.'
+        : 'SVN not found. Install via: brew install subversion';
+      wsServer.send(ws, {
+        type: 'config.testResult',
+        id: genId(),
+        timestamp: new Date().toISOString(),
+        payload: { service: 'svn', success: false, message: hint },
+      } as WsMessage);
+      return;
+    }
+
     const creds = getSvnCredentials();
     if (!creds.username && !creds.password) {
       wsServer.send(ws, {
@@ -1001,10 +1018,11 @@ export function registerHandlers(
     }
 
     try {
-      const { execSync } = await import('node:child_process');
-      // Use any project's SVN path to test, or just test auth with svn info on the server root
       const authArgs = [
-        '--non-interactive', '--trust-server-cert', '--no-auth-cache',
+        '--non-interactive',
+        '--trust-server-cert',
+        '--trust-server-cert-failures=unknown-ca,cn-mismatch,expired,not-yet-valid,other',
+        '--no-auth-cache',
       ];
       if (creds.username) authArgs.push('--username', creds.username);
       if (creds.password) authArgs.push('--password', creds.password);
@@ -1032,25 +1050,62 @@ export function registerHandlers(
         return;
       }
 
-      execSync(`svn info "${testUrl}" ${authArgs.join(' ')}`, {
-        encoding: 'buffer',
-        timeout: 15000,
+      const svnBin = detectSvnBinary();
+      const normalizedUrl = normalizeSvnUrl(testUrl);
+
+      // Try svn first; fall back to curl --ntlm if server requires NTLM/Negotiate auth
+      let connected = false;
+      let svnError = '';
+
+      const svnResult = spawnSync(svnBin, ['info', normalizedUrl, ...authArgs], {
+        encoding: 'buffer', timeout: 15000,
       });
 
-      wsServer.send(ws, {
-        type: 'config.testResult',
-        id: genId(),
-        timestamp: new Date().toISOString(),
-        payload: { service: 'svn', success: true, message: 'SVN connection successful' },
-      } as WsMessage);
+      if (!svnResult.error && svnResult.status === 0) {
+        connected = true;
+      } else {
+        svnError = (svnResult.stderr ? svnResult.stderr.toString('utf-8') : '') || String(svnResult.error ?? '');
+        const isNtlm = /E120190|authentication context|NTLM|Negotiate/i.test(svnError);
+        if (isNtlm) {
+          // Try curl --ntlm
+          const curlCreds = creds.username ? ['-u', `${creds.username}:${creds.password || ''}`] : [];
+          const curlResult = spawnSync('curl', [
+            '--ntlm', '--silent', '--insecure', '--fail-with-body',
+            ...curlCreds,
+            '-X', 'PROPFIND', '-H', 'Depth: 0',
+            '-H', 'Content-Type: text/xml',
+            '-d', '<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:allprop/></D:propfind>',
+            '-w', '\n%{http_code}',
+            normalizedUrl,
+          ], { encoding: 'buffer', timeout: 15000 });
+
+          const curlOut = curlResult.stdout?.toString('utf-8') ?? '';
+          const httpCode = curlOut.trim().split('\n').pop() ?? '0';
+          if (!curlResult.error && (curlResult.status === 0 || parseInt(httpCode) < 400)) {
+            connected = true;
+          } else {
+            throw new Error(`NTLM auth failed: ${curlResult.stderr?.toString('utf-8')?.slice(0, 200) || httpCode}`);
+          }
+        } else {
+          throw new Error(svnError.slice(0, 300));
+        }
+      }
+
+      if (connected) {
+        wsServer.send(ws, {
+          type: 'config.testResult',
+          id: genId(),
+          timestamp: new Date().toISOString(),
+          payload: { service: 'svn', success: true, message: 'SVN connection successful' },
+        } as WsMessage);
+      }
     } catch (err: unknown) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      const isAuth = /auth|401|403|password|credential/i.test(errMsg);
+      const errMsg = (err instanceof Error ? err.message : String(err)).slice(0, 300);
       wsServer.send(ws, {
         type: 'config.testResult',
         id: genId(),
         timestamp: new Date().toISOString(),
-        payload: { service: 'svn', success: false, message: isAuth ? 'Authentication failed — check username/password' : errMsg.slice(0, 200) },
+        payload: { service: 'svn', success: false, message: errMsg },
       } as WsMessage);
     }
   });
