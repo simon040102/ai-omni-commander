@@ -272,8 +272,14 @@ rules:
     try {
       let raw = match[1].trim();
       // Strip markdown code block wrappers if present (```json ... ```)
-      raw = raw.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?```\s*$/, '').trim();
-      logger.info({ rawLen: raw.length, rawPreview: raw.slice(0, 100) }, 'Parsing FULLSTACK_FIX JSON');
+      raw = raw.replace(/^```(?:json)?\s*\n?/m, '').replace(/\n?```\s*$/m, '').trim();
+      // Also try extracting JSON object directly if stripping wasn't enough
+      const jsonStart = raw.indexOf('{');
+      const jsonEnd = raw.lastIndexOf('}');
+      if (jsonStart >= 0 && jsonEnd > jsonStart) {
+        raw = raw.slice(jsonStart, jsonEnd + 1);
+      }
+      logger.info({ rawLen: raw.length, rawStart: raw.slice(0, 80) }, 'Parsing FULLSTACK_FIX JSON');
       const json = JSON.parse(raw);
       if (Array.isArray(json.fixes)) {
         return json.fixes.filter(
