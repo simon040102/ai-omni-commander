@@ -53,24 +53,7 @@ export class FullstackController {
       });
       logger.info({ taskId, coordinatorAgentId }, 'Coordinator started (waiting for FE+BE)');
 
-      // Collect coordinator text output in real-time
-      const collectedText: string[] = [];
-      let onMarkerFound: ((text: string) => void) | null = null;
-      const unsubOutput = this.eventBus.on(EventTypes.AGENT_OUTPUT, (event) => {
-        const payload = event.payload as Record<string, unknown>;
-        if (payload.agentId === coordinatorAgentId && payload.streamType === 'text') {
-          collectedText.push(payload.content as string);
-          // Check for marker in the same listener (guaranteed ordering)
-          if (onMarkerFound) {
-            const fullText = collectedText.join('\n');
-            if (fullText.includes('[/FULLSTACK_FIX]')) {
-              const cb = onMarkerFound;
-              onMarkerFound = null;
-              cb(fullText);
-            }
-          }
-        }
-      });
+      // No real-time output collection needed — we read from DB after coordinator completes
 
       // Phase 1: Build FE + BE prompts, start subagents in parallel
       const [feData, beData] = await Promise.all([
@@ -126,24 +109,19 @@ export class FullstackController {
 
 完成分析後，輸出 [FULLSTACK_FIX] marker（即使沒有問題也必須輸出）。`;
 
-      // Reset collected text for the analysis phase
-      collectedText.length = 0;
-
-      // Wait for coordinator to output [FULLSTACK_FIX] marker
-      const coordinatorAnalysis = new Promise<string>((resolve) => {
-        onMarkerFound = resolve;
-        // Timeout safety (5 min)
-        setTimeout(() => {
-          if (onMarkerFound) {
-            onMarkerFound = null;
-            resolve(collectedText.join('\n'));
-          }
-        }, 5 * 60 * 1000);
-      });
-
+      // Send analysis prompt and wait for coordinator to complete (via AGENT_COMPLETED)
+      const coordinatorDone = this.waitForAgents([coordinatorAgentId]);
       await this.agentManager.sendInputToAgent(coordinatorAgentId, analyzePrompt);
-      const fullCoordinatorText = await coordinatorAnalysis;
-      unsubOutput();
+      await coordinatorDone;
+
+      // Read coordinator output from DB (reliable — not affected by EventBus timing)
+      const { getAgentOutputs } = await import('../db/queries/events.js');
+      const dbOutputs = getAgentOutputs(coordinatorAgentId, 500);
+      const fullCoordinatorText = dbOutputs
+        .filter((o: { streamType: string }) => o.streamType === 'text')
+        .reverse()
+        .map((o: { content: string }) => o.content)
+        .join('\n');
 
       logger.info({ taskId, collectedLen: fullCoordinatorText.length, hasMarker: fullCoordinatorText.includes('[FULLSTACK_FIX]') }, 'Coordinator output collected');
       const coordinatorFixes = this.parseFixInstructions(fullCoordinatorText);
@@ -292,7 +270,10 @@ rules:
     }
 
     try {
-      const raw = match[1].trim();
+      let raw = match[1].trim();
+      // Strip markdown code block wrappers if present (```json ... ```)
+      raw = raw.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?```\s*$/, '').trim();
+      logger.info({ rawLen: raw.length, rawPreview: raw.slice(0, 100) }, 'Parsing FULLSTACK_FIX JSON');
       const json = JSON.parse(raw);
       if (Array.isArray(json.fixes)) {
         return json.fixes.filter(
