@@ -55,10 +55,20 @@ export class FullstackController {
 
       // Collect coordinator text output in real-time
       const collectedText: string[] = [];
+      let onMarkerFound: ((text: string) => void) | null = null;
       const unsubOutput = this.eventBus.on(EventTypes.AGENT_OUTPUT, (event) => {
         const payload = event.payload as Record<string, unknown>;
         if (payload.agentId === coordinatorAgentId && payload.streamType === 'text') {
           collectedText.push(payload.content as string);
+          // Check for marker in the same listener (guaranteed ordering)
+          if (onMarkerFound) {
+            const fullText = collectedText.join('\n');
+            if (fullText.includes('[/FULLSTACK_FIX]')) {
+              const cb = onMarkerFound;
+              onMarkerFound = null;
+              cb(fullText);
+            }
+          }
         }
       });
 
@@ -118,16 +128,26 @@ export class FullstackController {
 
       // Reset collected text for the analysis phase
       collectedText.length = 0;
-      // Subscribe to completion BEFORE sending input (avoid race condition)
-      const coordinatorDone = this.waitForAgents([coordinatorAgentId]);
-      await this.agentManager.sendInputToAgent(coordinatorAgentId, analyzePrompt);
 
-      // Wait for coordinator to complete analysis
-      await coordinatorDone;
+      // Wait for coordinator to output [FULLSTACK_FIX] marker
+      const coordinatorAnalysis = new Promise<string>((resolve) => {
+        onMarkerFound = resolve;
+        // Timeout safety (5 min)
+        setTimeout(() => {
+          if (onMarkerFound) {
+            onMarkerFound = null;
+            resolve(collectedText.join('\n'));
+          }
+        }, 5 * 60 * 1000);
+      });
+
+      await this.agentManager.sendInputToAgent(coordinatorAgentId, analyzePrompt);
+      const fullCoordinatorText = await coordinatorAnalysis;
       unsubOutput();
 
-      const coordinatorFixes = this.parseFixInstructions(collectedText.join('\n'));
-      logger.info({ taskId, fixCount: coordinatorFixes.length }, 'Coordinator analysis completed');
+      logger.info({ taskId, collectedLen: fullCoordinatorText.length, hasMarker: fullCoordinatorText.includes('[FULLSTACK_FIX]') }, 'Coordinator output collected');
+      const coordinatorFixes = this.parseFixInstructions(fullCoordinatorText);
+      logger.info({ taskId, fixCount: coordinatorFixes.length, fixes: coordinatorFixes.map(f => f.target) }, 'Coordinator analysis completed');
 
       // Phase 3b: Integration test with Playwright (if enabled)
       let integrationFixes: FixInstruction[] = [];
