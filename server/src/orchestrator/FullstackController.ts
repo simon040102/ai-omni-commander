@@ -118,10 +118,12 @@ export class FullstackController {
 
       // Reset collected text for the analysis phase
       collectedText.length = 0;
+      // Subscribe to completion BEFORE sending input (avoid race condition)
+      const coordinatorDone = this.waitForAgents([coordinatorAgentId]);
       await this.agentManager.sendInputToAgent(coordinatorAgentId, analyzePrompt);
 
-      // Wait for coordinator to complete
-      await this.waitForAgents([coordinatorAgentId]);
+      // Wait for coordinator to complete analysis
+      await coordinatorDone;
       unsubOutput();
 
       const coordinatorFixes = this.parseFixInstructions(collectedText.join('\n'));

@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import express from 'express';
+import { startup as warmupSDK } from '@anthropic-ai/claude-agent-sdk';
 import { getConfig, reloadAsanaPat } from './config.js';
 import { getDb } from './db/connection.js';
 import { getProject } from './db/queries/projects.js';
@@ -640,7 +641,14 @@ async function main() {
   const contractWatcher = new ContractWatcher(config.aiContextDir, eventBus, 'default');
   contractWatcher.start();
 
-  // 8. Listen
+  // 8. Pre-warm Claude Agent SDK (makes first agent spawn ~20x faster)
+  warmupSDK().then(() => {
+    logger.info('Claude Agent SDK pre-warmed');
+  }).catch((err) => {
+    logger.warn({ err }, 'SDK pre-warm failed (non-fatal)');
+  });
+
+  // 9. Listen
   httpServer.listen(config.port, () => {
     logger.info({ port: config.port }, 'AI-OmniCommander server is running');
     logger.info(`Dashboard: http://localhost:5173`);
