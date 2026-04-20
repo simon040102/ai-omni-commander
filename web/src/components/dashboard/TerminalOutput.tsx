@@ -348,39 +348,40 @@ export function TerminalOutput({ outputs, title, role, status, agentId, projectI
 
   return (
     <div className="flex flex-col h-full border border-border rounded-lg overflow-hidden">
-      {/* Header */}
-      <div className="flex items-center justify-between px-3 py-1.5 bg-card border-b border-border">
-        <div className="flex items-center gap-2">
-          <span className={`font-mono font-bold ${compact ? 'text-xs' : 'text-sm'}`}>{title}</span>
-          {!compact && (
-            <span className="text-[10px] text-muted-foreground">
-              {outputs.length} lines
-              {toolCount > 0 && ` | ${toolCount} tools`}
-              {errorCount > 0 && ` | ${errorCount} errors`}
-            </span>
-          )}
-          {/* Model display */}
-          {model && (
-            <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-600 dark:text-purple-400">
-              {model.replace('claude-', '').replace(/-\d{8}$/, '')}
-            </span>
-          )}
-          {/* Context usage bar */}
-          {contextUsage && (
-            <div className="flex items-center gap-1" title={`Context: ${contextUsage.totalTokens.toLocaleString()} / ${contextUsage.maxTokens.toLocaleString()} tokens (${Math.round(contextUsage.percentage)}%)`}>
-              <div className="w-16 h-1.5 rounded-full bg-muted overflow-hidden">
-                <div
-                  className={`h-full rounded-full transition-all ${contextUsage.percentage > 80 ? 'bg-red-500' : contextUsage.percentage > 60 ? 'bg-amber-500' : 'bg-green-500'}`}
-                  style={{ width: `${Math.min(contextUsage.percentage, 100)}%` }}
-                />
-              </div>
-              <span className={`text-[10px] ${contextUsage.percentage > 80 ? 'text-red-500' : 'text-muted-foreground'}`}>
-                {Math.round(contextUsage.percentage)}%
+      {/* Header — two rows: title on top, controls on bottom */}
+      <div className="px-3 py-1.5 bg-card border-b border-border">
+        {/* Row 1: Title */}
+        <div className="font-mono font-bold text-sm truncate">{title}</div>
+        {/* Row 2: Controls */}
+        <div className="flex items-center justify-between mt-1">
+          <div className="flex items-center gap-2">
+            {!compact && (
+              <span className="text-[10px] text-muted-foreground">
+                {outputs.length} lines
+                {toolCount > 0 && ` | ${toolCount} tools`}
+                {errorCount > 0 && ` | ${errorCount} errors`}
               </span>
-            </div>
-          )}
-        </div>
-        <div className="flex items-center gap-1.5">
+            )}
+            {model && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-600 dark:text-purple-400">
+                {model.replace('claude-', '').replace(/-\d{8}$/, '')}
+              </span>
+            )}
+            {contextUsage && (
+              <div className="flex items-center gap-1" title={`Context: ${contextUsage.totalTokens.toLocaleString()} / ${contextUsage.maxTokens.toLocaleString()} tokens (${Math.round(contextUsage.percentage)}%)`}>
+                <div className="w-16 h-1.5 rounded-full bg-muted overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-all ${contextUsage.percentage > 80 ? 'bg-red-500' : contextUsage.percentage > 60 ? 'bg-amber-500' : 'bg-green-500'}`}
+                    style={{ width: `${Math.min(contextUsage.percentage, 100)}%` }}
+                  />
+                </div>
+                <span className={`text-[10px] ${contextUsage.percentage > 80 ? 'text-red-500' : 'text-muted-foreground'}`}>
+                  {Math.round(contextUsage.percentage)}%
+                </span>
+              </div>
+            )}
+          </div>
+          <div className="flex items-center gap-1.5">
           {/* Search toggle */}
           <button
             onClick={() => { setShowSearch(!showSearch); if (showSearch) setSearchQuery(''); }}
@@ -470,6 +471,7 @@ export function TerminalOutput({ outputs, title, role, status, agentId, projectI
               {status}
             </span>
           )}
+          </div>
         </div>
       </div>
 
