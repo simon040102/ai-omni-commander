@@ -1,4 +1,4 @@
-import { execSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import fs from 'node:fs';
 import iconv from 'iconv-lite';
@@ -19,6 +19,7 @@ const SPEC_EXTENSIONS = new Set(['.docx', '.doc', '.pdf', '.md', '.txt']);
  */
 export class SvnSpecService {
   private svnPath: string;
+  private ntlmMode = false; // auto-set when svn fails with NTLM auth error
 
   constructor(
     private documentParser: DocumentParser,
@@ -350,67 +351,158 @@ export class SvnSpecService {
   // =============================================
 
   private svnList(url: string, _config: SvnConfig, recursive: boolean): string[] {
-    const args = this.buildAuthArgs();
-    const rFlag = recursive ? ' -R' : '';
-    const cmd = `"${this.svnPath}" list${rFlag} "${url}" ${args}`;
-
-    try {
-      const buf = execSync(cmd, {
-        encoding: 'buffer',
-        timeout: 60000,
-        maxBuffer: 10 * 1024 * 1024,
+    if (!this.ntlmMode) {
+      const args = ['list', ...(recursive ? ['-R'] : []), url, ...this.buildAuthArgs()];
+      const result = spawnSync(this.svnPath, args, {
+        encoding: 'buffer', timeout: 60000, maxBuffer: 10 * 1024 * 1024,
       });
-
-      const text = this.decodeSvnOutput(buf);
-      return text.split('\n').map(l => l.trim()).filter(Boolean);
+      if (!result.error && result.status === 0) {
+        return this.decodeSvnOutput(result.stdout).split('\n').map(l => l.trim()).filter(Boolean);
+      }
+      const stderr = result.stderr ? this.decodeSvnOutput(result.stderr) : '';
+      if (isNtlmError(stderr)) {
+        logger.info({ url }, 'svn NTLM error detected, switching to curl fallback');
+        this.ntlmMode = true;
+      } else {
+        logger.error({ stderr, url }, 'svn list failed');
+        return [];
+      }
+    }
+    // curl NTLM fallback
+    try {
+      return this.curlList(url, recursive);
     } catch (err) {
-      logger.error({ err, url }, 'svn list failed');
+      logger.error({ err, url }, 'curl list failed');
       return [];
     }
   }
 
   private svnInfoLastModified(url: string, _config: SvnConfig): string | null {
-    const args = this.buildAuthArgs();
-    const cmd = `"${this.svnPath}" info "${url}" ${args}`;
-
-    try {
-      const buf = execSync(cmd, {
-        encoding: 'buffer',
-        timeout: 30000,
-        maxBuffer: 1024 * 1024,
+    if (!this.ntlmMode) {
+      const args = ['info', url, ...this.buildAuthArgs()];
+      const result = spawnSync(this.svnPath, args, {
+        encoding: 'buffer', timeout: 30000, maxBuffer: 1024 * 1024,
       });
-
-      const text = this.decodeSvnOutput(buf);
-      // Look for "Last Changed Date:" line
-      const match = text.match(/Last Changed Date:\s*(.+)/i);
-      return match ? match[1].trim() : null;
+      if (!result.error && result.status === 0) {
+        const text = this.decodeSvnOutput(result.stdout);
+        const match = text.match(/Last Changed Date:\s*(.+)/i);
+        return match ? match[1].trim() : null;
+      }
+      const stderr = result.stderr ? this.decodeSvnOutput(result.stderr) : '';
+      if (isNtlmError(stderr)) {
+        this.ntlmMode = true;
+      } else {
+        logger.warn({ stderr, url }, 'svn info failed');
+        return null;
+      }
+    }
+    try {
+      return this.curlInfoLastModified(url);
     } catch (err) {
-      logger.warn({ err, url }, 'svn info failed');
+      logger.warn({ err, url }, 'curl info failed');
       return null;
     }
   }
 
   private svnExport(url: string, localPath: string, _config: SvnConfig): void {
-    const args = this.buildAuthArgs();
-    const cmd = `"${this.svnPath}" export --force "${url}" "${localPath}" ${args}`;
-
-    execSync(cmd, {
-      encoding: 'buffer',
-      timeout: 120000,
-      maxBuffer: 50 * 1024 * 1024,
-    });
+    if (!this.ntlmMode) {
+      const args = ['export', '--force', url, localPath, ...this.buildAuthArgs()];
+      const result = spawnSync(this.svnPath, args, {
+        encoding: 'buffer', timeout: 120000, maxBuffer: 50 * 1024 * 1024,
+      });
+      if (!result.error && result.status === 0) return;
+      const stderr = result.stderr ? this.decodeSvnOutput(result.stderr) : '';
+      if (isNtlmError(stderr)) {
+        this.ntlmMode = true;
+      } else {
+        throw new Error(stderr || `exit ${result.status}`);
+      }
+    }
+    this.curlExport(url, localPath);
   }
 
-  private buildAuthArgs(creds?: SvnCredentials): string {
+  // =============================================
+  // curl NTLM fallback (for servers that require NTLM/Negotiate auth)
+  // =============================================
+
+  private curlAuthArgs(): string[] {
+    const { username, password } = getSvnCredentials();
+    const args = ['--ntlm', '--silent', '--insecure', '--fail-with-body'];
+    if (username || password) args.push('-u', `${username || ''}:${password || ''}`);
+    return args;
+  }
+
+  private curlList(url: string, recursive: boolean, prefix = ''): string[] {
+    const listUrl = url.endsWith('/') ? url : url + '/';
+    const result = spawnSync('curl', [...this.curlAuthArgs(), listUrl], {
+      encoding: 'buffer', timeout: 60000, maxBuffer: 10 * 1024 * 1024,
+    });
+    if (result.error) throw result.error;
+    if (result.status !== 0) throw new Error(result.stderr?.toString('utf-8') ?? `curl exit ${result.status}`);
+
+    const text = result.stdout.toString('utf-8');
+    const items: string[] = [];
+
+    // Parse VisualSVN index XML: <file name="..." href="..."/> and <dir name="..." href="..."/>
+    const fileRe = /<file[^>]+name="([^"]+)"/g;
+    const dirRe = /<dir[^>]+name="([^"]+)"\s+href="([^"]+)"/g;
+    let m: RegExpExecArray | null;
+
+    while ((m = fileRe.exec(text)) !== null) {
+      items.push(prefix + m[1]);
+    }
+
+    while ((m = dirRe.exec(text)) !== null) {
+      const dirName = m[1];
+      const dirHref = m[2]; // URL-encoded, relative
+      items.push(prefix + dirName + '/');
+      if (recursive) {
+        const subUrl = listUrl + dirHref;
+        const subItems = this.curlList(subUrl, true, prefix + dirName + '/');
+        items.push(...subItems);
+      }
+    }
+
+    return items;
+  }
+
+  private curlInfoLastModified(url: string): string | null {
+    // Use PROPFIND to get DAV last-modified date
+    const body = '<?xml version="1.0" encoding="utf-8"?><D:propfind xmlns:D="DAV:"><D:prop><D:getlastmodified/></D:prop></D:propfind>';
+    const result = spawnSync('curl', [
+      ...this.curlAuthArgs(),
+      '-X', 'PROPFIND',
+      '-H', 'Depth: 0',
+      '-H', 'Content-Type: text/xml; charset=utf-8',
+      '-d', body,
+      url,
+    ], { encoding: 'buffer', timeout: 30000, maxBuffer: 1024 * 1024 });
+
+    if (result.error || result.status !== 0) return null;
+    const text = result.stdout.toString('utf-8');
+    const match = text.match(/<[Dd]:getlastmodified[^>]*>([^<]+)<\/[Dd]:getlastmodified>/);
+    return match ? match[1].trim() : null;
+  }
+
+  private curlExport(url: string, localPath: string): void {
+    const result = spawnSync('curl', [...this.curlAuthArgs(), '-o', localPath, '-L', url], {
+      encoding: 'buffer', timeout: 120000, maxBuffer: 50 * 1024 * 1024,
+    });
+    if (result.error) throw result.error;
+    if (result.status !== 0) throw new Error(result.stderr?.toString('utf-8') ?? `curl exit ${result.status}`);
+  }
+
+  private buildAuthArgs(creds?: SvnCredentials): string[] {
     const { username, password } = creds || getSvnCredentials();
     const parts = [
       '--non-interactive',
       '--trust-server-cert',
+      '--trust-server-cert-failures=unknown-ca,cn-mismatch,expired,not-yet-valid,other',
       '--no-auth-cache',
     ];
-    if (username) parts.push(`--username "${username}"`);
-    if (password) parts.push(`--password "${password}"`);
-    return parts.join(' ');
+    if (username) parts.push('--username', username);
+    if (password) parts.push('--password', password);
+    return parts;
   }
 
   /**
@@ -511,27 +603,7 @@ export class SvnSpecService {
   }
 
   private detectSvnPath(): string {
-    // Check common locations
-    const candidates = [
-      'C:/Program Files/TortoiseSVN/bin/svn.exe',
-      'C:/Program Files (x86)/TortoiseSVN/bin/svn.exe',
-    ];
-
-    for (const candidate of candidates) {
-      if (fs.existsSync(candidate)) return candidate;
-    }
-
-    // Try finding in PATH
-    try {
-      const result = execSync(
-        process.platform === 'win32' ? 'where svn.exe' : 'which svn',
-        { encoding: 'utf-8', timeout: 5000 },
-      ).trim();
-      if (result) return result.split('\n')[0]!;
-    } catch { /* not found */ }
-
-    // Fallback
-    return 'svn';
+    return detectSvnBinary();
   }
 }
 
@@ -560,11 +632,24 @@ export function normalizeSvnUrl(url: string): string {
     const decodedRepo = decodeURIComponent(repo!);
     const decodedRest = rest ? decodeURIComponent(rest) : '';
     const normalized = decodedRest
-      ? `${origin}/svn/${decodedRepo}/${decodedRest}`
-      : `${origin}/svn/${decodedRepo}`;
+      ? `${origin}/svn/${encodeSvnPath(decodedRepo)}/${encodeSvnPath(decodedRest)}`
+      : `${origin}/svn/${encodeSvnPath(decodedRepo)}`;
     return normalized;
   }
-  return url;
+  // Already a direct svn URL — still encode any raw non-ASCII chars in the path
+  return encodeSvnUrlNonAscii(url);
+}
+
+/** Encode each path segment's non-ASCII characters, preserving slashes and already-encoded sequences. */
+function encodeSvnPath(segment: string): string {
+  return segment.split('/').map(part =>
+    part.replace(/[^\x20-\x7E]/g, c => encodeURIComponent(c))
+  ).join('/');
+}
+
+/** Encode non-ASCII characters in a full URL without touching the scheme/host or already-encoded sequences. */
+function encodeSvnUrlNonAscii(url: string): string {
+  return url.replace(/[^\x00-\x7F]/g, c => encodeURIComponent(c));
 }
 
 /**
@@ -589,4 +674,51 @@ function hasSpecExtension(filename: string): boolean {
 
 function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function isNtlmError(msg: string): boolean {
+  return /E120190|authentication context|NTLM|Negotiate/i.test(msg);
+}
+
+/**
+ * Detect the svn binary path on the current platform.
+ * Checks TortoiseSVN on Windows, then falls back to PATH lookup.
+ */
+export function detectSvnBinary(): string {
+  const candidates =
+    process.platform === 'win32'
+      ? [
+          'C:/Program Files/TortoiseSVN/bin/svn.exe',
+          'C:/Program Files (x86)/TortoiseSVN/bin/svn.exe',
+        ]
+      : [];
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+
+  try {
+    const result = spawnSync(
+      process.platform === 'win32' ? 'where' : 'which',
+      [process.platform === 'win32' ? 'svn.exe' : 'svn'],
+      { encoding: 'utf-8', timeout: 5000 },
+    );
+    if (result.status === 0 && result.stdout) {
+      return result.stdout.trim().split('\n')[0]!;
+    }
+  } catch { /* not found */ }
+
+  return 'svn';
+}
+
+/**
+ * Check whether the svn binary is actually available on this machine.
+ */
+export function isSvnAvailable(): boolean {
+  const bin = detectSvnBinary();
+  const result = spawnSync(bin, ['--version', '--quiet'], {
+    encoding: 'utf-8',
+    timeout: 5000,
+  });
+  return result.status === 0 && !result.error;
 }
