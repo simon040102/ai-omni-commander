@@ -146,33 +146,37 @@ export class FullstackController {
 
       // Notify coordinator about fix dispatch
       const fixSummary = fixes.map(f => `- [${f.target}] ${f.instruction.slice(0, 100)}...`).join('\n');
-      this.agentManager.sendInputToAgent(coordinatorAgentId, `發現 ${fixes.length} 個整合問題，已派遣 Fix Agent 修正：\n${fixSummary}\n\n等待修正完成...`).catch(() => {});
+      this.agentManager.sendInputToAgent(coordinatorAgentId, `發現 ${fixes.length} 個整合問題，將修正指令送回原始 Agent：\n${fixSummary}`).catch(() => {});
 
-      const fixAgentIds: string[] = [];
-      for (const fix of fixes) {
-        const fixRole = fix.target === 'frontend' ? 'frontend' as const : 'backend' as const;
-        const fixWorkingDir = fix.target === 'frontend'
-          ? (project.frontendPath || project.workingDir)
-          : (project.backendPath || project.workingDir);
+      // Send fix instructions back to the ORIGINAL FE/BE agents (they have full context)
+      const feFixes = fixes.filter(f => f.target === 'frontend');
+      const beFixes = fixes.filter(f => f.target === 'backend');
 
-        const fixAgentId = await this.agentManager.startAgent({
-          projectId,
-          role: fixRole,
-          taskId,
-          prompt: `# Fullstack Fix Task\n\n## 整合問題說明\n\n${fix.instruction}\n\n請修正上述整合問題，修正完成後在回應末尾加上 [TASK_COMPLETE]。`,
-          model: opts.model || 'sonnet',
-          workingDir: fixWorkingDir,
-          useWorkspaceSkills: true,
-          skipTaskStatusUpdate: true,
-        });
-        fixAgentIds.push(fixAgentId);
+      const fixWaitIds: string[] = [];
+
+      if (feFixes.length > 0) {
+        const feInstruction = feFixes.map(f => f.instruction).join('\n\n');
+        const fixDone = this.waitForAgents([feAgentId]);
+        await this.agentManager.sendInputToAgent(feAgentId,
+          `# Coordinator 整合分析結果 — 需要修正\n\n${feInstruction}\n\n請修正上述整合問題，修正完成後在回應末尾加上 [TASK_COMPLETE]。`
+        );
+        fixWaitIds.push(feAgentId);
+        logger.info({ taskId, feAgentId }, 'Fix instruction sent to original frontend agent');
       }
 
-      await this.waitForAgents(fixAgentIds);
-      logger.info({ taskId, fixAgentCount: fixAgentIds.length }, 'All fix agents completed');
+      if (beFixes.length > 0) {
+        const beInstruction = beFixes.map(f => f.instruction).join('\n\n');
+        const fixDone = this.waitForAgents([beAgentId]);
+        await this.agentManager.sendInputToAgent(beAgentId,
+          `# Coordinator 整合分析結果 — 需要修正\n\n${beInstruction}\n\n請修正上述整合問題，修正完成後在回應末尾加上 [TASK_COMPLETE]。`
+        );
+        fixWaitIds.push(beAgentId);
+        logger.info({ taskId, beAgentId }, 'Fix instruction sent to original backend agent');
+      }
 
-      // Notify coordinator that all fixes are done
-      this.agentManager.sendInputToAgent(coordinatorAgentId, `所有 Fix Agent 已完成修正。任務完成。[TASK_COMPLETE]`).catch(() => {});
+      // Wait for all fix agents to complete
+      await this.waitForAgents(fixWaitIds);
+      logger.info({ taskId, fixCount: fixWaitIds.length }, 'All fix agents completed');
 
       await this.completeTask(taskId, projectId, 'fullstack-fix');
     } catch (err) {
