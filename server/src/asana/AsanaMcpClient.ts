@@ -186,30 +186,37 @@ export class AsanaMcpClient {
         throw new Error('No workspace found');
       }
 
-      const url = `${ASANA_API_BASE}/projects?workspace=${workspaceGid}&limit=100&opt_fields=name,archived`;
-      const response = await fetch(url, {
-        headers: {
-          'Authorization': `Bearer ${this.config.asanaPat}`,
-          'Accept': 'application/json',
-        },
-      });
+      const allProjects: Array<{ gid: string; name: string }> = [];
+      for (const ws of workspaces) {
+        let nextUrl: string | null = `${ASANA_API_BASE}/projects?workspace=${ws.gid}&limit=100&opt_fields=name,archived`;
+        while (nextUrl) {
+          const response: Response = await fetch(nextUrl, {
+            headers: {
+              'Authorization': `Bearer ${this.config.asanaPat}`,
+              'Accept': 'application/json',
+            },
+          });
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Failed to fetch projects: ${response.status} ${errorText}`);
+          if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`Failed to fetch projects: ${response.status} ${errorText}`);
+          }
+
+          const data = await response.json() as { data?: Record<string, unknown>[]; next_page?: { uri?: string } };
+          const page = (data.data || [])
+            .filter((p: Record<string, unknown>) => !p['archived'])
+            .map((p: Record<string, unknown>) => ({
+              gid: String(p['gid'] || ''),
+              name: String(p['name'] || ''),
+            }));
+          allProjects.push(...page);
+          nextUrl = data.next_page?.uri ? `${ASANA_API_BASE.replace('/api/1.0', '')}${data.next_page.uri}` : null;
+        }
       }
 
-      const data = await response.json();
-      const projects = (data.data || [])
-        .filter((p: Record<string, unknown>) => !p['archived'])
-        .map((p: Record<string, unknown>) => ({
-          gid: String(p['gid'] || ''),
-          name: String(p['name'] || ''),
-        }));
-
-      logger.info({ count: projects.length }, 'Fetched Asana projects');
+      logger.info({ count: allProjects.length }, 'Fetched Asana projects');
       this._connected = true;
-      return projects;
+      return allProjects;
     } catch (error) {
       logger.error({ error }, 'Failed to fetch Asana projects');
       throw error;
@@ -263,7 +270,7 @@ export class AsanaMcpClient {
     logger.info({ projectGid }, 'Fetching my tasks for Asana project...');
 
     try {
-      // Get user info for workspace GID
+      // Get current user GID for client-side assignee filtering
       const userResponse = await fetch(`${ASANA_API_BASE}/users/me`, {
         headers: {
           'Authorization': `Bearer ${this.config.asanaPat}`,
@@ -276,21 +283,15 @@ export class AsanaMcpClient {
       }
 
       const userData = await userResponse.json();
-      const userGid = userData.data?.gid;
-      const workspaces = userData.data?.workspaces || [];
-      const workspaceGid = this.config.asanaWorkspace || workspaces[0]?.gid;
+      const userGid = userData.data?.gid as string | undefined;
 
-      if (!userGid || !workspaceGid) {
-        throw new Error('Could not get user GID or workspace');
-      }
-
-      // Use Asana search API to filter by assignee AND project
-      const completedFilter = options?.includeCompleted ? '' : '&completed=false';
+      const completedSince = options?.includeCompleted ? '' : '&completed_since=now';
       const limit = options?.limit || 100;
 
-      const url = `${ASANA_API_BASE}/workspaces/${workspaceGid}/tasks/search?assignee.any=${userGid}&projects.any=${projectGid}${completedFilter}&limit=${limit}&opt_fields=name,notes,due_on,completed,permalink_url,projects.name,projects.gid,tags.name,parent.gid,parent.name,parent.notes`;
+      // Use free-tier endpoint: fetch all project tasks, filter assignee client-side
+      const url = `${ASANA_API_BASE}/tasks?project=${projectGid}&limit=${limit}${completedSince}&opt_fields=name,notes,due_on,completed,permalink_url,projects.name,projects.gid,tags.name,parent.gid,parent.name,parent.notes,assignee.gid`;
 
-      const response = await fetch(url, {
+      const response: Response = await fetch(url, {
         headers: {
           'Authorization': `Bearer ${this.config.asanaPat}`,
           'Accept': 'application/json',
@@ -299,11 +300,15 @@ export class AsanaMcpClient {
 
       if (!response.ok) {
         const errorText = await response.text();
-        throw new Error(`Failed to search tasks: ${response.status} ${errorText}`);
+        throw new Error(`Failed to fetch tasks: ${response.status} ${errorText}`);
       }
 
       const data = await response.json();
-      const tasks = (data.data || []).map((task: Record<string, unknown>) => this.mapToAsanaTask(task));
+      const allTasks = (data.data || []) as Record<string, unknown>[];
+      const filtered = userGid
+        ? allTasks.filter(t => (t['assignee'] as Record<string, unknown> | null)?.['gid'] === userGid)
+        : allTasks;
+      const tasks = filtered.map(task => this.mapToAsanaTask(task));
 
       logger.info({ projectGid, count: tasks.length }, 'Fetched my tasks for Asana project');
       this._connected = true;
