@@ -655,11 +655,15 @@ export function registerHandlers(
   // TASK.CREATE
   wsServer.registerHandler('task.create', (msg: WsMessage) => {
     const { payload } = msg as WsTaskCreate;
+    const validTaskTypes = ['bug', 'feature', 'refactor', 'testing', 'other'] as const;
+    const safeTaskType = validTaskTypes.includes(payload.taskType as typeof validTaskTypes[number])
+      ? payload.taskType as typeof validTaskTypes[number]
+      : 'other';
     const task = createTask({
       projectId: payload.projectId,
       title: payload.title,
       description: payload.description,
-      taskType: payload.taskType,
+      taskType: safeTaskType,
       label: payload.label,
       source: payload.source,
       sourceRef: payload.sourceRef,
@@ -700,12 +704,16 @@ export function registerHandlers(
   // TASK.UPDATE — update task fields (title, description, specUrl)
   wsServer.registerHandler('task.update', (msg: WsMessage) => {
     const { payload } = msg as WsTaskUpdate;
+    const validTaskTypes = ['bug', 'feature', 'refactor', 'testing', 'other'] as const;
+    const safeTaskType = payload.taskType && validTaskTypes.includes(payload.taskType as typeof validTaskTypes[number])
+      ? payload.taskType as typeof validTaskTypes[number]
+      : payload.taskType ? 'other' : undefined;
     updateTaskFields(payload.taskId, {
       title: payload.title,
       description: payload.description,
       specUrl: payload.specUrl,
       label: payload.label,
-      taskType: payload.taskType,
+      taskType: safeTaskType,
       status: payload.status,
       preferredModel: payload.preferredModel,
       parentName: payload.parentName,
@@ -829,7 +837,6 @@ export function registerHandlers(
 
       // Find SVN executable
       const fs = await import('node:fs');
-      const { execSync } = await import('node:child_process');
       const iconv = (await import('iconv-lite')).default;
 
       const svnCandidates = [
@@ -845,18 +852,54 @@ export function registerHandlers(
       const authArgs = [
         '--non-interactive',
         '--trust-server-cert',
+        '--trust-server-cert-failures=unknown-ca,cn-mismatch,expired,not-yet-valid,other',
         '--no-auth-cache',
       ];
-      if (creds.username) authArgs.push(`--username "${creds.username}"`);
-      if (creds.password) authArgs.push(`--password "${creds.password}"`);
-      const auth = authArgs.join(' ');
+      if (creds.username) { authArgs.push('--username', creds.username); }
+      if (creds.password) { authArgs.push('--password', creds.password); }
 
-      // Run svn list (non-recursive, one level)
-      const buf = execSync(`"${svnPath}" list "${svnUrl}" ${auth}`, {
+      // Run svn list (non-recursive, one level); fall back to curl --ntlm on E120190
+      const { spawnSync: svnSpawn } = await import('node:child_process');
+      let buf: Buffer;
+      const spawnResult = svnSpawn(svnPath, ['list', svnUrl, ...authArgs], {
         encoding: 'buffer',
         timeout: 30000,
         maxBuffer: 10 * 1024 * 1024,
       });
+      if (!spawnResult.error && spawnResult.status === 0) {
+        buf = spawnResult.stdout;
+      } else {
+        const errMsg = spawnResult.stderr ? spawnResult.stderr.toString('utf-8') : String(spawnResult.error ?? '');
+        if (/E120190|authentication context|NTLM|Negotiate/i.test(errMsg)) {
+          // NTLM/Negotiate auth — fall back to curl GET (VisualSVN returns HTML index)
+          const curlCreds = creds.username ? ['-u', `${creds.username}:${creds.password || ''}`] : [];
+          const listUrl = svnUrl!.endsWith('/') ? svnUrl! : svnUrl + '/';
+          const curlResult = svnSpawn('curl', [
+            '--ntlm', '--silent', '--insecure', '--fail-with-body',
+            ...curlCreds,
+            listUrl,
+          ], { encoding: 'buffer', timeout: 30000, maxBuffer: 10 * 1024 * 1024 });
+          if (curlResult.error || curlResult.status !== 0) {
+            throw new Error(curlResult.stderr?.toString('utf-8') ?? `curl NTLM failed (exit ${curlResult.status})`);
+          }
+          const html = curlResult.stdout.toString('utf-8');
+          const entries: Array<{ name: string; isDir: boolean; fullUrl: string }> = [];
+          const fileRe = /<file[^>]+name="([^"]+)"/g;
+          const dirRe = /<dir[^>]+name="([^"]+)"\s+href="([^"]+)"/g;
+          let m: RegExpExecArray | null;
+          while ((m = fileRe.exec(html)) !== null) {
+            const name = m[1]!;
+            entries.push({ name, isDir: false, fullUrl: listUrl + encodeURIComponent(name) });
+          }
+          while ((m = dirRe.exec(html)) !== null) {
+            const name = m[1]!;
+            entries.push({ name, isDir: true, fullUrl: listUrl + m[2] });
+          }
+          wsServer.send(ws, { type: 'svn.browseResult', id: genId(), timestamp: new Date().toISOString(), payload: { svnUrl, entries } } as WsMessage);
+          return;
+        }
+        throw new Error(errMsg || 'svn list failed');
+      }
 
       // Decode (UTF-8 or Big5)
       const utf8 = buf.toString('utf-8');

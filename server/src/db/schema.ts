@@ -1,4 +1,7 @@
 import type Database from 'better-sqlite3';
+import { TASK_TYPES, TASK_SOURCES, TASK_LABELS, TASK_STATUSES } from '@omni/shared';
+
+const sqlIn = (arr: readonly string[]) => arr.map(v => `'${v}'`).join(', ');
 
 export function runMigrations(db: Database.Database): void {
   db.exec(`
@@ -45,20 +48,17 @@ export function runMigrations(db: Database.Database): void {
       project_id        TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
       title             TEXT NOT NULL,
       description       TEXT,
-      label             TEXT NOT NULL CHECK(label IN ('backend', 'frontend', 'fullstack', 'devops',
-                                                       'testing', 'review', 'architect')),
+      label             TEXT NOT NULL CHECK(label IN (${sqlIn(TASK_LABELS)})),
       status            TEXT NOT NULL DEFAULT 'pending'
-                          CHECK(status IN ('pending', 'blocked', 'queued', 'assigned',
-                                            'in_progress', 'needs_review', 'needs_intervention',
-                                            'completed', 'failed')),
+                          CHECK(status IN (${sqlIn(TASK_STATUSES)})),
       assigned_agent_id TEXT REFERENCES agents(id),
       priority          INTEGER NOT NULL DEFAULT 0,
       prompt            TEXT,
       result_summary    TEXT,
       retry_count       INTEGER NOT NULL DEFAULT 0,
       max_retries       INTEGER NOT NULL DEFAULT 2,
-      task_type         TEXT NOT NULL DEFAULT 'other' CHECK(task_type IN ('bug', 'feature', 'refactor', 'other')),
-      source            TEXT NOT NULL DEFAULT 'manual' CHECK(source IN ('manual', 'asana')),
+      task_type         TEXT NOT NULL DEFAULT 'other' CHECK(task_type IN (${sqlIn(TASK_TYPES)})),
+      source            TEXT NOT NULL DEFAULT 'manual' CHECK(source IN (${sqlIn(TASK_SOURCES)})),
       source_ref        TEXT,
       branch_name       TEXT,
       created_at        TEXT NOT NULL DEFAULT (datetime('now')),
@@ -375,9 +375,9 @@ export function runMigrations(db: Database.Database): void {
     }
   }
 
-  // Migration: add 'fullstack' label to tasks table
+  // Migration: add 'fullstack' label + 'testing' task_type to tasks table
   const tasksInfo = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'").get() as { sql: string } | undefined;
-  if (tasksInfo?.sql && !tasksInfo.sql.includes("'fullstack'")) {
+  if (tasksInfo?.sql && (!tasksInfo.sql.includes("'fullstack'") || !tasksInfo.sql.includes("'testing'"))) {
     try {
       db.exec(`
         PRAGMA foreign_keys = OFF;
@@ -387,20 +387,17 @@ export function runMigrations(db: Database.Database): void {
           project_id        TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
           title             TEXT NOT NULL,
           description       TEXT,
-          label             TEXT NOT NULL CHECK(label IN ('backend', 'frontend', 'fullstack', 'devops',
-                                                           'testing', 'review', 'architect')),
+          label             TEXT NOT NULL CHECK(label IN (${sqlIn(TASK_LABELS)})),
           status            TEXT NOT NULL DEFAULT 'pending'
-                              CHECK(status IN ('pending', 'blocked', 'queued', 'assigned',
-                                                'in_progress', 'needs_review', 'needs_intervention',
-                                                'completed', 'failed')),
+                              CHECK(status IN (${sqlIn(TASK_STATUSES)})),
           assigned_agent_id TEXT REFERENCES agents(id),
           priority          INTEGER NOT NULL DEFAULT 0,
           prompt            TEXT,
           result_summary    TEXT,
           retry_count       INTEGER NOT NULL DEFAULT 0,
           max_retries       INTEGER NOT NULL DEFAULT 2,
-          task_type         TEXT NOT NULL DEFAULT 'other',
-          source            TEXT NOT NULL DEFAULT 'manual',
+          task_type         TEXT NOT NULL DEFAULT 'other' CHECK(task_type IN (${sqlIn(TASK_TYPES)})),
+          source            TEXT NOT NULL DEFAULT 'manual' CHECK(source IN (${sqlIn(TASK_SOURCES)})),
           source_ref        TEXT,
           branch_name       TEXT,
           spec_url          TEXT,

@@ -1,26 +1,14 @@
-export type TaskType = 'bug' | 'feature' | 'refactor' | 'testing' | 'other';
+export const TASK_TYPES = ['bug', 'feature', 'refactor', 'testing', 'other'] as const;
+export type TaskType = typeof TASK_TYPES[number];
 
-export type TaskSource = 'manual' | 'asana';
+export const TASK_SOURCES = ['manual', 'asana'] as const;
+export type TaskSource = typeof TASK_SOURCES[number];
 
-export type TaskLabel =
-  | 'backend'
-  | 'frontend'
-  | 'fullstack'
-  | 'devops'
-  | 'testing'
-  | 'review'
-  | 'architect';
+export const TASK_LABELS = ['backend', 'frontend', 'fullstack', 'devops', 'testing', 'review', 'architect'] as const;
+export type TaskLabel = typeof TASK_LABELS[number];
 
-export type TaskStatus =
-  | 'pending'
-  | 'blocked'
-  | 'queued'
-  | 'assigned'
-  | 'in_progress'
-  | 'needs_review'
-  | 'needs_intervention'
-  | 'completed'
-  | 'failed';
+export const TASK_STATUSES = ['pending', 'blocked', 'queued', 'assigned', 'in_progress', 'needs_review', 'needs_intervention', 'completed', 'failed'] as const;
+export type TaskStatus = typeof TASK_STATUSES[number];
 
 export interface Task {
   id: string;
