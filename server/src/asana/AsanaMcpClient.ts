@@ -287,24 +287,30 @@ export class AsanaMcpClient {
 
       const completedSince = options?.includeCompleted ? '' : '&completed_since=now';
       const limit = options?.limit || 100;
+      const optFields = 'name,notes,due_on,completed,permalink_url,projects.name,projects.gid,tags.name,parent.gid,parent.name,parent.notes,assignee.gid';
 
-      // Use free-tier endpoint: fetch all project tasks, filter assignee client-side
-      const url = `${ASANA_API_BASE}/tasks?project=${projectGid}&limit=${limit}${completedSince}&opt_fields=name,notes,due_on,completed,permalink_url,projects.name,projects.gid,tags.name,parent.gid,parent.name,parent.notes,assignee.gid`;
+      // Fetch all project tasks with pagination (to avoid missing tasks beyond first page)
+      let allTasks: Record<string, unknown>[] = [];
+      let nextPageUrl: string | null = `${ASANA_API_BASE}/tasks?project=${projectGid}&limit=${limit}${completedSince}&opt_fields=${optFields}`;
 
-      const response: Response = await fetch(url, {
-        headers: {
-          'Authorization': `Bearer ${this.config.asanaPat}`,
-          'Accept': 'application/json',
-        },
-      });
+      while (nextPageUrl) {
+        const response: Response = await fetch(nextPageUrl, {
+          headers: {
+            'Authorization': `Bearer ${this.config.asanaPat}`,
+            'Accept': 'application/json',
+          },
+        });
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Failed to fetch tasks: ${response.status} ${errorText}`);
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`Failed to fetch tasks: ${response.status} ${errorText}`);
+        }
+
+        const data = await response.json();
+        allTasks.push(...(data.data || []));
+        nextPageUrl = data.next_page?.uri || null;
       }
 
-      const data = await response.json();
-      const allTasks = (data.data || []) as Record<string, unknown>[];
       const filtered = userGid
         ? allTasks.filter(t => (t['assignee'] as Record<string, unknown> | null)?.['gid'] === userGid)
         : allTasks;
