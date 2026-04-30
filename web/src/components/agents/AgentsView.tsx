@@ -598,8 +598,10 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
               }
               const groups: Array<{ taskId: string; task: typeof tasks[0] | undefined; agents: typeof agents }> = [];
               for (const [tid, ga] of taskGroups) {
-                if (ga.length > 1) {
-                  groups.push({ taskId: tid, task: tasks.find(t => t.id === tid), agents: ga });
+                const task = tasks.find(t => t.id === tid);
+                // Only group fullstack tasks (multiple roles for one task)
+                if (ga.length > 1 && task?.label === 'fullstack') {
+                  groups.push({ taskId: tid, task, agents: ga });
                 } else {
                   standalone.push(...ga);
                 }
