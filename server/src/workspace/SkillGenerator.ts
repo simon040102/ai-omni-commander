@@ -27,7 +27,8 @@ export class SkillGenerator {
   ): Promise<string> {
     const hasClaudeMd = fs.existsSync(path.join(workspacePath, 'CLAUDE.md'));
     const hasSkillsDir = fs.existsSync(path.join(workspacePath, '.claude', 'skills'));
-    const mode: 'create' | 'enhance' = (hasClaudeMd || hasSkillsDir) ? 'enhance' : 'create';
+    const hasSkills = hasSkillsDir && fs.readdirSync(path.join(workspacePath, '.claude', 'skills')).some(f => f.endsWith('.md'));
+    const mode: 'create' | 'enhance' = (hasClaudeMd || hasSkills) ? 'enhance' : 'create';
 
     logger.info({ projectId, workspacePath, workspaceType, mode }, 'Generating workspace skills');
 
@@ -83,7 +84,7 @@ export class SkillGenerator {
 
     const modeInstruction = mode === 'create'
       ? `此工作目錄**尚無** CLAUDE.md 或 .claude/skills/，從零開始建立。`
-      : `此工作目錄**已有** CLAUDE.md 或 .claude/skills/，先讀取現有內容，找出缺漏或過時的部分補強。現有正確的內容不要刪除，只新增或修正。`;
+      : `此工作目錄**已有**${hasClaudeMd ? ' CLAUDE.md' : ''}${hasSkills ? ' .claude/skills/' : ''}，先讀取現有內容，找出缺漏或過時的部分補強。現有正確的內容不要刪除，只新增或修正。${hasClaudeMd && !hasSkills ? '\n注意：有 CLAUDE.md 但尚無 .claude/skills/，需要建立 skills 目錄和檔案。' : ''}`;
 
     return `你是一位深度理解真實工程現場的資深${lang}架構師。
 你的任務是：**深度閱讀這個專案的程式碼，把它的「開發方式、習慣、潛規則」全部文件化**，讓未來的 AI agent 讀了之後，能像一個熟悉這個專案三個月的工程師一樣開發——不踩雷、不重複造輪子、風格一致。
@@ -160,6 +161,14 @@ ${workspaceType === 'frontend' ? `
 - 規範類的內容要具體，配程式碼範例，不要只說「遵循 XXX 風格」
 - 禁止事項和 workaround 要獨立、醒目，是最容易救命的部分
 - 寧可寫少但準確，不要寫多但模糊
+- **必須包含「可用 Skills」章節**：列出所有建立的 .claude/skills/ 檔案名稱、描述、什麼情況下應該使用。格式範例：
+  \`\`\`
+  ## 可用 Skills（.claude/skills/）
+  | Skill 名稱 | 說明 | 使用時機 |
+  |-----------|------|---------|
+  | develop-feature | 新功能開發流程 | 開發新頁面或新 API 時 |
+  | coding-conventions | 命名與程式碼風格 | 寫任何程式碼前查閱 |
+  \`\`\`
 
 ### .claude/skills/ 撰寫方向
 每個 skill 聚焦一個明確的主題，讓 agent 在需要的時候能精確叫出來。
