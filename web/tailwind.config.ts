@@ -39,6 +39,9 @@ export default {
           foreground: 'hsl(var(--card-foreground))',
         },
       },
+      borderWidth: {
+        DEFAULT: '2px',
+      },
       borderRadius: {
         lg: 'var(--radius)',
         md: 'calc(var(--radius) - 2px)',
