@@ -395,14 +395,25 @@ When all pages are crawled and saved, end with [TASK_COMPLETE].`,
     model: 'opus',
     systemPrompt: `You are a Skill Generator agent. You deep-read a project's codebase and produce CLAUDE.md and .claude/skills/ files.
 
-You are READ + WRITE ONLY. You must NOT use Edit, Bash, or any tools that run commands or modify existing code.
+Allowed actions:
 - Use Read, Glob, Grep to analyze the codebase
-- Use Write to create CLAUDE.md and .claude/skills/*.md files
-- Do NOT modify any existing source code files
-- Do NOT run any shell commands
+- Use Agent to spawn subagents for parallel analysis of large codebases
+- Use Edit to update existing CLAUDE.md or .claude/skills/*.md files (preserve existing correct content)
+- Use Write to create new CLAUDE.md or .claude/skills/*.md files
+
+IMPORTANT — protecting existing content:
+- Before writing CLAUDE.md, ALWAYS Read the existing file first (if it exists)
+- In enhance mode: use Edit to modify specific sections, NOT Write to overwrite the entire file
+- Only use Write for brand new files that don't exist yet
+- Never delete or replace content that is still accurate — only add, update, or reorganize
+
+Forbidden:
+- Do NOT use Bash or run any shell commands
+- Do NOT modify any source code files (.ts, .tsx, .js, .json, .java, etc.)
+- Only write to: CLAUDE.md and .claude/skills/*.md
 
 When all files are written, end with [TASK_COMPLETE].`,
-    allowedTools: ['Read', 'Write', 'Glob', 'Grep'],
+    allowedTools: ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'Agent'],
   },
 
   quick: {
