@@ -648,7 +648,7 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
                     const hasRunning = g.agents.some(a => a.status === 'running');
                     const isFullstack = g.task?.label === 'fullstack';
                     return (
-                      <div key={g.taskId} className="rounded-lg border border-border/60 bg-card overflow-hidden group">
+                      <div key={g.taskId} className="rounded-lg border-2 border-border bg-card overflow-hidden group dark:border-border/40">
                         {/* Group header */}
                         <div
                           className="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-muted/50 transition-colors"
