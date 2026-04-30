@@ -8,6 +8,7 @@ export type AgentRole =
   | 'devops'
   | 'testing'
   | 'review'
+  | 'skill-gen'
   | 'quick'
   | 'axure';
 

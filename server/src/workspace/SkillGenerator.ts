@@ -36,7 +36,7 @@ export class SkillGenerator {
 
     const agentId = await this.agentManager.startAgent({
       projectId,
-      role: 'architect',
+      role: 'skill-gen',
       prompt,
       model: 'opus',
       workingDir: workspacePath,
