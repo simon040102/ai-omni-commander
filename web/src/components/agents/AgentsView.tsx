@@ -53,7 +53,7 @@ interface AgentsViewProps {
   onViewChange: (view: View) => void;
 }
 
-type RightPanel = { mode: 'terminal'; agentId: string } | { mode: 'add-agent' } | { mode: 'empty' };
+type RightPanel = { mode: 'terminal'; agentId: string } | { mode: 'group-terminal'; agentIds: string[]; taskTitle: string } | { mode: 'add-agent' } | { mode: 'empty' };
 
 export function AgentsView({ onViewChange }: AgentsViewProps) {
   const currentProjectId = useProjectStore(s => s.currentProjectId);
@@ -655,11 +655,11 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
                         <div
                           className="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-muted/50 transition-colors"
                           onClick={() => {
-                            if (isFullstack && g.agents.length > 1) {
-                              setViewMode('grid');
-                              setGridAgentIds(g.agents.map(a => a.id));
-                            } else {
+                            // Toggle: click group title → show all agents in right panel; click again → back to single
+                            if (rightPanel.mode === 'group-terminal' && (rightPanel as { agentIds: string[] }).agentIds?.[0] === g.agents[0]?.id) {
                               setRightPanel({ mode: 'terminal', agentId: g.agents[0].id });
+                            } else {
+                              setRightPanel({ mode: 'group-terminal', agentIds: g.agents.map(a => a.id), taskTitle: g.task?.title || '未知任務' });
                             }
                           }}
                         >
@@ -761,7 +761,53 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
 
         {/* ─── Right: Terminal or Add Agent form ─── */}
         <div className="flex-1 min-w-0">
-          {rightPanel.mode === 'terminal' && selectedAgent ? (
+          {rightPanel.mode === 'group-terminal' ? (() => {
+            const gp = rightPanel as { agentIds: string[]; taskTitle: string };
+            const gpAgents = gp.agentIds.map(id => agents.find(a => a.id === id)).filter(Boolean) as typeof agents;
+            const hasIntTest = gpAgents.some(a => a.role === 'integration-test');
+            const roleOrder = ['frontend', 'backend', 'coordinator', 'integration-test'];
+            const sorted = [...gpAgents].sort((a, b) => {
+              const ai = roleOrder.indexOf(a.role); const bi = roleOrder.indexOf(b.role);
+              return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+            });
+            // FE+BE top row; coordinator (+ integration-test) bottom row
+            const topAgents = sorted.filter(a => a.role === 'frontend' || a.role === 'backend');
+            const bottomAgents = sorted.filter(a => a.role !== 'frontend' && a.role !== 'backend');
+            const use2x2 = hasIntTest && bottomAgents.length >= 2;
+            return (
+              <div className="h-full grid gap-2" style={{
+                gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+                gridTemplateRows: '1fr 1fr',
+              }}>
+                {(use2x2 ? sorted : [...topAgents, ...bottomAgents]).map(agent => {
+                  const ct = agent.currentTaskId ? tasks.find(t => t.id === agent.currentTaskId) : null;
+                  const span2 = !use2x2 && (agent.role === 'coordinator' || agent.role === 'integration-test');
+                  return (
+                    <div key={agent.id} className="min-h-0 min-w-0 flex flex-col rounded-lg overflow-hidden border border-transparent" style={span2 ? { gridColumn: '1 / -1' } : undefined}>
+                      <div className="flex-1 min-h-0">
+                        <TerminalOutput
+                          outputs={outputs[agent.id] || []}
+                          title={`${agent.role.charAt(0).toUpperCase() + agent.role.slice(1)} Agent${ct?.title ? ` — ${ct.title}` : ''}`}
+                          role={agent.role}
+                          status={agent.status}
+                          agentId={agent.id}
+                          projectId={currentProjectId ?? undefined}
+                          taskId={agent.currentTaskId || undefined}
+                          model={agent.model}
+                          totalInputTokens={agent.totalInputTokens}
+                          totalOutputTokens={agent.totalOutputTokens}
+                          onSendCommand={handleSendCommand}
+                          onAction={handleAgentAction}
+                          compact
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()
+          : rightPanel.mode === 'terminal' && selectedAgent ? (
             <TerminalOutput
               key={selectedAgent.id}
               outputs={outputs[selectedAgent.id] || []}
