@@ -19,7 +19,7 @@ export function AppShell({ children }: AppShellProps) {
     const saved = localStorage.getItem(VIEW_STORAGE_KEY) as View | null;
     return saved ?? 'home';
   });
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarPinned, setSidebarPinned] = useState(false); // false = auto-collapse, true = locked open
   const agents = useProjectStore(s => s.agents);
   const hasAutoSwitched = useRef(false);
   const userHasNavigated = useRef(false);
@@ -57,8 +57,8 @@ export function AppShell({ children }: AppShellProps) {
         <Sidebar
           currentView={currentView}
           onViewChange={handleViewChange}
-          collapsed={sidebarCollapsed}
-          onToggleCollapse={() => setSidebarCollapsed(c => !c)}
+          pinned={sidebarPinned}
+          onTogglePin={() => setSidebarPinned(p => !p)}
         />
         <main className="flex-1 overflow-auto p-4">
           {children(currentView, handleViewChange)}
