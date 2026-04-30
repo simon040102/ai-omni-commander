@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useState, useRef, useCallback } from 'react';
 import { useProjectStore } from '../../stores/projectStore';
 import { useWsStore } from '../../stores/wsStore';
 import {
@@ -10,8 +10,8 @@ import type { View } from './AppShell';
 interface SidebarProps {
   currentView: View;
   onViewChange: (view: View) => void;
-  collapsed: boolean;
-  onToggleCollapse: () => void;
+  pinned: boolean;      // true = locked open, false = auto-collapse on mouse leave
+  onTogglePin: () => void;
 }
 
 /* ─── Icon components for sidebar nav ─── */
@@ -65,7 +65,24 @@ function IconRobot({ className }: { className?: string }) {
   );
 }
 
-export function Sidebar({ currentView, onViewChange, collapsed, onToggleCollapse }: SidebarProps) {
+export function Sidebar({ currentView, onViewChange, pinned, onTogglePin }: SidebarProps) {
+  const [hovered, setHovered] = useState(false);
+  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Expanded = pinned open OR hovering
+  const collapsed = !pinned && !hovered;
+
+  const handleMouseEnter = useCallback(() => {
+    if (pinned) return;
+    if (hoverTimer.current) clearTimeout(hoverTimer.current);
+    setHovered(true);
+  }, [pinned]);
+
+  const handleMouseLeave = useCallback(() => {
+    if (pinned) return;
+    // Small delay to prevent flicker
+    hoverTimer.current = setTimeout(() => setHovered(false), 200);
+  }, [pinned]);
   const rawProjects = useProjectStore(s => s.projects);
   const currentProjectId = useProjectStore(s => s.currentProjectId);
 
@@ -121,13 +138,21 @@ export function Sidebar({ currentView, onViewChange, collapsed, onToggleCollapse
   const navItems = isProjectMode ? projectNavItems : homeNavItems;
 
   return (
-    <aside className={`${collapsed ? 'w-14' : 'w-56'} border-r border-border bg-card flex flex-col transition-all duration-200 ease-in-out`}>
-      {/* Collapse toggle */}
+    <aside
+      className={`${collapsed ? 'w-14' : 'w-56'} border-r border-border bg-card flex flex-col transition-all duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] overflow-hidden`}
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={handleMouseLeave}
+    >
+      {/* Pin toggle */}
       <div className={`flex items-center border-b border-border ${collapsed ? 'justify-center py-2' : 'justify-end px-3 py-2'}`}>
         <button
-          onClick={onToggleCollapse}
-          className="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-          title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          onClick={onTogglePin}
+          className={`p-1 rounded-md transition-colors ${
+            pinned
+              ? 'text-primary bg-primary/10 hover:bg-primary/20'
+              : 'text-muted-foreground hover:text-foreground hover:bg-muted'
+          }`}
+          title={pinned ? 'Unpin sidebar (auto-collapse)' : 'Pin sidebar open'}
         >
           <IconPanelLeft className="w-4 h-4" />
         </button>
