@@ -19,7 +19,7 @@ export function AppShell({ children }: AppShellProps) {
     const saved = localStorage.getItem(VIEW_STORAGE_KEY) as View | null;
     return saved ?? 'home';
   });
-  const [sidebarPinned, setSidebarPinned] = useState(false); // false = auto-collapse, true = locked open
+  const [sidebarPinned, setSidebarPinned] = useState(true); // true = open (default), false = collapsed with hover
   const agents = useProjectStore(s => s.agents);
   const hasAutoSwitched = useRef(false);
   const userHasNavigated = useRef(false);
