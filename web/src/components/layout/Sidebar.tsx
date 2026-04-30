@@ -75,7 +75,7 @@ export function Sidebar({ currentView, onViewChange, pinned, onTogglePin }: Side
   const handleMouseEnter = useCallback(() => {
     if (pinned) return;
     if (hoverTimer.current) clearTimeout(hoverTimer.current);
-    setHovered(true);
+    hoverTimer.current = setTimeout(() => setHovered(true), 500);
   }, [pinned]);
 
   const handleMouseLeave = useCallback(() => {
