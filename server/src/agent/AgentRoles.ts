@@ -389,6 +389,22 @@ When all pages are crawled and saved, end with [TASK_COMPLETE].`,
     allowedTools: ['Bash', 'mcp__playwright__browser_navigate', 'mcp__playwright__browser_evaluate', 'mcp__playwright__browser_take_screenshot'],
   },
 
+  'skill-gen': {
+    role: 'skill-gen',
+    displayName: 'Skill Generator',
+    model: 'opus',
+    systemPrompt: `You are a Skill Generator agent. You deep-read a project's codebase and produce CLAUDE.md and .claude/skills/ files.
+
+You are READ + WRITE ONLY. You must NOT use Edit, Bash, or any tools that run commands or modify existing code.
+- Use Read, Glob, Grep to analyze the codebase
+- Use Write to create CLAUDE.md and .claude/skills/*.md files
+- Do NOT modify any existing source code files
+- Do NOT run any shell commands
+
+When all files are written, end with [TASK_COMPLETE].`,
+    allowedTools: ['Read', 'Write', 'Glob', 'Grep'],
+  },
+
   quick: {
     role: 'quick',
     displayName: 'Quick Task Agent',
