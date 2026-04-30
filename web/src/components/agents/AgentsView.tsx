@@ -583,171 +583,176 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
         <div className="w-56 flex-shrink-0 flex flex-col overflow-hidden border border-border rounded-lg">
           {/* Agent list */}
           <div className="flex-1 overflow-y-auto space-y-2 p-1">
-            {agents.map(agent => {
-              const isSelected = selectedAgentId === agent.id;
-              const currentTask = agent.currentTaskId ? tasks.find(t => t.id === agent.currentTaskId) : null;
-              const agentOutputs = outputs[agent.id] || [];
-              const toolCalls = agentOutputs.filter(o => o.streamType === 'tool_use').length;
-              const agentProgress = progress[agent.id];
-              const canResume = agent.status === 'error' && agent.sessionId && agent.role !== 'axure';
+            {(() => {
+              // Group agents by taskId (2+ agents with same taskId → group)
+              const taskGroups = new Map<string, typeof agents>();
+              const standalone: typeof agents = [];
+              for (const agent of agents) {
+                if (agent.currentTaskId) {
+                  const g = taskGroups.get(agent.currentTaskId) || [];
+                  g.push(agent);
+                  taskGroups.set(agent.currentTaskId, g);
+                } else {
+                  standalone.push(agent);
+                }
+              }
+              const groups: Array<{ taskId: string; task: typeof tasks[0] | undefined; agents: typeof agents }> = [];
+              for (const [tid, ga] of taskGroups) {
+                if (ga.length > 1) {
+                  groups.push({ taskId: tid, task: tasks.find(t => t.id === tid), agents: ga });
+                } else {
+                  standalone.push(...ga);
+                }
+              }
 
-              return (
-                <div
-                  key={agent.id}
-                  className={`relative px-3 py-2.5 cursor-pointer rounded-lg border transition-all ${confirmDeleteAgentId !== agent.id ? 'group' : ''}
-                    ${isSelected
-                      ? 'bg-primary/8 border-primary/30 shadow-sm shadow-primary/5'
-                      : confirmDeleteAgentId === agent.id
-                        ? 'bg-card border-border/60'
-                        : 'bg-card border-border/60 hover:bg-muted/50 hover:border-border'
-                    }
-                  `}
-                  onClick={() => {
-                    // Fullstack task: auto-switch to grid showing all agents for this task
-                    if (agent.currentTaskId) {
-                      const task = tasks.find(t => t.id === agent.currentTaskId);
-                      if (task?.label === 'fullstack') {
-                        const taskAgents = agents.filter(a => a.currentTaskId === agent.currentTaskId);
-                        if (taskAgents.length > 1) {
-                          setViewMode('grid');
-                          setGridAgentIds(taskAgents.map(a => a.id));
-                          return;
-                        }
-                      }
-                    }
-                    setRightPanel({ mode: 'terminal', agentId: agent.id });
-                  }}
-                >
-                  {/* Row 1: role badge + status + progress ring */}
-                  <div className="flex items-center gap-1.5 mb-1.5">
-                    <span className={`text-[10px] font-bold capitalize px-1.5 py-0.5 rounded ${
-                      ROLE_BG[agent.role] || 'bg-muted text-muted-foreground'
-                    }`}>
-                      {agent.role}
-                    </span>
-                    {!agentProgress && (
+              const renderAgentCard = (agent: typeof agents[0], compact: boolean) => {
+                const isSelected = selectedAgentId === agent.id;
+                const ct = agent.currentTaskId ? tasks.find(t => t.id === agent.currentTaskId) : null;
+                const outs = outputs[agent.id] || [];
+                const tc = outs.filter(o => o.streamType === 'tool_use').length;
+                const ap = progress[agent.id];
+                return (
+                  <div
+                    key={agent.id}
+                    className={`relative px-2.5 py-1.5 cursor-pointer rounded-md border transition-all ${
+                      isSelected ? 'bg-primary/8 border-primary/30' : 'bg-card/50 border-transparent hover:bg-muted/50'
+                    }`}
+                    onClick={() => setRightPanel({ mode: 'terminal', agentId: agent.id })}
+                  >
+                    <div className="flex items-center gap-1.5">
                       <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
                         agent.status === 'running' ? 'bg-green-500 animate-breathe' :
-                        agent.status === 'error' ? 'bg-red-500' :
-                        agent.status === 'stopped' ? 'bg-gray-500' :
-                        'bg-yellow-500'
+                        agent.status === 'error' ? 'bg-red-500' : 'bg-gray-500'
                       }`} />
-                    )}
-                    <div className="ml-auto flex items-center gap-1.5">
-                      <span className="text-[9px] text-muted-foreground">{toolCalls} tools</span>
-                      {agentProgress && agent.status === 'running' && (
-                        <ProgressRing percentage={agentProgress.percentage} size={36} strokeWidth={3} phase={agentProgress.currentPhase} />
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Row 2: agent title + delete */}
-                  <div className="flex items-center justify-between mb-1">
-                    <div className="flex-1 min-w-0">
-                      {editingTitleId === agent.id ? (
-                        <input
-                          type="text"
-                          value={editTitleDraft}
-                          onChange={(e) => setEditTitleDraft(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') handleRenameAgent(agent.id, editTitleDraft);
-                            if (e.key === 'Escape') setEditingTitleId(null);
-                          }}
-                          onBlur={() => handleRenameAgent(agent.id, editTitleDraft)}
-                          className="w-full bg-muted border border-primary/40 rounded px-1 py-0.5 text-[11px] outline-none"
-                          autoFocus
-                          onClick={(e) => e.stopPropagation()}
-                        />
-                      ) : (
-                        <div
-                          className="text-xs text-foreground font-semibold truncate leading-tight cursor-text"
-                          title={`${agent.title || currentTask?.title || '手動新增'} (double-click to rename)`}
-                          onDoubleClick={(e) => {
-                            e.stopPropagation();
-                            setEditTitleDraft(agent.title || currentTask?.title || '');
-                            setEditingTitleId(agent.id);
-                          }}
-                        >
-                          {agent.title || currentTask?.title || '手動新增'}
-                        </div>
-                      )}
-                    </div>
-                    {/* Delete button (non-running only) */}
-                    {agent.status !== 'running' && (
-                      confirmDeleteAgentId === agent.id ? (
-                        <div className="relative z-20 flex items-center gap-1 flex-shrink-0 ml-2" onClick={(e) => e.stopPropagation()}>
-                          <button
-                            onClick={() => { handleDeleteAgent(agent.id); setConfirmDeleteAgentId(null); }}
-                            className="text-[10px] text-red-400 hover:text-red-300 font-semibold px-1.5 py-0.5 bg-red-500/20 hover:bg-red-500/30 rounded whitespace-nowrap transition-colors"
-                          >
-                            刪除
-                          </button>
-                          <button
-                            onClick={() => setConfirmDeleteAgentId(null)}
-                            className="text-[10px] text-muted-foreground hover:text-foreground px-1 py-0.5 transition-colors"
-                          >
-                            取消
-                          </button>
-                        </div>
-                      ) : (
-                        <button
-                          onClick={(e) => { e.stopPropagation(); setConfirmDeleteAgentId(agent.id); }}
-                          className="flex-shrink-0 ml-2 p-1 rounded text-red-400/60 hover:text-red-400 hover:bg-red-500/10 transition-all"
-                          title="Remove agent"
-                        >
-                          <IconTrash className="w-3.5 h-3.5" />
-                        </button>
-                      )
-                    )}
-                  </div>
-
-                  {/* Row 3: phase text + source badge */}
-                  <div className="flex items-center gap-1">
-                    {agentProgress?.currentPhase && agent.status === 'running' ? (
-                      <span className="text-[10px] text-primary/70 truncate flex-1 font-medium" title={agentProgress.currentPhase}>
-                        {agentProgress.currentPhase}
+                      <span className={`text-[10px] font-bold capitalize px-1 py-0.5 rounded ${ROLE_BG[agent.role] || 'bg-muted text-muted-foreground'}`}>
+                        {agent.role}
                       </span>
-                    ) : currentTask && (
-                      <div className="flex items-center gap-1">
-                        {currentTask.source === 'asana' && (
-                          <span className="text-[8px] px-1 rounded bg-orange-500/15 text-orange-400 font-medium">Asana</span>
-                        )}
-                        {currentTask.source === 'manual' && (
-                          <span className="text-[8px] px-1 rounded bg-muted text-muted-foreground font-medium">Manual</span>
-                        )}
+                      <span className="ml-auto text-[9px] text-muted-foreground">{tc} tools</span>
+                      {ap && agent.status === 'running' && (
+                        <ProgressRing percentage={ap.percentage} size={28} strokeWidth={2.5} phase={ap.currentPhase} />
+                      )}
+                    </div>
+                    {!compact && (
+                      <div className="text-[11px] text-foreground font-medium truncate mt-1">
+                        {agent.title || ct?.title || '手動新增'}
                       </div>
                     )}
                   </div>
+                );
+              };
 
-                  {/* Resume button for error + sessionId */}
-                  {canResume && (
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        client?.send({
-                          type: 'agent.resume',
-                          id: crypto.randomUUID(),
-                          timestamp: new Date().toISOString(),
-                          payload: { agentId: agent.id },
-                        });
-                        addToast({ type: 'info', title: 'Resuming agent...' });
-                      }}
-                      className="flex items-center gap-1 px-2 py-1 text-[10px] font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20 rounded hover:bg-amber-500/20 transition-colors mt-1"
-                    >
-                      <IconPlay className="w-3 h-3" />
-                      Resume
-                    </button>
+              return (
+                <>
+                  {/* Grouped agents (same task) */}
+                  {groups.map(g => {
+                    const hasRunning = g.agents.some(a => a.status === 'running');
+                    const isFullstack = g.task?.label === 'fullstack';
+                    return (
+                      <div key={g.taskId} className="rounded-lg border border-border/60 bg-card overflow-hidden group">
+                        {/* Group header */}
+                        <div
+                          className="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-muted/50 transition-colors"
+                          onClick={() => {
+                            if (isFullstack && g.agents.length > 1) {
+                              setViewMode('grid');
+                              setGridAgentIds(g.agents.map(a => a.id));
+                            } else {
+                              setRightPanel({ mode: 'terminal', agentId: g.agents[0].id });
+                            }
+                          }}
+                        >
+                          <div className="flex items-center gap-1.5 min-w-0">
+                            {hasRunning && <span className="w-2 h-2 rounded-full bg-green-500 animate-breathe flex-shrink-0" />}
+                            <span className="text-xs font-semibold text-foreground truncate">{g.task?.title || '未知任務'}</span>
+                            <span className="text-[9px] text-muted-foreground flex-shrink-0">{g.agents.length} agents</span>
+                          </div>
+                          {!hasRunning && (
+                            confirmDeleteAgentId === `group-${g.taskId}` ? (
+                              <div className="flex items-center gap-1 flex-shrink-0 ml-2" onClick={e => e.stopPropagation()}>
+                                <button
+                                  onClick={() => { g.agents.forEach(a => handleDeleteAgent(a.id)); setConfirmDeleteAgentId(null); }}
+                                  className="text-[10px] text-red-400 font-semibold px-1.5 py-0.5 bg-red-500/20 hover:bg-red-500/30 rounded transition-colors"
+                                >全部刪除</button>
+                                <button onClick={() => setConfirmDeleteAgentId(null)} className="text-[10px] text-muted-foreground hover:text-foreground px-1 py-0.5">取消</button>
+                              </div>
+                            ) : (
+                              <button
+                                onClick={e => { e.stopPropagation(); setConfirmDeleteAgentId(`group-${g.taskId}`); }}
+                                className="flex-shrink-0 ml-2 p-1 rounded text-red-400/60 hover:text-red-400 hover:bg-red-500/10 transition-all opacity-0 group-hover:opacity-100"
+                                title="Delete all agents in this group"
+                              >
+                                <IconTrash className="w-3.5 h-3.5" />
+                              </button>
+                            )
+                          )}
+                        </div>
+                        <div className="px-1 pb-1 space-y-0.5">
+                          {g.agents.map(a => renderAgentCard(a, true))}
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  {/* Standalone agents */}
+                  {standalone.map(agent => {
+                    const isSelected = selectedAgentId === agent.id;
+                    const ct = agent.currentTaskId ? tasks.find(t => t.id === agent.currentTaskId) : null;
+                    const outs = outputs[agent.id] || [];
+                    const tc = outs.filter(o => o.streamType === 'tool_use').length;
+                    const ap = progress[agent.id];
+                    const canResume = agent.status === 'error' && agent.sessionId && agent.role !== 'axure';
+                    return (
+                      <div
+                        key={agent.id}
+                        className={`relative px-3 py-2.5 cursor-pointer rounded-lg border transition-all group
+                          ${isSelected ? 'bg-primary/8 border-primary/30 shadow-sm shadow-primary/5' : 'bg-card border-border/60 hover:bg-muted/50 hover:border-border'}
+                        `}
+                        onClick={() => setRightPanel({ mode: 'terminal', agentId: agent.id })}
+                      >
+                        <div className="flex items-center gap-1.5 mb-1">
+                          <span className={`text-[10px] font-bold capitalize px-1.5 py-0.5 rounded ${ROLE_BG[agent.role] || 'bg-muted text-muted-foreground'}`}>{agent.role}</span>
+                          <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+                            agent.status === 'running' ? 'bg-green-500 animate-breathe' : agent.status === 'error' ? 'bg-red-500' : 'bg-gray-500'
+                          }`} />
+                          <div className="ml-auto flex items-center gap-1.5">
+                            <span className="text-[9px] text-muted-foreground">{tc} tools</span>
+                            {ap && agent.status === 'running' && <ProgressRing percentage={ap.percentage} size={36} strokeWidth={3} phase={ap.currentPhase} />}
+                          </div>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs text-foreground font-semibold truncate">{agent.title || ct?.title || '手動新增'}</span>
+                          {agent.status !== 'running' && (
+                            confirmDeleteAgentId === agent.id ? (
+                              <div className="flex items-center gap-1 flex-shrink-0 ml-2" onClick={e => e.stopPropagation()}>
+                                <button onClick={() => { handleDeleteAgent(agent.id); setConfirmDeleteAgentId(null); }} className="text-[10px] text-red-400 font-semibold px-1.5 py-0.5 bg-red-500/20 hover:bg-red-500/30 rounded transition-colors">刪除</button>
+                                <button onClick={() => setConfirmDeleteAgentId(null)} className="text-[10px] text-muted-foreground hover:text-foreground px-1">取消</button>
+                              </div>
+                            ) : (
+                              <button onClick={e => { e.stopPropagation(); setConfirmDeleteAgentId(agent.id); }} className="flex-shrink-0 ml-2 p-1 rounded text-red-400/60 hover:text-red-400 hover:bg-red-500/10 transition-all opacity-0 group-hover:opacity-100" title="Remove agent">
+                                <IconTrash className="w-3.5 h-3.5" />
+                              </button>
+                            )
+                          )}
+                        </div>
+                        {canResume && (
+                          <button
+                            onClick={e => { e.stopPropagation(); client?.send({ type: 'agent.resume', id: crypto.randomUUID(), timestamp: new Date().toISOString(), payload: { agentId: agent.id } }); addToast({ type: 'info', title: 'Resuming agent...' }); }}
+                            className="flex items-center gap-1 px-2 py-1 text-[10px] font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20 rounded hover:bg-amber-500/20 transition-colors mt-1"
+                          ><IconPlay className="w-3 h-3" />Resume</button>
+                        )}
+                      </div>
+                    );
+                  })}
+
+                  {agents.length === 0 && (
+                    <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
+                      <span className="text-2xl mb-2 opacity-30">🤖</span>
+                      <span className="text-xs">No agents yet</span>
+                    </div>
                   )}
-                </div>
+                </>
               );
-            })}
-
-            {agents.length === 0 && (
-              <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
-                <span className="text-2xl mb-2 opacity-30">🤖</span>
-                <span className="text-xs">No agents yet</span>
-              </div>
-            )}
+            })()}
           </div>
 
         </div>
