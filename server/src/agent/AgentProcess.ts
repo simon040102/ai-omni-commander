@@ -140,11 +140,14 @@ export class AgentProcess extends EventEmitter {
       }],
     };
 
+    // Resolve model: opus → claude-opus-4-6[1m] for 1M context
+    const resolvedModel = this.config.model === 'opus' ? 'claude-opus-4-6[1m]' : this.config.model;
+
     this._query = query({
       prompt: messageGenerator(),
       options: {
         cwd: this.config.workingDir,
-        model: this.config.model,
+        model: resolvedModel,
         systemPrompt: this.config.systemPrompt,
         allowedTools: this.config.allowedTools,
         permissionMode,
