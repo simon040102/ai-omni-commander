@@ -80,8 +80,8 @@ export function Sidebar({ currentView, onViewChange, pinned, onTogglePin }: Side
 
   const handleMouseLeave = useCallback(() => {
     if (pinned) return;
-    // Small delay to prevent flicker
-    hoverTimer.current = setTimeout(() => setHovered(false), 200);
+    if (hoverTimer.current) clearTimeout(hoverTimer.current);
+    hoverTimer.current = setTimeout(() => setHovered(false), 300);
   }, [pinned]);
   const rawProjects = useProjectStore(s => s.projects);
   const currentProjectId = useProjectStore(s => s.currentProjectId);

@@ -670,7 +670,7 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
                           </div>
                           {!hasRunning && (
                             confirmDeleteAgentId === `group-${g.taskId}` ? (
-                              <div className="flex items-center gap-1 flex-shrink-0 ml-2" onClick={e => e.stopPropagation()}>
+                              <div className="relative z-20 flex items-center gap-1 flex-shrink-0 ml-2" onClick={e => e.stopPropagation()}>
                                 <button
                                   onClick={() => { g.agents.forEach(a => handleDeleteAgent(a.id)); setConfirmDeleteAgentId(null); }}
                                   className="text-[10px] text-red-400 font-semibold px-1.5 py-0.5 bg-red-500/20 hover:bg-red-500/30 rounded transition-colors"
@@ -725,7 +725,7 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
                           <span className="text-xs text-foreground font-semibold truncate">{agent.title || ct?.title || '手動新增'}</span>
                           {agent.status !== 'running' && (
                             confirmDeleteAgentId === agent.id ? (
-                              <div className="flex items-center gap-1 flex-shrink-0 ml-2" onClick={e => e.stopPropagation()}>
+                              <div className="relative z-20 flex items-center gap-1 flex-shrink-0 ml-2" onClick={e => e.stopPropagation()}>
                                 <button onClick={() => { handleDeleteAgent(agent.id); setConfirmDeleteAgentId(null); }} className="text-[10px] text-red-400 font-semibold px-1.5 py-0.5 bg-red-500/20 hover:bg-red-500/30 rounded transition-colors">刪除</button>
                                 <button onClick={() => setConfirmDeleteAgentId(null)} className="text-[10px] text-muted-foreground hover:text-foreground px-1">取消</button>
                               </div>
