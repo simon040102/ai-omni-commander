@@ -32,9 +32,9 @@ export interface ModelInfo {
  */
 export const CURRENT_MODELS: Record<string, ModelInfo> = {
   'opus': {
-    id: 'claude-opus-4-6',
+    id: 'claude-opus-4-6[1m]',
     alias: 'opus',
-    displayName: 'Claude Opus 4.6',
+    displayName: 'Claude Opus 4.6 (1M)',
     family: 'opus',
     version: '4.6',
     pricing: { inputPerMTok: 5, outputPerMTok: 25 },
