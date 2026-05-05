@@ -296,17 +296,8 @@ export function useWebSocket() {
               title: 'Agent completed',
               message: `Cost: $${((payload['costUsd'] as number) || 0).toFixed(4)} | ${(totalTokens / 1000).toFixed(1)}k tokens`,
             });
-            // Free memory — outputs are persisted in DB and reloaded on demand
-            // But keep outputs for fullstack agents (they share a grid view)
-            const { agents: allAgentsNow } = useProjectStore.getState();
-            const { tasks: allTasksNow } = useProjectStore.getState();
-            const completedAgent = allAgentsNow.find(a => a.id === completedAgentId);
-            const agentTask = completedAgent?.currentTaskId
-              ? allTasksNow.find(t => t.id === completedAgent.currentTaskId)
-              : null;
-            if (agentTask?.label !== 'fullstack') {
-              clearOutputs(completedAgentId);
-            }
+            // Keep outputs visible — user expects to see terminal content after completion.
+            // Outputs are also persisted in DB and reloaded on project switch.
             break;
           }
 
