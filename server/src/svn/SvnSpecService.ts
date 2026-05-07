@@ -658,10 +658,10 @@ function encodeSvnUrlNonAscii(url: string): string {
  * Returns the first match, or null if none found.
  */
 export function extractFunctionCode(text: string): string | null {
-  // Match: 2+ letters (case-insensitive) + optional digits (at least 2 chars total)
-  // Must be at word boundary or start of string to avoid matching random substrings
-  const match = text.match(/\b([A-Za-z]{2,}[0-9]*)\b/);
-  if (match && match[1]!.length >= 2) {
+  // Match: 2+ letters + digits (e.g., DF04, OV0101, IC01)
+  // Use lookahead for non-alphanumeric or end-of-string to handle cases like "DF04_發文單"
+  const match = text.match(/(?:^|[^A-Za-z])([A-Za-z]{2,}[0-9]+)(?=[^A-Za-z0-9]|$)/);
+  if (match && match[1]!.length >= 3) {
     return match[1]!.toUpperCase();
   }
   return null;
