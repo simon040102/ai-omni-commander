@@ -42,10 +42,16 @@ const STATUS_STYLES: Record<string, string> = {
 /** Auto-detect document type from filename */
 function detectDocType(file: File): 'SA' | 'SD' | 'image' {
   if (file.type.startsWith('image/')) return 'image';
-  const name = file.name.toLowerCase();
-  // SA patterns: contains SA, 需求, spec, requirement
-  if (/\bsa\b|需求|spec|requirement/i.test(name)) return 'SA';
-  // Everything else defaults to SD
+  const name = file.name;
+  // 前端 → SA (even if filename contains SD, e.g., "前端SD")
+  if (/前端/.test(name)) return 'SA';
+  // 後端 → SD
+  if (/後端/.test(name)) return 'SD';
+  // Explicit SD
+  if (/\bSD\b|設計|design/i.test(name)) return 'SD';
+  // SA patterns
+  if (/\bSA\b|需求|spec|requirement/i.test(name)) return 'SA';
+  // Default to SD
   return 'SD';
 }
 
