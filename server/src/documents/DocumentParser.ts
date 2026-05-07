@@ -69,7 +69,7 @@ export class DocumentParser {
     td.use(gfm);
 
     // Mammoth wraps cell content in <p> tags; strip them so GFM table plugin can parse cells
-    const cleanedHtml = result.value.replace(
+    let cleanedHtml = result.value.replace(
       /(<(?:td|th)[^>]*>)([\s\S]*?)(<\/(?:td|th)>)/gi,
       (_match, open: string, content: string, close: string) => {
         const cleaned = content
@@ -79,6 +79,27 @@ export class DocumentParser {
         return `${open}${cleaned}${close}`;
       },
     );
+
+    // Custom table rule: convert HTML tables to GFM markdown tables directly
+    // (turndown-plugin-gfm requires <thead> which mammoth doesn't produce)
+    td.addRule('htmlTableToGfm', {
+      filter: 'table',
+      replacement(_content: string, node: Node) {
+        const el = node as HTMLElement;
+        const rows = Array.from(el.querySelectorAll('tr'));
+        if (rows.length === 0) return '';
+
+        const parseRow = (tr: Element): string[] =>
+          Array.from(tr.querySelectorAll('td, th')).map(cell => cell.textContent?.trim().replace(/\|/g, '\\|').replace(/\n/g, ' ') || '');
+
+        const headerCells = parseRow(rows[0]);
+        const header = `| ${headerCells.join(' | ')} |`;
+        const separator = `| ${headerCells.map(() => '---').join(' | ')} |`;
+        const bodyRows = rows.slice(1).map(tr => `| ${parseRow(tr).join(' | ')} |`);
+
+        return `\n\n${header}\n${separator}\n${bodyRows.join('\n')}\n\n`;
+      },
+    });
 
     let markdown = td.turndown(cleanedHtml);
 
