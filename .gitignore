@@ -32,5 +32,10 @@ shared/dist/
 # Logs
 *.log
 
+# Test scripts with credentials
+test-*.js
+test-*.mjs
+test-*.ps1
+
 docs/
 *.zip
