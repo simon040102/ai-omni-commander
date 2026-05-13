@@ -32,7 +32,7 @@ export class SkillGenerator {
 
     logger.info({ projectId, workspacePath, workspaceType, mode }, 'Generating workspace skills');
 
-    const prompt = this.buildPrompt(workspaceType, mode);
+    const prompt = this.buildPrompt(workspaceType, mode, hasClaudeMd, hasSkills);
 
     const agentId = await this.agentManager.startAgent({
       projectId,
@@ -79,7 +79,7 @@ export class SkillGenerator {
     setTimeout(() => clearInterval(check), 600000);
   }
 
-  private buildPrompt(workspaceType: 'frontend' | 'backend', mode: 'create' | 'enhance'): string {
+  private buildPrompt(workspaceType: 'frontend' | 'backend', mode: 'create' | 'enhance', hasClaudeMd = false, hasSkills = false): string {
     const lang = workspaceType === 'frontend' ? '前端' : '後端';
 
     const modeInstruction = mode === 'create'

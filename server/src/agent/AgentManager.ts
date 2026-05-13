@@ -69,12 +69,27 @@ export class AgentManager {
     this.watchdogInterval = setInterval(() => this.runWatchdog(), INACTIVITY_CHECK_INTERVAL_MS);
   }
 
+  /** Track zombie resume attempts to prevent infinite loops */
+  private zombieResumeCount = new Map<string, number>();
+  private static readonly MAX_ZOMBIE_RESUMES = 2;
+
   private async runWatchdog(): Promise<void> {
     // --- Zombie check: DB says running but no process exists → auto-resume ---
     const runningInDb = getRunningAgents();
     for (const agent of runningInDb) {
       if (this.processes.has(agent.id)) continue;
-      logger.warn({ agentId: agent.id, status: agent.status }, 'Zombie agent detected — auto-resuming');
+
+      // Limit zombie resume attempts to prevent infinite loops
+      const zombieCount = this.zombieResumeCount.get(agent.id) ?? 0;
+      if (zombieCount >= AgentManager.MAX_ZOMBIE_RESUMES) {
+        logger.warn({ agentId: agent.id, zombieCount }, 'Max zombie resumes reached — marking stopped');
+        this.zombieResumeCount.delete(agent.id);
+        updateAgent(agent.id, { status: 'stopped', pid: null });
+        continue;
+      }
+      this.zombieResumeCount.set(agent.id, zombieCount + 1);
+
+      logger.warn({ agentId: agent.id, status: agent.status, attempt: zombieCount + 1 }, 'Zombie agent detected — auto-resuming');
       try {
         await this.eventBus.emit({
           type: EventTypes.AGENT_OUTPUT,
@@ -83,13 +98,14 @@ export class AgentManager {
             agentId: agent.id,
             projectId: agent.projectId,
             streamType: 'system',
-            content: '[WATCHDOG] Agent process 已消失，自動嘗試繼續執行...',
+            content: `[WATCHDOG] Agent process 已消失，自動嘗試繼續執行... (${zombieCount + 1}/${AgentManager.MAX_ZOMBIE_RESUMES})`,
           },
           timestamp: new Date().toISOString(),
         });
         await this.resumeAgent(agent.id, AUTO_RESUME_MESSAGE);
       } catch (err) {
         logger.error({ err, agentId: agent.id }, 'Zombie auto-resume failed — marking stopped');
+        this.zombieResumeCount.delete(agent.id);
         updateAgent(agent.id, { status: 'stopped', pid: null });
         if (agent.currentTaskId) updateTask(agent.currentTaskId, { status: 'failed' });
         await this.eventBus.emit({
@@ -301,6 +317,7 @@ export class AgentManager {
     this.nudgeCount.delete(agentId);
     this.autoResumeCount.delete(agentId);
     this.taskDoneAgents.delete(agentId);
+    this.zombieResumeCount.delete(agentId);
     this.skipTaskStatusAgents.delete(agentId);
     this.initialPrompts.delete(agentId);
     this.progressDetector.clear(agentId);
