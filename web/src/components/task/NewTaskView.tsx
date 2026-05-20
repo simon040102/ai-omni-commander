@@ -490,7 +490,7 @@ export function NewTaskView({ onViewChange }: NewTaskViewProps) {
                                   totalInputTokens={agent.totalInputTokens}
                                   totalOutputTokens={agent.totalOutputTokens}
                                   onSendCommand={(cmd) => handleSendCommand(agent.id, cmd)}
-                                  onAction={(action) => handleAgentAction(agent.id, action)}
+                                  onAction={(agentId, action) => handleAgentAction(agentId, action)}
                                   compact
                                 />
                               </div>

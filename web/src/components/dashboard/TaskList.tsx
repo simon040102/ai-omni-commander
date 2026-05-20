@@ -201,7 +201,9 @@ export function TaskList({ selectedModel, onViewChange }: TaskListProps) {
       if (autoExecuteAfterCreate.current) {
         const { testOptions, executionRunId } = autoExecuteAfterCreate.current;
         autoExecuteAfterCreate.current = null;
-        handleExecuteTaskRef.current(newTask.id, undefined, [], testOptions, executionRunId);
+        if (handleExecuteTaskRef.current) {
+          handleExecuteTaskRef.current(newTask.id, undefined, [], testOptions, executionRunId);
+        }
       }
 
       autoExpandNextTask.current = false;

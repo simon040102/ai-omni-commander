@@ -239,6 +239,7 @@ export function useWebSocket() {
               sessionId: (payload['sessionId'] as string) || null,
               totalCostUsd: 0,
               totalTurns: 0,
+              createdAt: new Date().toISOString(),
             });
             addToast({ type: 'info', title: 'Agent started', message: `${payload['role']} agent is now running` });
             break;

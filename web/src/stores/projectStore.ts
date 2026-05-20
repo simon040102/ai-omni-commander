@@ -58,6 +58,7 @@ export interface Agent {
   totalTurns: number;
   totalInputTokens?: number;
   totalOutputTokens?: number;
+  createdAt: string;
 }
 
 export interface DependencyEdge {
