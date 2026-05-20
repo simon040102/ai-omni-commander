@@ -200,7 +200,7 @@ describe('AgentManager', () => {
   });
 
   describe('taskDoneAgents — no auto-resume after user input', () => {
-    it('does NOT clear taskDoneAgents when sending input', async () => {
+    it('clears taskDoneAgents but exhausts autoResumeCount when sending input', async () => {
       mockGetAgent.mockReturnValue({
         id: 'agent-1', role: 'frontend', projectId: 'proj-1',
         sessionId: 'sess-1', status: 'stopped', taskId: 'task-1',
@@ -214,8 +214,13 @@ describe('AgentManager', () => {
       await vi.advanceTimersByTimeAsync(1600);
       await p;
 
-      // taskDoneAgents should still contain agent-1
-      expect((manager as any).taskDoneAgents.has('agent-1')).toBe(true);
+      // taskDoneAgents is cleared (PTY mode needs this so old [TASK_COMPLETE] in JSONL
+      // doesn't re-trigger stop after resume)
+      expect((manager as any).taskDoneAgents.has('agent-1')).toBe(false);
+
+      // autoResumeCount is exhausted so the agent won't loop after answering user's question
+      const maxResumes = 3; // MAX_AUTO_RESUMES
+      expect((manager as any).autoResumeCount.get('agent-1')).toBe(maxResumes);
     });
 
     it('handleAgentComplete skips auto-resume for taskDone agents', async () => {

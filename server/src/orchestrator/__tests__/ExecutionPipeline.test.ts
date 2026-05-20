@@ -24,6 +24,7 @@ const mockEventBus = {
 // Mock DocumentParser
 const mockDocumentParser = {
   getDocuments: vi.fn().mockReturnValue([]),
+  getUploadDir: vi.fn().mockReturnValue('/tmp/uploads'),
 };
 
 import { ExecutionPipeline } from '../ExecutionPipeline.js';

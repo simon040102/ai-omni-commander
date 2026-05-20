@@ -262,6 +262,15 @@ export function runMigrations(db: Database.Database): void {
     db.exec("ALTER TABLE documents ADD COLUMN doc_type TEXT CHECK(doc_type IN ('SA', 'SD', 'other')) DEFAULT 'other'");
   }
 
+  // Migration: add working_dir to agents
+  {
+    const agentCols2 = db.prepare("PRAGMA table_info(agents)").all() as Array<{ name: string }>;
+    const names2 = agentCols2.map(c => c.name);
+    if (!names2.includes('working_dir')) {
+      db.exec("ALTER TABLE agents ADD COLUMN working_dir TEXT");
+    }
+  }
+
   // Migration: add token tracking columns to agents
   const agentCols = db.prepare("PRAGMA table_info(agents)").all() as Array<{ name: string }>;
   if (!agentCols.some(c => c.name === 'total_input_tokens')) {

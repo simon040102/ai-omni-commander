@@ -48,6 +48,8 @@ export interface Agent {
   lastHeartbeat: string | null;
   /** JSON-serialized flow plan (steps + progress) persisted across restarts */
   flowPlanJson: string | null;
+  /** Working directory used when spawning this agent (may differ from project.workingDir) */
+  workingDir: string | null;
   createdAt: string;
   updatedAt: string;
 }
