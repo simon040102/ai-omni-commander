@@ -520,6 +520,21 @@ export function TerminalOutput({ outputs, title, role, status, agentId, projectI
                 return <ThinkingBlock key={stableKey} content={output.content} defaultExpanded={false} />;
               }
 
+              // For tool_use, resolve toolName and displayContent:
+              // - Live streaming: output.toolName is set directly
+              // - History (DB/JSONL): content is JSON string {"tool":"X","input":{...}}
+              let resolvedToolName = output.toolName;
+              let toolDisplayContent = output.content;
+              if (output.streamType === 'tool_use' && !resolvedToolName && output.content) {
+                try {
+                  const parsed = JSON.parse(output.content) as { tool?: string; input?: unknown };
+                  if (parsed.tool) {
+                    resolvedToolName = parsed.tool;
+                    toolDisplayContent = parsed.input !== undefined ? JSON.stringify(parsed.input, null, 2) : '';
+                  }
+                } catch { /* not JSON, display as-is */ }
+              }
+
               return (
                 <div key={stableKey} className={`${STREAM_COLORS[output.streamType] || 'text-gray-300'} leading-5 whitespace-pre-wrap break-all`}>
                   {output.streamType === 'error' && (
@@ -528,10 +543,10 @@ export function TerminalOutput({ outputs, title, role, status, agentId, projectI
                   {output.streamType === 'system' && (
                     <span className="opacity-50">SYS </span>
                   )}
-                  {output.streamType === 'tool_use' && output.toolName && (
+                  {output.streamType === 'tool_use' && resolvedToolName && (
                     <>
                       <span className="inline-flex items-center px-1.5 py-0 rounded bg-cyan-500/10 text-cyan-600 dark:text-cyan-500 text-[10px] font-medium mr-1.5">
-                        {output.toolName}
+                        {resolvedToolName}
                       </span>
                       {model && (
                         <span className="text-[9px] text-purple-500/70 mr-1.5">
@@ -543,7 +558,7 @@ export function TerminalOutput({ outputs, title, role, status, agentId, projectI
                   {output.streamType === 'text' && hasMarkdown(output.content) ? (
                     <MarkdownContent content={output.content} />
                   ) : (
-                    output.content
+                    output.streamType === 'tool_use' ? toolDisplayContent : output.content
                   )}
                 </div>
               );

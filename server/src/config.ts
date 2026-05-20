@@ -21,6 +21,8 @@ export interface Config {
   asanaPat: string | null;
   /** Optional: Filter tasks to specific Asana workspace */
   asanaWorkspace: string | null;
+  /** Agent backend: 'pty' (interactive, subscription billing) or 'sdk' (programmatic, SDK credit) */
+  agentBackend: 'pty' | 'sdk';
 }
 
 function detectClaudePath(): string {
@@ -67,6 +69,7 @@ export function getConfig(): Config {
     aiContextDir: path.join(PROJECT_ROOT, '.ai_context'),
     asanaPat: process.env['ASANA_PAT'] || null,
     asanaWorkspace: process.env['ASANA_WORKSPACE'] || null,
+    agentBackend: (process.env['AGENT_BACKEND'] as 'pty' | 'sdk') || 'pty',
   };
 
   return cachedConfig;

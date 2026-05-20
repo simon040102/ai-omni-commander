@@ -1,8 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { query } from '@anthropic-ai/claude-agent-sdk';
-import type { SDKAssistantMessage } from '@anthropic-ai/claude-agent-sdk';
+import os from 'node:os';
+import { PtyController } from '../agent/PtyController.js';
+import { SessionResolver } from '../agent/SessionResolver.js';
+import { JsonlWatcher } from '../agent/JsonlWatcher.js';
+import type { JsonlAssistantMessage } from '@omni/shared';
 import { createChildLogger } from '../utils/logger.js';
 
 const logger = createChildLogger('SaFlowAnalyzer');
@@ -26,20 +29,99 @@ export class SaFlowAnalyzer {
     fs.mkdirSync(this.flowsDir, { recursive: true });
   }
 
+  /**
+   * Call Claude via PTY interactive session (walks subscription billing).
+   * After getting the result, cleans up the temporary session from Desktop.
+   */
   private async callClaude(prompt: string, model = 'claude-sonnet-4-6'): Promise<string> {
-    let text = '';
-    const q = query({
-      prompt,
-      options: { model, permissionMode: 'bypassPermissions' },
-    });
-    for await (const msg of q) {
-      if (msg.type === 'assistant') {
-        const m = msg as SDKAssistantMessage;
-        for (const block of m.message.content) {
-          if (block.type === 'text') text += block.text;
-        }
+    const cwd = os.tmpdir();
+    const resolvedModel = model === 'opus' ? 'claude-opus-4-6[1m]' : model;
+
+    // Snapshot existing sessions
+    const knownSessions = SessionResolver.snapshotSessions(cwd);
+
+    // Spawn claude in interactive mode
+    const pty = new PtyController();
+    const cleanEnv = { ...process.env } as Record<string, string>;
+    delete cleanEnv['CLAUDECODE'];
+    for (const key of Object.keys(cleanEnv)) {
+      if (key.startsWith('VSCODE_') || key === 'TERM_PROGRAM') {
+        delete cleanEnv[key];
       }
     }
+
+    await pty.spawn('claude', [
+      '--model', resolvedModel,
+      '--allowedTools', 'Read,Write,Edit,Bash,Glob,Grep',
+    ], { cwd, env: cleanEnv });
+
+    // Wait for CLI to show input prompt (❯) before typing
+    await pty.waitForReady(15000);
+    await pty.typeAndSubmit(prompt);
+
+    // Wait for session JSONL to appear
+    let sessionId: string | null = null;
+    let jsonlPath: string | null = null;
+    try {
+      const session = await SessionResolver.waitForNewSession(cwd, knownSessions, 15000);
+      sessionId = session.sessionId;
+      jsonlPath = session.jsonlPath;
+    } catch {
+      logger.warn('Failed to detect session for SA flow analysis');
+    }
+
+    // Wait for completion (assistant message with stop_reason: end_turn)
+    let text = '';
+    const maxWait = 120000; // 2 min timeout
+    const start = Date.now();
+
+    if (jsonlPath) {
+      const watcher = new JsonlWatcher(jsonlPath);
+      text = await new Promise<string>((resolve) => {
+        let result = '';
+        let resolved = false;
+
+        watcher.on('message', (msg) => {
+          if (msg.type === 'assistant') {
+            const asst = msg as JsonlAssistantMessage;
+            for (const block of (asst.message?.content || [])) {
+              if (block.type === 'text') result += block.text;
+            }
+            // Check if turn is complete
+            if (asst.message?.stop_reason === 'end_turn' && !resolved) {
+              resolved = true;
+              watcher.stop();
+              resolve(result);
+            }
+          }
+        });
+
+        watcher.start();
+
+        // Timeout
+        setTimeout(() => {
+          if (!resolved) {
+            resolved = true;
+            watcher.stop();
+            resolve(result);
+          }
+        }, maxWait);
+      });
+    } else {
+      // Fallback: wait fixed time
+      await new Promise(r => setTimeout(r, 30000));
+    }
+
+    // Stop pty
+    pty.write('/exit\n');
+    await new Promise(r => setTimeout(r, 1000));
+    if (pty.isAlive) await pty.gracefulStop(3000);
+
+    // Clean up session from Desktop (don't pollute Recent Conversations)
+    if (sessionId) {
+      SessionResolver.cleanupSession(cwd, sessionId);
+    }
+
     return text;
   }
 

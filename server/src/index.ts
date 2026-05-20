@@ -3,7 +3,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import express from 'express';
-import { startup as warmupSDK } from '@anthropic-ai/claude-agent-sdk';
 import { getConfig, reloadAsanaPat } from './config.js';
 import { getDb } from './db/connection.js';
 import { getProject } from './db/queries/projects.js';
@@ -641,12 +640,11 @@ async function main() {
   const contractWatcher = new ContractWatcher(config.aiContextDir, eventBus, 'default');
   contractWatcher.start();
 
-  // 8. Pre-warm Claude Agent SDK (makes first agent spawn ~20x faster)
-  warmupSDK().then(() => {
-    logger.info('Claude Agent SDK pre-warmed');
-  }).catch((err) => {
-    logger.warn({ err }, 'SDK pre-warm failed (non-fatal)');
-  });
+  // 8. Log agent backend mode
+  logger.info({ agentBackend: config.agentBackend }, 'Agent backend mode');
+
+  // 8b. Start VSCode sync poller (5s interval for stopped agents)
+  agentManager.startVsCodeSyncPoller();
 
   // 9. Listen
   httpServer.listen(config.port, () => {

@@ -10,18 +10,20 @@ export function createAgent(data: {
   systemPrompt?: string;
   model?: string;
   allowedTools?: string[];
+  workingDir?: string;
 }): Agent {
   const db = getDb();
   const id = data.id || genId();
   db.prepare(`
-    INSERT INTO agents (id, project_id, role, title, system_prompt, model, allowed_tools)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO agents (id, project_id, role, title, system_prompt, model, allowed_tools, working_dir)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id, data.projectId, data.role,
     data.title || null,
     data.systemPrompt || null,
     data.model || 'sonnet',
     data.allowedTools ? JSON.stringify(data.allowedTools) : null,
+    data.workingDir || null,
   );
   return getAgent(id)!;
 }
@@ -63,6 +65,7 @@ export function updateAgent(id: string, data: Partial<{
   lastHeartbeat: string;
   reviewResultJson: string | null;
   flowPlanJson: string | null;
+  workingDir: string | null;
 }>): void {
   const db = getDb();
   const sets: string[] = [];
@@ -81,6 +84,7 @@ export function updateAgent(id: string, data: Partial<{
   if (data.lastHeartbeat !== undefined) { sets.push('last_heartbeat = ?'); values.push(data.lastHeartbeat); }
   if (data.reviewResultJson !== undefined) { sets.push('review_result_json = ?'); values.push(data.reviewResultJson); }
   if (data.flowPlanJson !== undefined) { sets.push('flow_plan_json = ?'); values.push(data.flowPlanJson); }
+  if (data.workingDir !== undefined) { sets.push('working_dir = ?'); values.push(data.workingDir); }
 
   if (sets.length === 0) return;
   sets.push("updated_at = datetime('now')");
@@ -130,6 +134,7 @@ function mapAgent(row: Record<string, unknown>): Agent {
     totalOutputTokens: (row['total_output_tokens'] as number) || 0,
     lastHeartbeat: row['last_heartbeat'] as string | null,
     flowPlanJson: (row['flow_plan_json'] as string) || null,
+    workingDir: (row['working_dir'] as string) || null,
     createdAt: row['created_at'] as string,
     updatedAt: row['updated_at'] as string,
   };

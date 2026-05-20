@@ -7,6 +7,10 @@ import type {
 } from '@omni/shared';
 import { EventTypes } from '@omni/shared';
 import { AgentProcess } from './AgentProcess.js';
+import { AgentProcessPty } from './AgentProcessPty.js';
+import { JsonlWatcher } from './JsonlWatcher.js';
+import { SessionResolver } from './SessionResolver.js';
+import type { JsonlAssistantMessage, JsonlUserMessage } from '@omni/shared';
 import { getAgentRoleConfig } from './AgentRoles.js';
 import { ProgressDetector } from './ProgressDetector.js';
 import { createAgent, updateAgent, getAgent, getAgentsByRole, getAgentsByProject, getRunningAgents } from '../db/queries/agents.js';
@@ -37,7 +41,8 @@ const INPUT_DEBOUNCE_MS = 1500;
 const AUTO_RESUME_MESSAGE = '請繼續執行任務。注意：任務完成標準包含 build 零錯誤、smoke test（若有勾選）通過、E2E spec 撰寫並執行（若有勾選），全部完成後才能加上 [TASK_COMPLETE]。';
 
 export class AgentManager {
-  private processes = new Map<string, AgentProcess>();
+  private _usesPty = false;
+  private processes = new Map<string, AgentProcess | AgentProcessPty>();
   private progressDetector = new ProgressDetector();
   /** Agents currently in self-review phase (will complete after review finishes) */
   private reviewingAgents = new Set<string>();
@@ -58,15 +63,116 @@ export class AgentManager {
   private watchdogInterval: ReturnType<typeof setInterval>;
   /** Agents that should NEVER update task status (fullstack subagents — persists across resumes) */
   private readonly skipTaskStatusAgents = new Set<string>();
+  /** VSCode sync poller: tracks JSONL file offset per stopped agent */
+  private vscodeSyncOffsets = new Map<string, { offset: number; lastActivity: number }>();
+  private vscodeSyncInterval: ReturnType<typeof setInterval> | null = null;
+  private static readonly VSCODE_SYNC_INTERVAL_MS = 5000;
+  private static readonly VSCODE_SYNC_IDLE_TIMEOUT_MS = 60 * 60 * 1000; // 1 hour
 
   constructor(
     private eventBus: EventBus,
     private contextSync: ContextSync,
   ) {
+    // Determine agent backend from config
+    this._usesPty = getConfig().agentBackend === 'pty';
+    if (this._usesPty) {
+      logger.info('Using PTY backend (interactive mode, subscription billing)');
+    } else {
+      logger.info('Using SDK backend (programmatic mode, SDK credit)');
+    }
+
     // Listen for contract changes to notify frontend agents
     this.eventBus.on(EventTypes.CONTRACT_UPDATED, (e) => this.onContractUpdated(e));
     // Start inactivity watchdog
     this.watchdogInterval = setInterval(() => this.runWatchdog(), INACTIVITY_CHECK_INTERVAL_MS);
+  }
+
+  /** Start polling stopped agents' JSONL files for VSCode-continued conversations */
+  startVsCodeSyncPoller(): void {
+    if (this.vscodeSyncInterval) return;
+    this.vscodeSyncInterval = setInterval(() => this.runVsCodeSync(), AgentManager.VSCODE_SYNC_INTERVAL_MS);
+    logger.info('VSCode sync poller started (5s interval)');
+  }
+
+  private async runVsCodeSync(): Promise<void> {
+    const db = (await import('../db/connection.js')).getDb();
+    const rows = db.prepare(
+      `SELECT a.id, a.session_id, a.working_dir, a.project_id, p.working_dir AS project_working_dir
+       FROM agents a JOIN projects p ON a.project_id = p.id
+       WHERE a.status IN ('stopped', 'error') AND a.session_id IS NOT NULL`
+    ).all() as Array<{ id: string; session_id: string; working_dir: string | null; project_id: string; project_working_dir: string }>;
+
+    const now = Date.now();
+
+    for (const row of rows) {
+      const agentId = row.id;
+      const tracked = this.vscodeSyncOffsets.get(agentId);
+
+      // Stop tracking if idle for too long
+      if (tracked && now - tracked.lastActivity > AgentManager.VSCODE_SYNC_IDLE_TIMEOUT_MS) {
+        this.vscodeSyncOffsets.delete(agentId);
+        continue;
+      }
+
+      const cwd = row.working_dir || row.project_working_dir;
+      if (!cwd) continue;
+      const jsonlPath = SessionResolver.getJsonlPath(cwd, row.session_id);
+      const currentSize = JsonlWatcher.getFileSize(jsonlPath);
+
+      // First time seeing this agent: initialize offset to current size (skip existing history)
+      if (!tracked) {
+        this.vscodeSyncOffsets.set(agentId, { offset: currentSize, lastActivity: now });
+        continue;
+      }
+
+      const knownOffset = tracked.offset;
+      if (currentSize <= knownOffset) continue;
+
+      // New content detected — read only new bytes from offset
+      try {
+        const { messages: newMessages, newOffset } = JsonlWatcher.readFrom(jsonlPath, knownOffset);
+        this.vscodeSyncOffsets.set(agentId, { offset: newOffset, lastActivity: now });
+
+        for (const msg of newMessages) {
+          const ts = msg.timestamp || new Date().toISOString();
+          if (msg.type === 'assistant') {
+            const asst = msg as JsonlAssistantMessage;
+            for (const block of (asst.message?.content || [])) {
+              if (block.type === 'text') {
+                await this.emitVsCodeOutput(agentId, row.project_id, 'text', block.text, ts);
+              } else if (block.type === 'tool_use') {
+                await this.emitVsCodeOutput(agentId, row.project_id, 'tool_use',
+                  JSON.stringify({ tool: block.name, input: block.input }), ts);
+              }
+            }
+          } else if (msg.type === 'user') {
+            const user = msg as JsonlUserMessage;
+            for (const block of (user.message?.content || [])) {
+              if (block.type === 'tool_result') {
+                const content = typeof block.content === 'string' ? block.content : JSON.stringify(block.content);
+                await this.emitVsCodeOutput(agentId, row.project_id, 'tool_result', content, ts);
+              } else if (block.type === 'text' && block.text?.trim()) {
+                await this.emitVsCodeOutput(agentId, row.project_id, 'system', `[USER] ${block.text}`, ts);
+              }
+            }
+          }
+        }
+      } catch {
+        // JSONL read error — skip silently
+      }
+    }
+  }
+
+  private async emitVsCodeOutput(
+    agentId: string, projectId: string,
+    streamType: string, content: string, timestamp: string,
+  ): Promise<void> {
+    await this.eventBus.emit({
+      type: EventTypes.AGENT_OUTPUT,
+      source: agentId,
+      payload: { agentId, streamType, content, timestamp } as unknown as Record<string, unknown>,
+      timestamp,
+    });
   }
 
   /** Track zombie resume attempts to prevent infinite loops */
@@ -224,6 +330,10 @@ export class AgentManager {
       if (task) agentTitle = task.title;
     }
 
+    // Resolve MCP servers (global config + workspace .mcp.json) and build allowed tools list
+    const agentWorkingDir = config.workingDir || this.getWorkingDir(config.projectId, config.role);
+    const { allowedTools, mcpServers } = this.resolveToolsAndMcp(roleConfig.allowedTools, agentWorkingDir);
+
     // Create DB record (use pre-generated agentId if provided, so uploaded files can reference it)
     const agent = createAgent({
       projectId: config.projectId,
@@ -233,6 +343,7 @@ export class AgentManager {
       systemPrompt,
       model: config.model || roleConfig.model,
       allowedTools: roleConfig.allowedTools,
+      workingDir: agentWorkingDir,
     });
 
     updateAgent(agent.id, { status: 'starting' });
@@ -250,19 +361,18 @@ export class AgentManager {
       }
     }
 
-    // Resolve MCP servers (global config + workspace .mcp.json) and build allowed tools list
-    const agentWorkingDir = config.workingDir || this.getWorkingDir(config.projectId, config.role);
-    const { allowedTools, mcpServers } = this.resolveToolsAndMcp(roleConfig.allowedTools, agentWorkingDir);
-
-    // Create AgentProcess
-    const proc = new AgentProcess(agent.id, config.role, {
+    // Create AgentProcess (SDK or PTY backend)
+    const procConfig = {
       workingDir: agentWorkingDir,
       systemPrompt,
       model: config.model || roleConfig.model,
       allowedTools,
-      useWorkspaceSkills: config.useWorkspaceSkills !== false, // default to true
+      useWorkspaceSkills: config.useWorkspaceSkills !== false,
       ...(mcpServers && { mcpServers }),
-    });
+    };
+    const proc = this._usesPty
+      ? new AgentProcessPty(agent.id, config.role, procConfig)
+      : new AgentProcess(agent.id, config.role, procConfig);
 
     // Wire up event handlers
     this.wireProcessEvents(proc, agent.id, config.projectId, config.taskId || null);
@@ -329,6 +439,9 @@ export class AgentManager {
   async stopAgent(agentId: string): Promise<void> {
     const proc = this.processes.get(agentId);
     const wasActive = proc?.isActive ?? false;
+
+    // Mark as manually stopped so handleAgentComplete skips auto-resume
+    this.taskDoneAgents.add(agentId);
 
     if (proc) {
       if (wasActive) {
@@ -456,13 +569,16 @@ export class AgentManager {
     const rerunWorkingDir = this.getWorkingDir(agent.projectId, agent.role);
     const { allowedTools, mcpServers } = this.resolveToolsAndMcp(roleConfig.allowedTools, rerunWorkingDir);
 
-    const newProc = new AgentProcess(agentId, agent.role, {
+    const rerunConfig = {
       workingDir: rerunWorkingDir,
       systemPrompt,
       model: agent.model,
       allowedTools,
       ...(mcpServers && { mcpServers }),
-    });
+    };
+    const newProc = this._usesPty
+      ? new AgentProcessPty(agentId, agent.role, rerunConfig)
+      : new AgentProcess(agentId, agent.role, rerunConfig);
 
     this.wireProcessEvents(newProc, agentId, agent.projectId, null);
     this.processes.set(agentId, newProc);
@@ -503,14 +619,17 @@ export class AgentManager {
       const resumeWorkingDir = this.getWorkingDir(agent.projectId, agent.role);
       const { allowedTools, mcpServers } = this.resolveToolsAndMcp(roleConfig.allowedTools, resumeWorkingDir);
 
-      const newProc = new AgentProcess(agentId, agent.role, {
+      const resumeConfig = {
         workingDir: resumeWorkingDir,
         sessionId: agent.sessionId,
         model: agent.model,
         systemPrompt: roleConfig.systemPrompt,
         allowedTools,
         ...(mcpServers && { mcpServers }),
-      });
+      };
+      const newProc = this._usesPty
+        ? new AgentProcessPty(agentId, agent.role, resumeConfig)
+        : new AgentProcess(agentId, agent.role, resumeConfig);
 
       // Wire up event handlers (same as startAgent)
       this.wireProcessEvents(newProc, agentId, agent.projectId, agent.currentTaskId);
@@ -654,9 +773,13 @@ export class AgentManager {
       this.processes.delete(agentId);
     }
 
-    // Keep taskDoneAgents flag — if the agent already completed its task,
-    // don't auto-resume after responding to user input (prevents loops on casual chat).
-    // If the user sends a real bug report, the agent will work and output [TASK_COMPLETE] again.
+    // Clear taskDoneAgents so the resumed agent doesn't get immediately stopped
+    // (PTY mode: checkMarkers would see [TASK_COMPLETE] from previous turn and stop again)
+    this.taskDoneAgents.delete(agentId);
+
+    // Exhaust auto-resume count so the agent won't auto-resume after answering user's question.
+    // User-initiated resume is a one-shot interaction — agent should stop when done, not loop.
+    this.autoResumeCount.set(agentId, MAX_AUTO_RESUMES);
 
     // Resume the session with the user's instruction as the new prompt
     logger.info({ agentId, sessionId }, 'Resuming agent session with user instruction');
@@ -670,13 +793,13 @@ export class AgentManager {
   }
 
   /** Get a specific process */
-  getProcess(agentId: string): AgentProcess | undefined {
+  getProcess(agentId: string): AgentProcess | AgentProcessPty | undefined {
     return this.processes.get(agentId);
   }
 
-  /** Attach standard event handlers to an AgentProcess */
+  /** Attach standard event handlers to an AgentProcess or AgentProcessPty */
   private wireProcessEvents(
-    proc: AgentProcess,
+    proc: AgentProcess | AgentProcessPty,
     agentId: string,
     projectId: string,
     taskId: string | null,
@@ -867,6 +990,7 @@ export class AgentManager {
     taskId: string | null,
     result: ClaudeStreamResult,
   ): Promise<void> {
+    logger.info({ agentId, taskId, isError: result.is_error, taskDone: this.taskDoneAgents.has(agentId) }, 'handleAgentComplete called');
     this.progressDetector.clear(agentId);
 
     // --- Auto-resume: if task-based and not errored, resume a few times before accepting completion ---
@@ -1116,15 +1240,20 @@ export class AgentManager {
   private checkMarkers(agentId: string, projectId: string, taskId: string | null, content: string): void {
     // [TASK_COMPLETE] or [REVIEW_COMPLETE] — agent signals done
     // Only force-stop if flow plan is fully done (or no flow plan exists)
-    if (/(?:^|\n)\s*\[TASK_COMPLETE\]/.test(content)) {
+    if (/\[TASK_COMPLETE\]/.test(content)) {
       this.taskDoneAgents.add(agentId);
       const flowComplete = this.progressDetector.isFlowComplete(agentId);
       if (flowComplete) {
-        // Don't stop immediately — let the agent finish its current turn so it can
-        // write a completion summary after the marker. The SDK query() will end naturally,
-        // firing the 'result' event which triggers handleAgentComplete().
-        // taskDoneAgents flag prevents auto-resume there.
-        logger.info({ agentId, taskId }, '[TASK_COMPLETE] + flow complete — letting agent finish current turn');
+        logger.info({ agentId, taskId }, '[TASK_COMPLETE] + flow complete — finishing agent');
+        // In PTY mode, Claude CLI doesn't auto-exit — we need to stop it
+        const proc = this.processes.get(agentId);
+        if (proc instanceof AgentProcessPty) {
+          // Give agent 3 seconds to finish current output, then stop
+          setTimeout(() => {
+            proc.stop().catch(() => {});
+          }, 3000);
+        }
+        // In SDK mode, the query iterator will end naturally
       } else {
         logger.info({ agentId, taskId }, '[TASK_COMPLETE] detected but flow plan not finished — letting agent continue');
       }
