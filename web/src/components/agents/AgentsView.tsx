@@ -811,7 +811,7 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
             <TerminalOutput
               key={selectedAgent.id}
               outputs={outputs[selectedAgent.id] || []}
-              title={`${selectedAgent.role.charAt(0).toUpperCase() + selectedAgent.role.slice(1)} Agent${selectedAgent.title ? ` — ${selectedAgent.title}` : ''}`}
+              title={`${(selectedAgent.role || 'unknown').charAt(0).toUpperCase() + (selectedAgent.role || 'unknown').slice(1)} Agent${selectedAgent.title ? ` — ${selectedAgent.title}` : ''}`}
               role={selectedAgent.role}
               status={selectedAgent.status}
               agentId={selectedAgent.id}

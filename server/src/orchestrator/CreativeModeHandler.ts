@@ -2,10 +2,8 @@ import type { AgentManager } from '../agent/AgentManager.js';
 import type { TaskDispatcher } from './TaskDispatcher.js';
 import type { ContextSync } from '../eventbus/ContextSync.js';
 import type { EventBus } from '../eventbus/EventBus.js';
-import { AgentProcess } from '../agent/AgentProcess.js';
 import { getAgentRoleConfig } from '../agent/AgentRoles.js';
 import { updateProject, getProject } from '../db/queries/projects.js';
-import { getConfig } from '../config.js';
 import { createChildLogger } from '../utils/logger.js';
 
 const logger = createChildLogger('CreativeModeHandler');
@@ -22,9 +20,10 @@ export interface InterviewCallback {
  * 4. On confirmation, transition to SpecMode execution
  */
 export class CreativeModeHandler {
-  private architectProcess: AgentProcess | null = null;
+  private architectAgentId: string | null = null;
   private interviewCallback: InterviewCallback | null = null;
   private specDraft: { sa: string; sd: string } | null = null;
+  private unsubscribeOutput: (() => void) | null = null;
 
   constructor(
     private agentManager: AgentManager,
@@ -45,61 +44,8 @@ export class CreativeModeHandler {
 
     updateProject(projectId, { status: 'planning' });
 
-    const config = getConfig();
     const roleConfig = getAgentRoleConfig('architect');
 
-    this.architectProcess = new AgentProcess(
-      `architect-${projectId}`,
-      'architect',
-      {
-        workingDir: project.workingDir || config.projectRoot,
-        systemPrompt: roleConfig.systemPrompt,
-        model: roleConfig.model,
-        allowedTools: roleConfig.allowedTools,
-      },
-    );
-
-    // Listen for output to detect questions and spec drafts
-    let accumulatedText = '';
-    this.architectProcess.on('output', (output: { streamType: string; content: string }) => {
-      if (output.streamType === 'text') {
-        accumulatedText += output.content;
-
-        // Check if this is a question (ends with ?)
-        if (output.content.includes('?')) {
-          this.interviewCallback?.('question', {
-            projectId,
-            question: accumulatedText.trim(),
-          });
-          accumulatedText = '';
-        }
-
-        // Check for spec ready marker
-        if (output.content.includes('[SPEC_READY]')) {
-          this.specDraft = this.extractSpecDraft(accumulatedText);
-          this.interviewCallback?.('specDraft', {
-            projectId,
-            saDocument: this.specDraft.sa,
-            sdDocument: this.specDraft.sd,
-          });
-          accumulatedText = '';
-        }
-      }
-
-      // Forward to event bus for WebSocket broadcast
-      this.eventBus.emit({
-        type: 'agent.output',
-        source: `architect-${projectId}`,
-        payload: output as unknown as Record<string, unknown>,
-        timestamp: new Date().toISOString(),
-      });
-    });
-
-    this.architectProcess.on('result', () => {
-      logger.info({ projectId }, 'Architect agent completed');
-    });
-
-    // Start with the user's requirement
     const initialPrompt = `A user has a new project idea. Here is their initial requirement:
 
 "${requirement}"
@@ -113,17 +59,54 @@ Start by asking clarifying questions ONE AT A TIME to understand:
 
 Ask your first question now.`;
 
-    await this.architectProcess.spawn(initialPrompt);
-    logger.info({ projectId }, 'Creative mode interview started');
+    // Use AgentManager so the agent correctly routes to PTY or SDK backend
+    const agentId = await this.agentManager.startAgent({
+      projectId,
+      role: 'architect',
+      prompt: initialPrompt,
+      model: roleConfig.model,
+    });
+
+    this.architectAgentId = agentId;
+
+    // Listen for output events via EventBus to detect questions and spec drafts
+    let accumulatedText = '';
+    this.unsubscribeOutput = this.eventBus.on('agent.output', (event) => {
+      if (event.source !== agentId) return;
+      const payload = event.payload as { streamType?: string; content?: string };
+      if (payload.streamType === 'text' && payload.content) {
+        accumulatedText += payload.content;
+
+        if (payload.content.includes('?')) {
+          this.interviewCallback?.('question', {
+            projectId,
+            question: accumulatedText.trim(),
+          });
+          accumulatedText = '';
+        }
+
+        if (payload.content.includes('[SPEC_READY]')) {
+          this.specDraft = this.extractSpecDraft(accumulatedText);
+          this.interviewCallback?.('specDraft', {
+            projectId,
+            saDocument: this.specDraft.sa,
+            sdDocument: this.specDraft.sd,
+          });
+          accumulatedText = '';
+        }
+      }
+    });
+
+    logger.info({ projectId, agentId }, 'Creative mode interview started');
   }
 
   /** Send a user's response to the architect agent */
   handleUserResponse(projectId: string, message: string): void {
-    if (!this.architectProcess) {
-      logger.warn({ projectId }, 'No architect process to send response to');
+    if (!this.architectAgentId) {
+      logger.warn({ projectId }, 'No architect agent to send response to');
       return;
     }
-    this.architectProcess.sendInput(message);
+    this.agentManager.sendInputToAgent(this.architectAgentId, message);
   }
 
   /** Handle spec confirmation or modification request */
@@ -133,17 +116,10 @@ Ask your first question now.`;
     modifications?: string,
   ): Promise<void> {
     if (confirmed && this.specDraft) {
-      // Transition to planning phase
       updateProject(projectId, { status: 'planning' });
 
-      // Stop the architect process
-      if (this.architectProcess) {
-        await this.architectProcess.stop();
-        this.architectProcess = null;
-      }
+      await this.stop();
 
-      // Use the spec draft as input for the task planning phase
-      // Similar to SpecMode: spawn Master agent to create task plan from the generated specs
       await this.contextSync.init();
 
       const planPrompt = `You have the following SA/SD documents. Parse them and produce a structured task plan.
@@ -170,23 +146,28 @@ OUTPUT: Respond with ONLY a valid JSON object with this schema:
 
       logger.info({ projectId }, 'Transitioning from creative mode to task planning');
     } else if (modifications) {
-      // Send modifications back to architect
-      this.architectProcess?.sendInput(
-        `The user wants modifications to the spec:\n${modifications}\n\nPlease update the SA/SD documents accordingly and present the updated version. End with [SPEC_READY] when done.`,
-      );
+      if (this.architectAgentId) {
+        this.agentManager.sendInputToAgent(
+          this.architectAgentId,
+          `The user wants modifications to the spec:\n${modifications}\n\nPlease update the SA/SD documents accordingly and present the updated version. End with [SPEC_READY] when done.`,
+        );
+      }
     }
   }
 
   /** Stop the interview process */
   async stop(): Promise<void> {
-    if (this.architectProcess) {
-      await this.architectProcess.stop();
-      this.architectProcess = null;
+    if (this.unsubscribeOutput) {
+      this.unsubscribeOutput();
+      this.unsubscribeOutput = null;
+    }
+    if (this.architectAgentId) {
+      await this.agentManager.stopAgent(this.architectAgentId);
+      this.architectAgentId = null;
     }
   }
 
   private extractSpecDraft(text: string): { sa: string; sd: string } {
-    // Try to find SA and SD sections in the text
     let sa = '';
     let sd = '';
 

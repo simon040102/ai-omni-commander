@@ -374,7 +374,8 @@ export class AgentProcessPty extends EventEmitter {
 
     for (const block of content) {
       if (block.type === 'tool_result') {
-        this.emitOutput('tool_result', block.content);
+        const resultContent = typeof block.content === 'string' ? block.content : JSON.stringify(block.content);
+        this.emitOutput('tool_result', resultContent);
       }
     }
   }

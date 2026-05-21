@@ -555,10 +555,12 @@ export function TerminalOutput({ outputs, title, role, status, agentId, projectI
                       )}
                     </>
                   )}
-                  {output.streamType === 'text' && hasMarkdown(output.content) ? (
+                  {output.streamType === 'text' && typeof output.content === 'string' && hasMarkdown(output.content) ? (
                     <MarkdownContent content={output.content} />
                   ) : (
-                    output.streamType === 'tool_use' ? toolDisplayContent : output.content
+                    output.streamType === 'tool_use' ? toolDisplayContent
+                      : typeof output.content === 'string' ? output.content
+                      : JSON.stringify(output.content)
                   )}
                 </div>
               );

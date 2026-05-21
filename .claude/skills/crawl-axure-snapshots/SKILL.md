@@ -207,6 +207,7 @@ https://{share_id}.axshare.com/?id=null&p={encoded_page_name}
 5. browser_evaluate → 【JS Step 2】對 y 值相近的欄位查 x 座標，判斷左右欄
 6. browser_evaluate → 【JS Step 3】取得 input/select/textarea 類型 + 選項值
 7. browser_evaluate → 【JS Step 3.5】偵測大型自訂元件（WYSIWYG editor、file widget 等）
+7b. browser_evaluate → 【JS Step 3.7】Table 結構提取（有 table 的頁面必做）— 取得 header 欄位 x 座標順序、checkbox/icon 位置
 8. 根據座標數字手寫語意 HTML（每個欄位的 label+input 必須包在 `<div>` 內，確保各占一行）
 9. Write tool → 存成 docs/axure-snapshots/{projectId}/{module}-{page_type}.html
 10. browser_evaluate → 【JS Step 4】驗證按鈕清單，比對 HTML 中的 <button>
@@ -336,6 +337,69 @@ https://{share_id}.axshare.com/?id=null&p={encoded_page_name}
   <div>[文件預覽畫布：公文格式 — 公司信頭、主旨、說明、正文、附件說明、核章欄]</div>
 </div>
 ```
+
+---
+
+### JS Step 3.7：Table 結構提取（查詢頁必做）
+
+**問題：** Axure table 的 DOM 順序不等於視覺欄位順序。checkbox、icon 欄（檢視/編輯/刪除）的 x 位置決定它在哪一欄，不能靠猜。
+
+```javascript
+() => {
+  const base = document.querySelector('iframe#mainFrame')?.contentDocument?.querySelector('#base')
+             || document.querySelector('#base');
+  // 找 table header row：一組 y 值相近的短文字（通常是欄位名稱）
+  const allTexts = [...base.querySelectorAll('p, div')].filter(el => {
+    const t = el.textContent?.trim();
+    return t && t.length < 20 && el.offsetParent !== null
+      && el.children.length === 0; // leaf nodes only
+  }).map(el => {
+    const rect = el.getBoundingClientRect();
+    return { text: el.textContent.trim(), x: Math.round(rect.x), y: Math.round(rect.y) };
+  });
+
+  // Group by y (within 10px = same row)
+  const rows = {};
+  for (const t of allTexts) {
+    const rowKey = Math.round(t.y / 10) * 10;
+    if (!rows[rowKey]) rows[rowKey] = [];
+    rows[rowKey].push(t);
+  }
+
+  // Find the row with most items (likely the header row)
+  const headerRow = Object.values(rows).sort((a, b) => b.length - a.length)[0];
+  if (!headerRow) return null;
+  headerRow.sort((a, b) => a.x - b.x); // sort by x = visual column order
+
+  // Find clickable icons in data rows (檢視/編輯/刪除 etc)
+  const icons = [...base.querySelectorAll('img, svg, [style*="cursor:pointer"], [style*="cursor: pointer"]')]
+    .filter(el => el.offsetParent !== null)
+    .map(el => {
+      const rect = el.getBoundingClientRect();
+      const alt = el.getAttribute('alt') || el.getAttribute('title') || el.textContent?.trim() || '';
+      return { type: 'icon', alt, x: Math.round(rect.x), y: Math.round(rect.y) };
+    });
+
+  // Find checkboxes in data rows
+  const checks = [...base.querySelectorAll('input[type="checkbox"], input[type="radio"]')]
+    .filter(el => el.offsetParent !== null)
+    .map(el => {
+      const rect = el.getBoundingClientRect();
+      return { type: 'checkbox', x: Math.round(rect.x), y: Math.round(rect.y) };
+    });
+
+  return {
+    headerColumns: headerRow,
+    iconPositions: icons.slice(0, 20),
+    checkboxPositions: checks.slice(0, 10),
+  };
+}
+```
+
+→ `headerColumns` 依 x 排序 = 欄位的真實視覺順序
+→ `checkboxPositions` 的 x 值 < 所有 header x → checkbox 在最左欄
+→ `iconPositions` 的 x 值決定 icon 在哪一欄（例如 x 在「備註」和「編輯」header 之間 → 該 icon 屬於那一欄）
+→ **`<th>` 和 `<td>` 的順序必須嚴格依照 x 座標，不能隨意排列**
 
 ---
 

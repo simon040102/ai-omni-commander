@@ -76,7 +76,7 @@ export function EventLog() {
                   event.streamType === 'system' ? 'text-yellow-400' :
                   'text-foreground'
                 }`}>
-                  {event.content}
+                  {typeof event.content === 'string' ? event.content : JSON.stringify(event.content)}
                 </span>
               </div>
             ))}

@@ -48,6 +48,8 @@ export class AgentManager {
   private reviewingAgents = new Set<string>();
   /** Last output timestamp per agent (ms) */
   private lastOutputAt = new Map<string, number>();
+  /** Last output stream type per agent (to detect tool_use waiting) */
+  private lastOutputStreamType = new Map<string, string>();
   /** How many times each agent has been nudged */
   private nudgeCount = new Map<string, number>();
   /** How many times each agent has been auto-resumed after exiting mid-task */
@@ -259,6 +261,14 @@ export class AgentManager {
       const idleMs = now - lastOut;
       if (idleMs < INACTIVITY_NUDGE_MS) continue;
 
+      // Skip nudge if agent is waiting for a tool result (e.g., TaskOutput blocking on subagent)
+      const lastStreamType = this.lastOutputStreamType.get(agentId);
+      if (lastStreamType === 'tool_use' || lastStreamType === 'tool_result') {
+        // Agent is mid-tool-call, not truly idle — reset timer and skip
+        this.lastOutputAt.set(agentId, now);
+        continue;
+      }
+
       const nudges = this.nudgeCount.get(agentId) ?? 0;
 
       // Exceeded max nudges → force-stop and mark failed
@@ -424,6 +434,7 @@ export class AgentManager {
   /** Clear watchdog tracking for an agent */
   private clearWatchdog(agentId: string): void {
     this.lastOutputAt.delete(agentId);
+    this.lastOutputStreamType.delete(agentId);
     this.nudgeCount.delete(agentId);
     this.autoResumeCount.delete(agentId);
     this.taskDoneAgents.delete(agentId);
@@ -823,8 +834,9 @@ export class AgentManager {
     proc.on('output', (output: AgentOutputEvent & { isStreaming?: boolean; projectId?: string }) => {
       output.taskId = taskId;
       output.projectId = projectId;
-      // Update last-active timestamp for watchdog
+      // Update last-active timestamp and stream type for watchdog
       this.lastOutputAt.set(agentId, Date.now());
+      this.lastOutputStreamType.set(agentId, output.streamType);
 
       // Only persist non-streaming outputs to DB (streaming will be followed by full message)
       if (!output.isStreaming) {
