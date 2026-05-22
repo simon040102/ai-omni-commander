@@ -432,9 +432,11 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
                 // Order: FE, BE (top row), Coordinator, Integration-test (bottom row)
                 const roleOrder = ['frontend', 'backend', 'coordinator', 'integration-test'];
                 const sorted = [...visibleAgents].sort((a, b) => {
-                  const ai = roleOrder.indexOf(a.role);
-                  const bi = roleOrder.indexOf(b.role);
-                  return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+                  // Running agents first, then by newest created
+                  const aRunning = a.status === 'running' || a.status === 'starting' ? 0 : 1;
+                  const bRunning = b.status === 'running' || b.status === 'starting' ? 0 : 1;
+                  if (aRunning !== bRunning) return aRunning - bRunning;
+                  return (b.createdAt || '').localeCompare(a.createdAt || '');
                 });
 
                 const renderFsAgent = (agent: NonNullable<typeof visibleAgents[0]>, span2?: boolean) => {

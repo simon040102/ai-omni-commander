@@ -89,6 +89,71 @@ export class AgentManager {
     this.watchdogInterval = setInterval(() => this.runWatchdog(), INACTIVITY_CHECK_INTERVAL_MS);
   }
 
+  /** Recover agents that were running when the server last shut down / crashed */
+  async recoverRunningAgents(): Promise<void> {
+    const runningAgents = getRunningAgents();
+    if (runningAgents.length === 0) return;
+
+    logger.info({ count: runningAgents.length }, 'Found agents to recover from previous session');
+    const STALE_THRESHOLD_MS = 60 * 60 * 1000; // 1 hour
+
+    for (const agent of runningAgents) {
+      const agentId = agent.id;
+
+      // Check if heartbeat is too stale
+      const lastHb = agent.lastHeartbeat ? new Date(agent.lastHeartbeat + 'Z').getTime() : 0;
+      const isStale = lastHb > 0 && (Date.now() - lastHb > STALE_THRESHOLD_MS);
+
+      // No sessionId or stale → mark error, reset task
+      if (!agent.sessionId || isStale) {
+        const reason = !agent.sessionId ? 'no sessionId' : 'stale heartbeat (>1h)';
+        logger.warn({ agentId, reason }, 'Cannot recover agent — marking error');
+        updateAgent(agentId, { status: 'error', pid: null });
+        if (agent.currentTaskId) {
+          const task = getTask(agent.currentTaskId);
+          if (task && (task.status === 'in_progress' || task.status === 'assigned')) {
+            updateTask(agent.currentTaskId, { status: 'pending', assignedAgentId: null });
+          }
+        }
+        await this.eventBus.emit({
+          type: EventTypes.AGENT_OUTPUT,
+          source: agentId,
+          payload: { agentId, projectId: agent.projectId, streamType: 'system',
+            content: `[RECOVERY] Agent 無法恢復 (${reason})，已標記為 error。` },
+          timestamp: new Date().toISOString(),
+        });
+        continue;
+      }
+
+      // Has sessionId and not stale → attempt resume
+      try {
+        logger.info({ agentId, sessionId: agent.sessionId }, 'Recovering agent — resuming session');
+        await this.eventBus.emit({
+          type: EventTypes.AGENT_OUTPUT,
+          source: agentId,
+          payload: { agentId, projectId: agent.projectId, streamType: 'system',
+            content: '[RECOVERY] Server 重啟，自動恢復 agent session...' },
+          timestamp: new Date().toISOString(),
+        });
+        await this.resumeAgent(agentId, AUTO_RESUME_MESSAGE);
+      } catch (err) {
+        logger.error({ agentId, err }, 'Recovery resume failed — marking error');
+        updateAgent(agentId, { status: 'error', pid: null });
+        if (agent.currentTaskId) {
+          const task = getTask(agent.currentTaskId);
+          if (task && (task.status === 'in_progress' || task.status === 'assigned')) {
+            updateTask(agent.currentTaskId, { status: 'pending', assignedAgentId: null });
+          }
+        }
+      }
+
+      // Stagger to avoid ConPTY contention on Windows
+      await new Promise(r => setTimeout(r, 3000));
+    }
+
+    logger.info('Agent recovery complete');
+  }
+
   /** Start polling stopped agents' JSONL files for VSCode-continued conversations */
   startVsCodeSyncPoller(): void {
     if (this.vscodeSyncInterval) return;
@@ -254,6 +319,12 @@ export class AgentManager {
       } catch { /* ignore */ }
     }
 
+    // Write heartbeat for all active agents (used by startup recovery to detect stale agents)
+    const heartbeatTime = new Date().toISOString();
+    for (const [agentId] of this.processes) {
+      try { updateAgent(agentId, { lastHeartbeat: heartbeatTime }); } catch { /* agent may have been deleted */ }
+    }
+
     const now = Date.now();
     for (const [agentId] of this.processes) {
       const lastOut = this.lastOutputAt.get(agentId);
@@ -413,7 +484,25 @@ export class AgentManager {
     }
 
     // Spawn the process
-    await proc.spawn(config.prompt);
+    try {
+      await proc.spawn(config.prompt);
+    } catch (err) {
+      logger.error({ agentId: agent.id, err }, 'Failed to spawn agent process');
+      this.processes.delete(agent.id);
+      this.clearWatchdog(agent.id);
+      updateAgent(agent.id, { status: 'error', pid: null });
+      if (config.taskId) {
+        updateTask(config.taskId, { status: 'failed' });
+      }
+      await this.eventBus.emit({
+        type: EventTypes.AGENT_OUTPUT,
+        source: agent.id,
+        payload: { agentId: agent.id, projectId: config.projectId, streamType: 'error',
+          content: `[SYSTEM] Agent 啟動失敗: ${(err as Error).message}` },
+        timestamp: new Date().toISOString(),
+      });
+      throw err;
+    }
 
     // Emit initial prompt event so frontend can display it
     await this.eventBus.emit({
@@ -478,13 +567,40 @@ export class AgentManager {
     }
 
     this.clearWatchdog(agentId);
-    updateAgent(agentId, { status: 'stopped', pid: null });
+
+    // Reset task back to pending if agent is stopped while task is still in_progress
+    const agentRecord = getAgent(agentId);
+    if (agentRecord?.currentTaskId) {
+      const task = getTask(agentRecord.currentTaskId);
+      if (task && task.status === 'in_progress') {
+        updateTask(agentRecord.currentTaskId, { status: 'pending', assignedAgentId: null });
+        logger.info({ agentId, taskId: agentRecord.currentTaskId }, 'Reset task to pending (agent stopped)');
+      }
+    }
+
+    updateAgent(agentId, { status: 'stopped', pid: null, currentTaskId: null });
     await this.eventBus.emit({
       type: EventTypes.AGENT_STOPPED,
       source: agentId,
       payload: { agentId },
       timestamp: new Date().toISOString(),
     });
+  }
+
+  /** Kill all PTY processes without changing DB status (for graceful shutdown → startup recovery) */
+  async killAllProcessesForShutdown(): Promise<void> {
+    logger.info({ count: this.processes.size }, 'Killing all agent processes for shutdown (preserving DB state)');
+    for (const [agentId, proc] of this.processes) {
+      try {
+        proc.removeAllListeners('result');
+        if (proc.isActive) await proc.stop();
+      } catch (err) {
+        logger.warn({ agentId, err }, 'Error killing process during shutdown');
+      }
+    }
+    this.processes.clear();
+    clearInterval(this.watchdogInterval);
+    if (this.vscodeSyncInterval) clearInterval(this.vscodeSyncInterval);
   }
 
   /** Stop all agents for a project */
@@ -596,7 +712,14 @@ export class AgentManager {
     this.lastOutputAt.set(agentId, Date.now());
     this.nudgeCount.set(agentId, 0);
 
-    await newProc.spawn(prompt);
+    try {
+      await newProc.spawn(prompt);
+    } catch (err) {
+      logger.error({ agentId, err }, 'Rerun spawn failed');
+      this.processes.delete(agentId);
+      updateAgent(agentId, { status: 'error', pid: null });
+      throw err;
+    }
     logger.info({ agentId, role: agent.role }, 'Agent rerun with new prompt');
   }
 
@@ -675,7 +798,14 @@ export class AgentManager {
         }
       }
 
-      await newProc.resume(enrichedPrompt);
+      try {
+        await newProc.resume(enrichedPrompt);
+      } catch (err) {
+        logger.error({ agentId, err }, 'Resume spawn failed');
+        this.processes.delete(agentId);
+        updateAgent(agentId, { status: 'error', pid: null });
+        throw err;
+      }
 
       logger.info({ agentId, sessionId: agent.sessionId }, 'Agent session resumed');
     }
@@ -883,7 +1013,11 @@ export class AgentManager {
 
       // Check for markers — only in assistant text output (after progress detection)
       if (output.streamType === 'text') {
-        this.checkMarkers(agentId, projectId, taskId, output.content);
+        try {
+          this.checkMarkers(agentId, projectId, taskId, output.content);
+        } catch (err) {
+          logger.error({ err, agentId }, 'checkMarkers failed');
+        }
       }
     });
 
@@ -1122,6 +1256,9 @@ export class AgentManager {
     // Read skip flag BEFORE clearWatchdog (which cleans it up)
     const shouldSkipTaskStatus = this.skipTaskStatusAgents.has(agentId);
 
+    // Capture TASK_COMPLETE flag before clearWatchdog (which may clean up state)
+    const taskCompleteSignaled = this.taskDoneAgents.has(agentId);
+
     this.clearWatchdog(agentId);
     updateAgent(agentId, {
       status: 'stopped',
@@ -1133,7 +1270,18 @@ export class AgentManager {
     });
 
     if (taskId && !shouldSkipTaskStatus) {
-      const status = result.is_error ? 'failed' : 'completed';
+      // If agent exited without [TASK_COMPLETE], mark as failed even if exit code is 0
+      const status = result.is_error ? 'failed' : (taskCompleteSignaled ? 'completed' : 'failed');
+      if (!taskCompleteSignaled && !result.is_error) {
+        logger.warn({ agentId, taskId }, 'Agent exited without [TASK_COMPLETE] — marking task as failed');
+        this.eventBus.emit({
+          type: EventTypes.AGENT_OUTPUT,
+          source: agentId,
+          payload: { agentId, projectId, streamType: 'system',
+            content: '[SYSTEM] Agent 結束但未輸出 [TASK_COMPLETE]，任務標記為 failed。' },
+          timestamp: new Date().toISOString(),
+        });
+      }
       updateTask(taskId, {
         status,
         resultSummary: result.result ?? undefined,
@@ -1441,12 +1589,18 @@ export class AgentManager {
     taskId: string | null,
     reason: string,
   ): Promise<void> {
-    const intervention = createIntervention({
-      projectId,
-      agentId,
-      taskId: taskId || undefined,
-      reason,
-    });
+    let intervention;
+    try {
+      intervention = createIntervention({
+        projectId,
+        agentId,
+        taskId: taskId || undefined,
+        reason,
+      });
+    } catch (err) {
+      logger.error({ err, agentId, projectId }, 'Failed to create intervention (project may have been deleted)');
+      return;
+    }
 
     await this.eventBus.emit({
       type: EventTypes.INTERVENTION_NEEDED,

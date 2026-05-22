@@ -643,7 +643,10 @@ async function main() {
   // 8. Log agent backend mode
   logger.info({ agentBackend: config.agentBackend }, 'Agent backend mode');
 
-  // 8b. Start VSCode sync poller (5s interval for stopped agents)
+  // 8b. Recover agents that were running before server shutdown/crash
+  await agentManager.recoverRunningAgents();
+
+  // 8c. Start VSCode sync poller (5s interval for stopped agents)
   agentManager.startVsCodeSyncPoller();
 
   // 9. Listen
@@ -658,7 +661,9 @@ async function main() {
   const shutdown = async () => {
     logger.info('Shutting down...');
     asanaSyncService.stopAll();
-    await agentManager.stopAllForProject('*');
+    // Kill PTY processes but DON'T change DB status — leave agents as 'running'
+    // so startup recovery can resume them on next launch
+    await agentManager.killAllProcessesForShutdown();
     await contractWatcher.stop();
     await asanaClient.disconnect();
     httpServer.close();

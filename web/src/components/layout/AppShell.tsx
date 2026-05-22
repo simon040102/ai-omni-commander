@@ -4,7 +4,20 @@ import { Sidebar } from './Sidebar';
 import { ToastContainer } from '../ui/ToastContainer';
 import { useWebSocket } from '../../hooks/useWebSocket';
 import { useProjectStore } from '../../stores/projectStore';
+import { useWsStore } from '../../stores/wsStore';
 import { initTabNotification } from '../../lib/tabNotification';
+
+function DisconnectBanner() {
+  const connected = useWsStore(s => s.connected);
+  const hasConnectedOnce = useWsStore(s => s.hasConnectedOnce);
+  // Don't show on initial load (before first connection)
+  if (!hasConnectedOnce || connected) return null;
+  return (
+    <div className="bg-red-600 text-white text-center py-1.5 px-4 text-sm font-medium shrink-0">
+      Server 連線中斷，重新連線中... Agent 指令暫時無法使用。
+    </div>
+  );
+}
 
 export type View = 'home' | 'setup' | 'new-task' | 'tasks' | 'agents' | 'events' | 'db-explorer' | 'internal-db' | 'settings' | 'global-settings' | 'mockup';
 
@@ -53,6 +66,7 @@ export function AppShell({ children }: AppShellProps) {
         currentView={currentView}
         onViewChange={handleViewChange}
       />
+      <DisconnectBanner />
       <div className="flex-1 flex overflow-hidden">
         <Sidebar
           currentView={currentView}

@@ -6,6 +6,7 @@ import { useAgentStore } from '../../stores/agentStore';
 import { IconSearch, IconStop, IconRefresh, IconSend, IconChevronDown, IconChevronRight, IconX } from '../ui/Icons';
 import { FlowPanel } from './FlowPanel';
 import { SaFlowModal } from './SaFlowModal';
+import { useWsStore } from '../../stores/wsStore';
 
 // Configure marked for terminal-friendly output
 marked.setOptions({
@@ -620,9 +621,10 @@ export function TerminalOutput({ outputs, title, role, status, agentId, projectI
         // Axure agents use Playwright MCP which can't survive session resume —
         // only allow input while actively running; use UI buttons for restart.
         const isAxure = role === 'axure';
-        const canSend = isAxure
+        const wsConnected = useWsStore.getState().connected;
+        const canSend = wsConnected && (isAxure
           ? (status === 'running' || status === 'starting')
-          : (status === 'running' || status === 'starting' || status === 'stopped');
+          : (status === 'running' || status === 'starting' || status === 'stopped'));
         const isRunning = status === 'running' || status === 'starting';
         const placeholder = isRunning
           ? 'Send instruction to agent... (Ctrl+V to paste images)'
