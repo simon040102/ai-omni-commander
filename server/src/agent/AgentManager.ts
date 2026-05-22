@@ -32,7 +32,7 @@ const logger = createChildLogger('AgentManager');
 const INACTIVITY_NUDGE_MS = 3 * 60 * 1000; // 3 minutes of no output → nudge
 const INACTIVITY_CHECK_INTERVAL_MS = 30 * 1000; // check every 30s
 const MAX_NUDGES = 5; // nudge up to 5 times, then force-fail
-const NUDGE_MESSAGE = '請繼續執行任務。如果你在等待什麼或遇到問題，請說明後繼續。';
+const NUDGE_MESSAGE = '請繼續執行任務。如果所有任務都已完成，請輸出 [TASK_COMPLETE]。如果你在等待什麼或遇到問題，請說明。';
 
 /** When agent exits mid-task, auto-resume this many times before accepting completion */
 const MAX_AUTO_RESUMES = 3;

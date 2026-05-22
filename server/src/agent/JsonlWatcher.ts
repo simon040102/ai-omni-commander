@@ -130,8 +130,17 @@ export class JsonlWatcher extends EventEmitter {
     }
   }
 
+  /** Guard against concurrent readNewContent calls (fs.watch + polling race) */
+  private _reading = false;
+
   /** Read new content from the file since last read */
   private readNewContent(): void {
+    if (this._reading) return;
+    this._reading = true;
+    try { this._doReadNewContent(); } finally { this._reading = false; }
+  }
+
+  private _doReadNewContent(): void {
     try {
       // Use fstat on open fd instead of statSync to bypass Windows metadata cache.
       // Windows can cache file size in directory metadata, causing statSync to return
