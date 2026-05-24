@@ -58,6 +58,7 @@ export function NewTaskView({ onViewChange }: NewTaskViewProps) {
   const [showForm, setShowForm] = useState(true);
   const [expandedAgentId, setExpandedAgentId] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [mcpCommand, setMcpCommand] = useState<string | null>(null);
 
   // Spec mode state
   const [specWorkspacePath, setSpecWorkspacePath] = useState('');
@@ -113,7 +114,7 @@ export function NewTaskView({ onViewChange }: NewTaskViewProps) {
     }
   }, []);
 
-  // Quick Mode handler — auto-creates project and starts agent, stays on this page
+  // Quick Mode handler — generates MCP command for user to paste into Claude Code
   const handleQuickStart = useCallback((quickTask: {
     type: string;
     description: string;
@@ -123,41 +124,21 @@ export function NewTaskView({ onViewChange }: NewTaskViewProps) {
     useWorkspaceSkills?: boolean;
     workspacePath: string;
   }) => {
-    if (!client) return;
+    const typeLabel = { bug: 'Bug Fix', feature: 'New Feature', refactor: 'Refactor', other: 'Task' }[quickTask.type] || 'Task';
+    const errorSection = quickTask.errorLog ? `\n\n錯誤訊息：\n${quickTask.errorLog}` : '';
+    const filesSection = quickTask.relatedFiles?.length ? `\n\n相關檔案：${quickTask.relatedFiles.join(', ')}` : '';
 
-    const projectId = crypto.randomUUID();
-    const projectName = generateProjectName();
+    const command = `請在工作目錄 \`${quickTask.workspacePath}\` 執行以下任務。
 
-    // Create lightweight project
-    client.send({
-      type: 'project.create',
-      id: crypto.randomUUID(),
-      timestamp: new Date().toISOString(),
-      payload: {
-        projectId,
-        name: projectName,
-        workingDir: quickTask.workspacePath,
-        frontendPath: quickTask.role === 'frontend' ? quickTask.workspacePath : null,
-        backendPath: quickTask.role !== 'frontend' ? quickTask.workspacePath : null,
-      },
-    });
+## ${typeLabel}
 
-    // Start quick task
-    client.send({
-      type: 'project.startQuickTask',
-      id: crypto.randomUUID(),
-      timestamp: new Date().toISOString(),
-      payload: {
-        workingDir: quickTask.workspacePath,
-        taskType: quickTask.type as 'bug' | 'feature' | 'refactor' | 'other',
-        role: (quickTask.role || 'backend') as 'backend' | 'frontend' | 'devops' | 'testing',
-        description: quickTask.description,
-        errorLog: quickTask.errorLog,
-        relatedFiles: quickTask.relatedFiles,
-        model,
-        useWorkspaceSkills: quickTask.useWorkspaceSkills,
-      },
-    });
+${quickTask.description}${errorSection}${filesSection}
+
+## 執行方式
+使用 Agent tool 派出一個 subagent，在 \`${quickTask.workspacePath}\` 目錄中執行開發工作。
+${quickTask.useWorkspaceSkills ? '請先讀取工作目錄中的 CLAUDE.md 和 .claude/ 設定。' : ''}`;
+
+    setMcpCommand(command);
 
     // Save path to recent
     fetch('/api/recent-paths', {
@@ -165,10 +146,7 @@ export function NewTaskView({ onViewChange }: NewTaskViewProps) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path: quickTask.workspacePath }),
     }).catch(() => {});
-
-    addToast({ type: 'success', title: 'Quick Run started', message: `"${projectName}"` });
-    setShowForm(false); // Collapse form to show results
-  }, [client, model, generateProjectName, addToast]);
+  }, []);
 
   // Spec Mode handler — auto-creates project, uploads docs, starts execution
   const handleSpecStart = useCallback(() => {
@@ -523,6 +501,29 @@ export function NewTaskView({ onViewChange }: NewTaskViewProps) {
           </button>
         </div>
       ) : null}
+
+      {/* MCP Command Modal */}
+      {mcpCommand && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setMcpCommand(null)}>
+          <div className="bg-card border border-border rounded-xl shadow-2xl w-[680px] max-w-[90vw] p-6" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold">Execute via MCP</h3>
+              <button onClick={() => setMcpCommand(null)} className="p-1 rounded hover:bg-muted transition-colors text-muted-foreground">&times;</button>
+            </div>
+            <p className="text-sm text-muted-foreground mb-3">Copy this instruction and paste it into Claude Code:</p>
+            <div className="relative">
+              <pre className="bg-muted/50 border border-border rounded-lg p-4 text-sm text-foreground whitespace-pre-wrap font-mono leading-relaxed select-all max-h-[50vh] overflow-y-auto">{mcpCommand}</pre>
+              <button
+                onClick={() => { navigator.clipboard.writeText(mcpCommand); addToast({ type: 'success', title: 'Copied!' }); }}
+                className="absolute top-2 right-2 px-3 py-1.5 rounded-md bg-primary text-primary-foreground text-xs font-medium hover:opacity-90 transition-opacity"
+              >Copy</button>
+            </div>
+            <div className="mt-4 flex justify-end">
+              <button onClick={() => setMcpCommand(null)} className="px-4 py-2 rounded-lg bg-muted text-muted-foreground hover:bg-muted/80 text-sm transition-colors">Close</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

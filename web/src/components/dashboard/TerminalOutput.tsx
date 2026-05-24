@@ -616,8 +616,8 @@ export function TerminalOutput({ outputs, title, role, status, agentId, projectI
       )}
       </div>
 
-      {/* Command input */}
-      {agentId && onSendCommand && (() => {
+      {/* Command input — hidden for external MCP agents (not interactive) */}
+      {agentId && onSendCommand && model !== 'external' && model !== 'external (MCP)' && (() => {
         // Axure agents use Playwright MCP which can't survive session resume —
         // only allow input while actively running; use UI buttons for restart.
         const isAxure = role === 'axure';

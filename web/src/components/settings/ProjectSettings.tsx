@@ -40,6 +40,9 @@ export function ProjectSettings() {
   const [frontendExtraPrompt, setFrontendExtraPrompt] = useState('');
   const [backendExtraPrompt, setBackendExtraPrompt] = useState('');
 
+  // MCP skill gen modal
+  const [skillGenMcpCommand, setSkillGenMcpCommand] = useState<string | null>(null);
+
   // Parse existing config
   const existingConfig = useMemo(() => {
     if (!project?.configJson) return null;
@@ -132,17 +135,18 @@ export function ProjectSettings() {
     svnFrontendPath, svnBackendPath, axshareUrl, frontendExtraPrompt, backendExtraPrompt, existingConfig, addToast]);
 
   const handleGenSkills = useCallback((workspaceType: 'frontend' | 'backend') => {
-    if (!client || !project) return;
+    if (!project) return;
     const p = workspaceType === 'frontend' ? frontendPath : backendPath;
     if (!p.trim()) return;
-    client.send({
-      type: 'workspace.generateSkills',
-      id: crypto.randomUUID(),
-      timestamp: new Date().toISOString(),
-      payload: { projectId: project.id, path: p.trim(), workspaceType },
-    });
-    addToast({ type: 'success', title: `Gen Skills started for ${workspaceType}`, message: 'Opus agent is analyzing the codebase...' });
-  }, [client, project, frontendPath, backendPath, addToast]);
+    const command = `請透過 OmniCommander MCP 為 ${workspaceType} workspace 產生 Skills。
+
+步驟：
+1. 呼叫 get_skill_gen_plan("${project.id}", "${workspaceType}") 取得完整的分析 prompt
+2. 使用 Agent tool 派出一個 subagent，將分析 prompt 作為任務傳入，工作目錄設為 \`${p.trim()}\`
+3. Subagent 會深度分析 codebase，產生 CLAUDE.md 和 .claude/skills/ 文件
+4. 過程中用 report_output 回報進度到 Web UI`;
+    setSkillGenMcpCommand(command);
+  }, [project, frontendPath, backendPath]);
 
   // Auto-save DB connections immediately when they change (so user doesn't need to click Save)
   const handleDbConnectionsChange = useCallback((updated: DbConnectionConfig[]) => {
@@ -429,6 +433,38 @@ export function ProjectSettings() {
 
       {/* Sync Settings Modal */}
       <AsanaSyncSettings open={showSyncSettings} onClose={() => setShowSyncSettings(false)} />
+
+      {/* MCP Skill Gen Command Modal */}
+      {skillGenMcpCommand && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setSkillGenMcpCommand(null)}>
+          <div className="bg-card border border-border rounded-xl shadow-2xl w-[680px] max-w-[90vw] p-6" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold">Generate Skills via MCP</h3>
+              <button onClick={() => setSkillGenMcpCommand(null)} className="p-1 rounded hover:bg-muted transition-colors text-muted-foreground">
+                &times;
+              </button>
+            </div>
+            <p className="text-sm text-muted-foreground mb-3">Copy this instruction and paste it into Claude Code:</p>
+            <div className="relative">
+              <pre className="bg-muted/50 border border-border rounded-lg p-4 text-sm text-foreground whitespace-pre-wrap font-mono leading-relaxed select-all">{skillGenMcpCommand}</pre>
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText(skillGenMcpCommand);
+                  addToast({ type: 'success', title: 'Copied!', message: 'MCP command copied to clipboard' });
+                }}
+                className="absolute top-2 right-2 px-3 py-1.5 rounded-md bg-primary text-primary-foreground text-xs font-medium hover:opacity-90 transition-opacity"
+              >
+                Copy
+              </button>
+            </div>
+            <div className="mt-4 flex justify-end">
+              <button onClick={() => setSkillGenMcpCommand(null)} className="px-4 py-2 rounded-lg bg-muted text-muted-foreground hover:bg-muted/80 text-sm transition-colors">
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -52,7 +52,7 @@ vi.mock('../../config.js', () => ({
     claudePath: 'claude',
     dbPath: ':memory:',
     aiContextDir: '/tmp',
-    port: 3456,
+    port: 3457,
   }),
 }));
 

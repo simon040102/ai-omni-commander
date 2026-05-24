@@ -209,6 +209,112 @@ export class ExecutionPipeline {
   }
 
   /**
+   * Build the full execution plan prompt for a task WITHOUT spawning an agent.
+   * Used by MCP Server to provide execution context to external Claude Code sessions.
+   * Reuses the same assembleContext logic as executeTask.
+   */
+  async buildExecutionPlan(taskId: string, model?: string, mockupFiles?: string[], testOptions?: TestOptions, executionRunId?: string): Promise<{ prompt: string; workingDir: string; model: string }> {
+    const task = getTask(taskId);
+    if (!task) throw new Error(`Task ${taskId} not found`);
+
+    const project = getProject(task.projectId);
+    if (!project) throw new Error(`Project ${task.projectId} not found`);
+
+    const superpowers = this.selectSuperpowers(task.taskType);
+    const projectConfig = project.configJson ? JSON.parse(project.configJson) as ProjectConfig : null;
+    const extraPrompt = task.label === 'frontend'
+      ? (projectConfig as any)?.frontendExtraPrompt as string | undefined
+      : task.label === 'backend'
+      ? (projectConfig as any)?.backendExtraPrompt as string | undefined
+      : undefined;
+
+    let specResult: SpecResult | null = null;
+    if (task.specUrl) {
+      try {
+        specResult = await this.specFetcher.fetch(task.specUrl, projectConfig?.svnConfig);
+      } catch { /* ignore */ }
+    }
+
+    let svnDocIds: string[] = [];
+    const functionCode = task.parentName || extractFunctionCode(task.title);
+    if (task.taskType !== 'testing' && functionCode && projectConfig?.svnConfig && this.svnSpecService) {
+      try {
+        svnDocIds = await this.svnSpecService.fetchSpecsForTask(
+          task.projectId, taskId, functionCode, projectConfig.svnConfig, task.label,
+        );
+      } catch { /* ignore */ }
+    }
+
+    const taskAttachments = this.getTaskAttachments(task.projectId, taskId, executionRunId);
+    const allSvnDocs = svnDocIds.length > 0 ? getDocumentsForTask(taskId).filter(d => d.source === 'svn') : [];
+    const svnDocuments = task.label === 'backend'
+      ? allSvnDocs.filter(d => d.docType === 'SD')
+      : allSvnDocs;
+
+    const schemaBasePath = path.join(path.dirname(getConfig().dbPath), 'schemas', task.projectId);
+    const dbSchemaFiles: Array<{ label: string; schemaPath: string; erPath: string }> = [];
+    if (fs.existsSync(schemaBasePath)) {
+      const pConfig: ProjectConfig = project.configJson ? JSON.parse(project.configJson) : {};
+      const connections = pConfig.dbConnections ?? [];
+      for (const connDir of fs.readdirSync(schemaBasePath)) {
+        const schemaFile = path.join(schemaBasePath, connDir, 'schema.json');
+        const erFile = path.join(schemaBasePath, connDir, 'er-diagram.mmd');
+        if (fs.existsSync(schemaFile)) {
+          const conn = connections.find((c: { id: string }) => c.id === connDir);
+          dbSchemaFiles.push({
+            label: conn?.label ?? connDir,
+            schemaPath: schemaFile,
+            erPath: fs.existsSync(erFile) ? erFile : '',
+          });
+        }
+      }
+    }
+
+    // For MCP mode: check SA flow cache only (no PTY generation).
+    // If not cached, the subagent will generate it via save_sa_flow MCP tool.
+    let saFlowResult = null;
+    if (task.label === 'frontend') {
+      const saDoc = this.findSaDocument(taskId, task.projectId, allSvnDocs);
+      if (saDoc) {
+        // Check cache only — don't call PTY
+        const saHash = require('node:crypto').createHash('sha256').update(saDoc.content).digest('hex').slice(0, 16);
+        const cachedPath = this.saFlowAnalyzer.getFlowPath(task.projectId, saHash);
+        if (require('node:fs').existsSync(cachedPath)) {
+          const cachedFlow = require('node:fs').readFileSync(cachedPath, 'utf-8');
+          saFlowResult = { fullFlow: cachedFlow, relevantFlow: cachedFlow, flowPath: cachedPath };
+        }
+        // If not cached, saFlowResult stays null → assembleContext won't include it
+        // The MCP prompt header instructs the subagent to generate and save_sa_flow
+      }
+    }
+
+    const prompt = this.assembleContext({
+      superpowers,
+      projectId: task.projectId,
+      taskId,
+      role: task.label,
+      taskTitle: task.title,
+      taskDescription: task.description || '',
+      taskType: task.taskType,
+      specResult,
+      dbConnectionString: project.dbConnectionString,
+      dbSchemaFiles: dbSchemaFiles.length > 0 ? dbSchemaFiles : undefined,
+      taskAttachments,
+      svnDocuments,
+      mockupFiles,
+      testOptions,
+      extraPrompt,
+      saFlowResult: saFlowResult ?? undefined,
+    });
+
+    const workingDir = this.resolveWorkingDir(project, task.label);
+    const { model: autoModel } = this.modelRouter.selectModel(task);
+    const finalModel = model || autoModel;
+
+    return { prompt, workingDir, model: finalModel };
+  }
+
+  /**
    * Build the assembled prompt for a task with a given role override.
    * Used by FullstackController to build FE/BE prompts from a fullstack task.
    */

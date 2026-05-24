@@ -3,6 +3,15 @@
     "playwright": {
       "command": "npx",
       "args": ["@playwright/mcp@latest", "--browser", "chromium"]
+    },
+    "omni-commander": {
+      "command": "node",
+      "args": ["server/dist/mcp-entry.js"],
+      "cwd": ".",
+      "env": {
+        "DB_PATH": "./data/omni.db",
+        "NOTIFY_URL": "http://localhost:3457/api/mcp-notify"
+      }
     }
   }
 }

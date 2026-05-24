@@ -76,16 +76,16 @@ pnpm dev
 ```
 
 This starts:
-- **Server** on `http://localhost:3456` (API + WebSocket)
-- **Frontend** on `http://localhost:5173` (Vite dev server with HMR, proxies to server)
+- **Server** on `http://localhost:3457` (API + WebSocket)
+- **Frontend** on `http://localhost:5174` (Vite dev server with HMR, proxies to server)
 
-Open `http://localhost:5173` in your browser.
+Open `http://localhost:5174` in your browser.
 
 ### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PORT` | `3456` | Server port |
+| `PORT` | `3457` | Server port |
 | `CLAUDE_PATH` | `claude` | Path to Claude Code CLI binary |
 | `DB_PATH` | `data/omni.db` | SQLite database file path |
 | `AI_CONTEXT_DIR` | `.ai_context` | Directory for shared API contracts |

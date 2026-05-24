@@ -61,7 +61,7 @@ export function getConfig(): Config {
 
   cachedConfig = {
     claudePath,
-    port: parseInt(process.env['PORT'] || '3456', 10),
+    port: parseInt(process.env['PORT'] || '3457', 10),
     dbPath: resolveDbPath(),
     defaultModel: process.env['DEFAULT_MODEL'] || 'sonnet',
     logLevel: process.env['LOG_LEVEL'] || 'info',

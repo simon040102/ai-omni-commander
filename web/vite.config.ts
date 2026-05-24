@@ -10,15 +10,15 @@ export default defineConfig({
     },
   },
   server: {
-    port: 5173,
+    port: 5174,
     proxy: {
       '/omni-ws': {
-        target: 'http://localhost:3456',
+        target: 'http://localhost:3457',
         ws: true,
         changeOrigin: true,
       },
       '/api': {
-        target: 'http://localhost:3456',
+        target: 'http://localhost:3457',
         changeOrigin: true,
       },
     },

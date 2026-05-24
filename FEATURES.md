@@ -291,8 +291,8 @@ AI-OmniCommander 是一個多 Agent 協作開發系統，透過 WebSocket 連接
 
 ## 十五、技術細節
 
-- Server port：3456（可透過 `PORT` 環境變數設定）
-- Vite dev server：5173，proxy `/omni-ws` 和 `/api` 到 server
+- Server port：3457（可透過 `PORT` 環境變數設定）
+- Vite dev server：5174，proxy `/omni-ws` 和 `/api` 到 server
 - Claude CLI 路徑：`CLAUDE_PATH` 環境變數（預設 `claude`）
 - stdin prompt：初始 prompt 透過 stdin 傳送，格式 `{"type":"user","content":"..."}`
 - EventBus wildcard：`agent.*` 事件直接作為 WS 訊息廣播

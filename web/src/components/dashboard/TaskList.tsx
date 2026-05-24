@@ -97,6 +97,7 @@ export function TaskList({ selectedModel, onViewChange }: TaskListProps) {
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
   const [confirmClearAsana, setConfirmClearAsana] = useState(false);
   const [showSvnBrowser, setShowSvnBrowser] = useState<'frontend' | 'backend' | false>(false);
+  const [mcpCommandTaskId, setMcpCommandTaskId] = useState<string | null>(null);
   const [showSvnBrowserForEdit, setShowSvnBrowserForEdit] = useState<'frontend' | 'backend' | false>(false);
   const svnBrowserEditCallback = useRef<((url: string) => void) | null>(null);
   const pendingUploadsRef = useRef<Array<{ file: File; docType: 'SA' | 'SD' | 'image' }>>([]);
@@ -249,27 +250,11 @@ export function TaskList({ selectedModel, onViewChange }: TaskListProps) {
     });
   }, [currentProjectId, client]);
 
-  const handleExecuteTask = useCallback((taskId: string, modelOverride?: string, mockupFiles?: string[], testOptions?: TestOptions, executionRunId?: string) => {
-    if (!currentProjectId || !client) return;
-    const model = modelOverride || selectedModel;
-
-    client.send({
-      type: 'project.startExecution',
-      id: crypto.randomUUID(),
-      timestamp: new Date().toISOString(),
-      payload: {
-        projectId: currentProjectId,
-        taskId,
-        model,
-        ...(mockupFiles && mockupFiles.length > 0 ? { mockupFiles } : {}),
-        ...(testOptions ? { testOptions } : {}),
-        ...(executionRunId ? { executionRunId } : {}),
-      },
-    });
-
-    addToast({ type: 'info', title: 'Task execution started', message: `Using ${model}...` });
+  const handleExecuteTask = useCallback((taskId: string, _modelOverride?: string, _mockupFiles?: string[], _testOptions?: TestOptions, _executionRunId?: string) => {
+    if (!currentProjectId) return;
+    setMcpCommandTaskId(taskId);
     setExpandedTaskId(null);
-  }, [currentProjectId, client, selectedModel, addToast]);
+  }, [currentProjectId]);
   handleExecuteTaskRef.current = handleExecuteTask;
 
   const handleUploadImage = useCallback((taskId: string, file: File, executionRunId?: string) => {
@@ -797,6 +782,57 @@ export function TaskList({ selectedModel, onViewChange }: TaskListProps) {
       <AsanaImportDrawer open={showImportDrawer} onClose={() => setShowImportDrawer(false)} />
 
       {/* SVN browser for new task */}
+      {/* MCP Command Modal */}
+      {mcpCommandTaskId && (() => {
+        const task = projectTasks.find(t => t.id === mcpCommandTaskId);
+        const mcpCommand = `請透過 OmniCommander MCP 執行任務 ${mcpCommandTaskId}。
+
+步驟：
+1. 呼叫 get_execution_plan("${mcpCommandTaskId}") 取得完整執行計畫（含 superpowers、規格文件、完成標準、MCP 回報指示）
+2. 使用 Agent tool 派出一個 subagent，將執行計畫的完整內容作為 prompt 傳入，讓 subagent 在指定 workspace 中執行開發工作
+3. 執行計畫中已包含 MCP 回報指示，subagent 會自動呼叫 report_output、report_milestone 回報進度到 Web UI
+4. Subagent 完成後，確認結果，呼叫 update_task_status("${mcpCommandTaskId}", "completed", "摘要") 標記完成`;
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setMcpCommandTaskId(null)}>
+            <div className="bg-card border border-border rounded-xl shadow-2xl w-[680px] max-w-[90vw] p-6" onClick={e => e.stopPropagation()}>
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-lg font-semibold">Execute via MCP</h3>
+                <button onClick={() => setMcpCommandTaskId(null)} className="p-1 rounded hover:bg-muted transition-colors">
+                  <IconX className="w-4 h-4" />
+                </button>
+              </div>
+              {task && (
+                <div className="text-sm text-muted-foreground mb-3">
+                  <span className="font-medium text-foreground">{task.title}</span>
+                  <span className="ml-2 px-1.5 py-0.5 rounded text-xs bg-blue-500/15 text-blue-400">{task.label}</span>
+                </div>
+              )}
+              <p className="text-sm text-muted-foreground mb-3">Copy this instruction and paste it into Claude Code / Claude Desktop:</p>
+              <div className="relative">
+                <pre className="bg-muted/50 border border-border rounded-lg p-4 text-sm text-foreground whitespace-pre-wrap font-mono leading-relaxed select-all">{mcpCommand}</pre>
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(mcpCommand);
+                    addToast({ type: 'success', title: 'Copied!', message: 'MCP command copied to clipboard' });
+                  }}
+                  className="absolute top-2 right-2 px-3 py-1.5 rounded-md bg-primary text-primary-foreground text-xs font-medium hover:opacity-90 transition-opacity"
+                >
+                  Copy
+                </button>
+              </div>
+              <div className="mt-4 flex justify-end">
+                <button
+                  onClick={() => setMcpCommandTaskId(null)}
+                  className="px-4 py-2 rounded-lg bg-muted text-muted-foreground hover:bg-muted/80 text-sm transition-colors"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {showSvnBrowser && (
         <SvnBrowser
           lockedSpecType={showSvnBrowser}
@@ -971,8 +1007,17 @@ function TaskRow({ task, expandedTaskId, onExecute, onDelete, onToggleExpand, on
           {task.title || <span className="italic text-muted-foreground">Untitled</span>}
         </span>
 
-        {/* Status — fixed width for alignment */}
-        <span className={`text-[11px] font-medium flex-shrink-0 w-[6.5rem] text-center px-2 py-0.5 rounded border ${STATUS_STYLES[task.status] || 'bg-gray-500/15 text-gray-400 border-gray-500/30'}`}>
+        {/* Status — fixed width for alignment; click to reset if stuck */}
+        <span
+          className={`text-[11px] font-medium flex-shrink-0 w-[6.5rem] text-center px-2 py-0.5 rounded border ${STATUS_STYLES[task.status] || 'bg-gray-500/15 text-gray-400 border-gray-500/30'} ${(task.status === 'in_progress' || task.status === 'failed' || task.status === 'completed') ? 'cursor-pointer hover:opacity-70' : ''}`}
+          title={(task.status === 'in_progress' || task.status === 'failed' || task.status === 'completed') ? 'Click to reset to pending' : undefined}
+          onClick={(e) => {
+            if (task.status === 'in_progress' || task.status === 'failed' || task.status === 'completed') {
+              e.stopPropagation();
+              onUpdate(task.id, { status: 'pending' } as any);
+            }
+          }}
+        >
           {task.status.replace(/_/g, ' ')}
         </span>
 
@@ -1093,6 +1138,17 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
   const frontendUploadRef = useRef<HTMLInputElement>(null);
   const backendUploadRef = useRef<HTMLInputElement>(null);
   const [localUploadedFiles, setLocalUploadedFiles] = useState<Array<{ filename: string; docType: 'SA' | 'SD' }>>([]);
+
+  // Load existing documents from DB (this component only mounts when expanded)
+  const [dbDocuments, setDbDocuments] = useState<Array<{ id: string; filename: string; docType: string | null; source: string }>>([]);
+  useEffect(() => {
+    fetch(`/api/task/${task.id}/documents`)
+      .then(res => res.json())
+      .then(data => {
+        if (data.documents) setDbDocuments(data.documents);
+      })
+      .catch(() => {});
+  }, [task.id]);
 
   // Mockup discovery state
   const [mockupCode, setMockupCode] = useState(() => {
@@ -1505,6 +1561,44 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
           上傳檔案 (自動判斷 SA/SD)
         </button>
       </div>
+
+      {/* Existing documents from DB */}
+      {dbDocuments.length > 0 && (
+        <div>
+          <span className="text-xs text-muted-foreground font-semibold block mb-1.5">Attached Documents ({dbDocuments.length})</span>
+          <div className="space-y-1">
+            {dbDocuments.map(doc => (
+              <div key={doc.id} className="flex items-center gap-2 text-sm group">
+                <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium flex-shrink-0 ${
+                  doc.docType === 'SA' ? 'bg-blue-500/15 text-blue-400' :
+                  doc.docType === 'SD' ? 'bg-orange-500/15 text-orange-400' :
+                  'bg-gray-500/15 text-gray-400'
+                }`}>
+                  {doc.docType || 'other'}
+                </span>
+                <IconCheck className="w-3.5 h-3.5 text-green-400 flex-shrink-0" />
+                <span className="text-foreground/80 truncate flex-1" title={doc.filename}>{doc.filename.replace(/^\[.*?\]\s*/, '').replace(/^[a-f0-9-]+-/, '')}</span>
+                <span className={`px-1.5 py-0.5 rounded text-[10px] flex-shrink-0 ${
+                  doc.source === 'svn' ? 'bg-orange-500/15 text-orange-400' : 'bg-purple-500/15 text-purple-400'
+                }`}>
+                  {doc.source === 'svn' ? 'SVN' : '已上傳'}
+                </span>
+                <button
+                  onClick={() => {
+                    fetch(`/api/document/${doc.id}`, { method: 'DELETE' })
+                      .then(() => setDbDocuments(prev => prev.filter(d => d.id !== doc.id)))
+                      .catch(() => {});
+                  }}
+                  className="p-1 rounded text-muted-foreground/70 hover:text-red-400 hover:bg-red-500/10 transition-colors opacity-0 group-hover:opacity-100"
+                  title="刪除"
+                >
+                  <IconTrash className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Test options (per-role checkboxes) */}
       {onExecute && task.status !== 'in_progress' && task.status !== 'assigned' && (task.label === 'frontend' || task.label === 'backend' || task.label === 'fullstack') && (

@@ -54,12 +54,8 @@ export class SpecModeHandler {
     agentId?: string,
     executionRunId?: string,
   ): Promise<void> {
-    // Clear old document bindings for this task before uploading new ones
-    if (taskId) {
-      const db = getDb();
-      db.prepare('DELETE FROM task_documents WHERE task_id = ?').run(taskId);
-      logger.info({ taskId }, 'Cleared old task document bindings');
-    }
+    // Note: we no longer clear all bindings on each upload.
+    // Documents accumulate per task. User can delete individual docs via UI.
 
     let subFolder: string | undefined;
     if (agentId) {
@@ -70,8 +66,15 @@ export class SpecModeHandler {
       const taskBase = code ? `${code}_${taskId.slice(0, 8)}` : `task_${taskId.slice(0, 8)}`;
       subFolder = executionRunId ? `${taskBase}/${executionRunId}` : taskBase;
     }
-    await this.documentParser.saveAndParse(projectId, filename, content, fileType, docType || 'SD', { subFolder });
-    logger.info({ projectId, filename, docType: docType || 'SD', subFolder }, 'Document uploaded');
+    const doc = await this.documentParser.saveAndParse(projectId, filename, content, fileType, docType || 'SD', { subFolder });
+
+    // Bind document to task if taskId is provided
+    if (taskId) {
+      const db = getDb();
+      db.prepare('INSERT OR IGNORE INTO task_documents (task_id, document_id) VALUES (?, ?)').run(taskId, doc.id);
+    }
+
+    logger.info({ projectId, filename, docType: docType || 'SD', subFolder, taskId: taskId || null }, 'Document uploaded');
   }
 
   /**

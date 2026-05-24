@@ -67,22 +67,15 @@ export function Dashboard({ onViewChange }: DashboardProps) {
     });
   }, [currentProjectId, client, isSyncing]);
 
+  const [adHocMcpCommand, setAdHocMcpCommand] = useState<string | null>(null);
+
   const handleAdHocExecute = useCallback(() => {
-    if (!currentProjectId || !client || !adHocInput.trim()) return;
-    client.send({
-      type: 'project.startExecution',
-      id: crypto.randomUUID(),
-      timestamp: new Date().toISOString(),
-      payload: {
-        projectId: currentProjectId,
-        requirement: adHocInput.trim(),
-        model: selectedModel,
-        role: adHocTarget,
-      },
-    });
-    addToast({ type: 'info', title: 'Ad-hoc task started', message: `${adHocTarget} / ${selectedModel}` });
+    if (!currentProjectId || !adHocInput.trim()) return;
+    const workspacePath = adHocTarget === 'frontend' ? project?.frontendPath : project?.backendPath;
+    const command = `請在工作目錄 \`${workspacePath || project?.workingDir || ''}\` 執行以下任務（${adHocTarget}）：\n\n${adHocInput.trim()}\n\n使用 Agent tool 派出 subagent 執行，過程中用 report_output 回報進度。`;
+    setAdHocMcpCommand(command);
     setAdHocInput('');
-  }, [currentProjectId, client, adHocInput, selectedModel, adHocTarget, addToast]);
+  }, [currentProjectId, adHocInput, adHocTarget, project]);
 
   /* ─── Empty state ─── */
   if (!currentProjectId || !project) {
@@ -218,6 +211,29 @@ export function Dashboard({ onViewChange }: DashboardProps) {
 
       {/* Asana sync settings modal */}
       <AsanaSyncSettings open={showSyncSettings} onClose={() => setShowSyncSettings(false)} />
+
+      {/* Ad-hoc MCP Command Modal */}
+      {adHocMcpCommand && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setAdHocMcpCommand(null)}>
+          <div className="bg-card border border-border rounded-xl shadow-2xl w-[680px] max-w-[90vw] p-6" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold">Execute via MCP</h3>
+              <button onClick={() => setAdHocMcpCommand(null)} className="p-1 rounded hover:bg-muted transition-colors text-muted-foreground">&times;</button>
+            </div>
+            <p className="text-sm text-muted-foreground mb-3">Copy this instruction and paste it into Claude Code:</p>
+            <div className="relative">
+              <pre className="bg-muted/50 border border-border rounded-lg p-4 text-sm text-foreground whitespace-pre-wrap font-mono leading-relaxed select-all">{adHocMcpCommand}</pre>
+              <button
+                onClick={() => { navigator.clipboard.writeText(adHocMcpCommand); addToast({ type: 'success', title: 'Copied!' }); }}
+                className="absolute top-2 right-2 px-3 py-1.5 rounded-md bg-primary text-primary-foreground text-xs font-medium hover:opacity-90 transition-opacity"
+              >Copy</button>
+            </div>
+            <div className="mt-4 flex justify-end">
+              <button onClick={() => setAdHocMcpCommand(null)} className="px-4 py-2 rounded-lg bg-muted text-muted-foreground hover:bg-muted/80 text-sm transition-colors">Close</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

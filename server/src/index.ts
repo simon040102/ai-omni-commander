@@ -146,6 +146,7 @@ async function main() {
       status: 'ok',
       mode: 'sdk',
       activeAgents: agentManager.getActiveAgents().length,
+      projectRoot: config.projectRoot.replace(/\\/g, '/'),
     });
   });
 
@@ -540,6 +541,64 @@ async function main() {
     }
   });
 
+  // ── Task documents endpoint ──────────────────────────
+  // Returns documents bound to a specific task (from task_documents + project-level docs).
+  app.get('/api/task/:taskId/documents', (req, res) => {
+    try {
+      const { taskId } = req.params;
+      const db = getDb();
+
+      // Only return documents explicitly bound to this task
+      const taskDocs = db.prepare(`
+        SELECT d.id, d.filename, d.file_path, d.file_type, d.doc_type, d.source
+        FROM task_documents td JOIN documents d ON d.id = td.document_id
+        WHERE td.task_id = ?
+        ORDER BY d.created_at ASC
+      `).all(taskId) as Array<Record<string, unknown>>;
+
+      const docs = taskDocs.map(d => ({
+        id: d['id'] as string,
+        filename: d['filename'] as string,
+        filePath: d['file_path'] as string,
+        docType: d['doc_type'] as string | null,
+        source: d['source'] as string,
+      }));
+
+      res.json({ taskId, documents: docs });
+    } catch (err) {
+      logger.error({ err }, 'Failed to get task documents');
+      res.status(500).json({ error: 'Failed to get task documents' });
+    }
+  });
+
+  // ── Delete document endpoint ──────────────────────────
+  app.delete('/api/document/:documentId', (req, res) => {
+    try {
+      const { documentId } = req.params;
+      const db = getDb();
+      db.prepare('DELETE FROM task_documents WHERE document_id = ?').run(documentId);
+      db.prepare('DELETE FROM documents WHERE id = ?').run(documentId);
+      res.json({ ok: true });
+    } catch (err) {
+      logger.error({ err }, 'Failed to delete document');
+      res.status(500).json({ error: 'Failed to delete document' });
+    }
+  });
+
+  // ── MCP Execution Plan endpoint ──────────────────────────
+  // Returns the full assembled prompt for a task (same as what agents receive).
+  // Called by MCP Server's get_execution_plan tool.
+  app.get('/api/execution-plan/:taskId', async (req, res) => {
+    try {
+      const { taskId } = req.params;
+      const result = await pipeline.buildExecutionPlan(taskId);
+      res.json({ prompt: result.prompt, workingDir: result.workingDir, model: result.model });
+    } catch (err: any) {
+      logger.error({ err }, 'Failed to build execution plan');
+      res.status(404).json({ error: err.message || 'Failed to build execution plan' });
+    }
+  });
+
   // 4. Create HTTP server and WebSocket server
   const httpServer = createServer(app);
   const wsServer = new OmniWebSocketServer(httpServer);
@@ -551,6 +610,27 @@ async function main() {
 
   // 6. Register WebSocket message handlers
   registerHandlers(wsServer, orchestrator, agentManager, workspaceScanner, skillGenerator, asanaClient, asanaSyncService, quickModeHandler, svnSpecService, specHandler.getDocumentParser());
+
+  // ── MCP Notification endpoint ──────────────────────────
+  // Receives notifications from the MCP Server process (separate process)
+  // and broadcasts them via WebSocket to the Web UI.
+  app.post('/api/mcp-notify', (req, res) => {
+    try {
+      const { event, data } = req.body as { event: string; data: Record<string, unknown> };
+      if (!event) {
+        res.status(400).json({ error: 'Missing event field' });
+        return;
+      }
+
+      // Broadcast as WS message — wrap data in payload to match frontend expectations
+      wsServer.broadcast({ type: event, id: data.agentId || data.taskId || '', timestamp: new Date().toISOString(), payload: data } as any);
+
+      res.json({ ok: true });
+    } catch (err) {
+      logger.error({ err }, 'MCP notify error');
+      res.status(500).json({ error: 'Internal error' });
+    }
+  });
 
   // 6. Wire EventBus to WebSocket broadcast
   eventBus.on('agent.*', (event) => {
@@ -652,7 +732,7 @@ async function main() {
   // 9. Listen
   httpServer.listen(config.port, () => {
     logger.info({ port: config.port }, 'AI-OmniCommander server is running');
-    logger.info(`Dashboard: http://localhost:5173`);
+    logger.info(`Dashboard: http://localhost:5174`);
     logger.info(`API: http://localhost:${config.port}/api/health`);
     logger.info(`WebSocket: ws://localhost:${config.port}`);
   });

@@ -1,6 +1,66 @@
 # AI-OmniCommander
 
-A dual-mode AI collaborative development system that orchestrates multiple Claude Code CLI instances (agents) to work on software projects simultaneously.
+A dual-mode AI collaborative development system. Originally orchestrated multiple Claude Code CLI instances (agents) directly; now operates as an **MCP Server** that provides task management and execution context to external Claude Code sessions.
+
+## MCP Architecture (v5 — current)
+
+```
+┌─ Web UI (React + Vite :5174) ────┐
+│  Project mgmt / Task mgmt        │
+│  Document upload / Agent monitor  │
+│        │ WebSocket                │
+│        ▼                          │
+├─ Web Server (Express :3457) ─────┤     ┌─ MCP Server (stdio) ───────┐
+│  REST API + WebSocket             │     │  Spawned by Claude Code     │
+│  /api/execution-plan/:taskId      │     │  via .mcp.json              │
+│  /api/mcp-notify (POST)           │     │        │                    │
+│        │                          │     │        ▼                    │
+│   SQLite (data/omni.db) ◄─────────╋─────╋── SQLite (same omni.db)    │
+│        ▲                          │     │                             │
+│        │  HTTP notify             │     │  POST /api/mcp-notify ───►  │
+│        └──────────────────────────╋─────╋── on each MCP write op      │
+└───────────────────────────────────┘     └─────────────────────────────┘
+
+Claude Code / Claude Desktop
+  ├─ .mcp.json → spawns MCP Server process
+  ├─ get_execution_plan(taskId) → full prompt with superpowers, docs, strategy
+  ├─ Agent tool → subagent in workspace executes the plan
+  ├─ report_output() / report_milestone() → syncs to Web UI Agents view
+  └─ update_task_status() → marks task complete
+```
+
+### MCP Server Entry Point
+- `server/src/mcp-entry.ts` — stdio transport, spawned by Claude Code
+- `server/src/mcp/McpServer.ts` — registers all 14 tools
+- `server/src/mcp/tools/` — tool implementations (task, document, project, progress, workspace)
+- `server/src/mcp/db.ts` — standalone SQLite connection for MCP process
+- `server/src/mcp/notify.ts` — HTTP POST to Web Server for real-time UI updates
+
+### MCP Tools (14 total)
+| Tool | Purpose |
+|------|---------|
+| `get_task` | Fetch task details with project context |
+| `list_pending_tasks` | List pending/queued tasks |
+| `get_execution_plan` | Full execution prompt (superpowers + docs + strategy + completion criteria) |
+| `update_task_status` | Update task status (in_progress/completed/failed) |
+| `get_documents` | List documents for project/task |
+| `read_document` | Read document content |
+| `list_projects` | List all projects |
+| `get_project` | Get project details with task stats |
+| `create_project` | Create new project |
+| `create_task` | Create task in project |
+| `report_output` | Push execution output to Web UI terminal |
+| `report_milestone` | Report progress milestone |
+| `get_skill_gen_plan` | Get prompt for CLAUDE.md/.claude/skills generation |
+| `save_sa_flow` | Save Mermaid SA flow diagram to cache |
+
+### Execution Flow
+1. Web UI: user clicks Execute → shows MCP instruction modal
+2. User pastes instruction into Claude Code
+3. Claude Code calls `get_execution_plan(taskId)` → gets full prompt from Web Server API
+4. Claude Code uses Agent tool to spawn subagent with the prompt
+5. Subagent calls `report_output` / `report_milestone` → Web UI updates in real-time
+6. Subagent completes → `update_task_status("completed")` → Web UI reflects
 
 ## Architecture Overview
 
@@ -174,8 +234,8 @@ cd web && pnpm dev
 npx tsc --build shared/tsconfig.json server/tsconfig.json web/tsconfig.json
 ```
 
-- Server runs on port 3456 (configurable via `PORT` env var)
-- Vite dev server runs on port 5173 and proxies `/omni-ws` and `/api` to server
+- Server runs on port 3457 (configurable via `PORT` env var)
+- Vite dev server runs on port 5174 and proxies `/omni-ws` and `/api` to server
 - SQLite database: `data/omni.db` (persists across restarts)
 - Claude CLI path: configurable via `CLAUDE_PATH` env var (default: `claude`)
 
@@ -273,8 +333,8 @@ cd web && pnpm dev
 npx tsc --build shared/tsconfig.json server/tsconfig.json
 ```
 
-- Server runs on port 3456 (configurable via `PORT` env var)
-- Vite dev server runs on port 5173 and proxies `/omni-ws` and `/api` to server
+- Server runs on port 3457 (configurable via `PORT` env var)
+- Vite dev server runs on port 5174 and proxies `/omni-ws` and `/api` to server
 - SQLite database: `data/omni.db` (persists across restarts)
 - Claude CLI path: configurable via `CLAUDE_PATH` env var (default: `claude`)
 

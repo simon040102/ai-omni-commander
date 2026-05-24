@@ -23,6 +23,12 @@ export function MockupView() {
   const [loading, setLoading] = useState(false);
   const [reloading, setReloading] = useState(false);
   const [crawlingAll, setCrawlingAll] = useState(false);
+  const [mcpCommand, setMcpCommand] = useState<string | null>(null);
+  const [omniRoot, setOmniRoot] = useState('');
+
+  useEffect(() => {
+    fetch('/api/health').then(r => r.json()).then(d => { if (d.projectRoot) setOmniRoot(d.projectRoot); }).catch(() => {});
+  }, []);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
 
   const axshareUrl: string = (() => {
@@ -77,21 +83,21 @@ export function MockupView() {
   };
 
   const handleReload = () => {
-    if (!project || selected.size === 0 || !client) return;
+    if (!project || selected.size === 0) return;
     if (!axshareUrl) { alert('請先在 Project Settings 設定 Axure Share URL'); return; }
-    setReloading(true);
-    client.send({
-      type: 'mockup.reload',
-      id: crypto.randomUUID(),
-      timestamp: new Date().toISOString(),
-      payload: {
-        projectId: project.id,
-        filenames: [...selected],
-        axshareUrl,
-      },
-    });
-    // Optimistically reset reloading after a moment (agent will handle it)
-    setTimeout(() => setReloading(false), 2000);
+    const fileList = [...selected].map(f => `- ${f}`).join('\n');
+    setMcpCommand(`請使用 /crawl-axure-snapshots skill 重新爬取以下 Axure 原型頁面。
+
+使用 Playwright MCP 工具（browser_navigate、browser_evaluate），不要用 browser_take_screenshot。
+
+Axure Share URL: ${axshareUrl}
+Project ID: ${project.id}
+Output directory: ${omniRoot}/docs/axure-snapshots/${project.id}/
+
+要重新爬取的頁面：
+${fileList}
+
+使用 Agent tool 派出 subagent 執行。`);
   };
 
   const previewUrl = previewFile && project
@@ -148,20 +154,21 @@ export function MockupView() {
               ) : (
                 <button
                   onClick={() => {
-                    if (!client) return;
-                    setCrawlingAll(true);
-                    client.send({
-                      type: 'mockup.crawlAll',
-                      id: crypto.randomUUID(),
-                      timestamp: new Date().toISOString(),
-                      payload: { projectId: project.id, axshareUrl, existingFiles: files.map(f => f.filename) },
-                    });
-                    setTimeout(() => setCrawlingAll(false), 2000);
+                    const skipSection = files.length > 0
+                      ? `\n已爬取（跳過）：\n${files.map(f => `- ${f.filename}`).join('\n')}\n`
+                      : '';
+                    setMcpCommand(`請使用 /crawl-axure-snapshots skill 爬取 Axure Share 專案的所有頁面。
+
+使用 Playwright MCP 工具（browser_navigate、browser_evaluate），不要用 browser_take_screenshot。
+
+Axure Share URL: ${axshareUrl}
+Project ID: ${project.id}
+Output directory: ${omniRoot}/docs/axure-snapshots/${project.id}/${skipSection}
+使用 Agent tool 派出 subagent 執行。完成後輸出 [TASK_COMPLETE]。`);
                   }}
-                  disabled={crawlingAll}
-                  className="px-3 py-1.5 text-xs rounded bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                  className="px-3 py-1.5 text-xs rounded bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
                 >
-                  {crawlingAll ? '派發 Agent...' : '爬取全部頁面'}
+                  爬取全部頁面
                 </button>
               )
             )}
@@ -264,46 +271,48 @@ export function MockupView() {
         ) : erroredAxureAgent && axshareUrl ? (
           <button
             onClick={() => {
-              if (!client) return;
-              setCrawlingAll(true);
-              client.send({
-                type: 'mockup.crawlAll',
-                id: crypto.randomUUID(),
-                timestamp: new Date().toISOString(),
-                payload: { projectId: project.id, axshareUrl, existingFiles: files.map(f => f.filename) },
-              });
-              setTimeout(() => setCrawlingAll(false), 2000);
+              const skipSection = files.length > 0
+                ? `\n已爬取（跳過）：\n${files.map(f => `- ${f.filename}`).join('\n')}\n`
+                : '';
+              setMcpCommand(`請使用 /crawl-axure-snapshots skill 繼續爬取 Axure Share 專案（上次中斷）。
+
+使用 Playwright MCP 工具（browser_navigate、browser_evaluate），不要用 browser_take_screenshot。
+
+Axure Share URL: ${axshareUrl}
+Project ID: ${project.id}
+Output directory: ${omniRoot}/docs/axure-snapshots/${project.id}/${skipSection}
+使用 Agent tool 派出 subagent 執行。完成後輸出 [TASK_COMPLETE]。`);
             }}
-            disabled={crawlingAll}
-            className="mt-auto px-3 py-1.5 text-xs rounded bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50 transition-colors"
+            className="mt-auto px-3 py-1.5 text-xs rounded bg-amber-600 text-white hover:bg-amber-700 transition-colors"
           >
-            {crawlingAll ? '派發 Agent...' : '繼續爬取（上次中斷）'}
+            繼續爬取（上次中斷）
           </button>
         ) : selected.size > 0 ? (
           <button
             onClick={handleReload}
-            disabled={reloading || !axshareUrl}
+            disabled={!axshareUrl}
             className="mt-auto px-3 py-1.5 text-xs rounded bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors"
           >
-            {reloading ? '派發 Agent...' : `Reload (${selected.size})`}
+            {`Reload (${selected.size})`}
           </button>
         ) : axshareUrl ? (
           <button
             onClick={() => {
-              if (!client) return;
-              setCrawlingAll(true);
-              client.send({
-                type: 'mockup.crawlAll',
-                id: crypto.randomUUID(),
-                timestamp: new Date().toISOString(),
-                payload: { projectId: project.id, axshareUrl, existingFiles: files.map(f => f.filename) },
-              });
-              setTimeout(() => setCrawlingAll(false), 2000);
+              const skipSection = files.length > 0
+                ? `\n已爬取（跳過）：\n${files.map(f => `- ${f.filename}`).join('\n')}\n`
+                : '';
+              setMcpCommand(`請使用 /crawl-axure-snapshots skill 爬取 Axure Share 專案的所有頁面。
+
+使用 Playwright MCP 工具（browser_navigate、browser_evaluate），不要用 browser_take_screenshot。
+
+Axure Share URL: ${axshareUrl}
+Project ID: ${project.id}
+Output directory: ${omniRoot}/docs/axure-snapshots/${project.id}/${skipSection}
+使用 Agent tool 派出 subagent 執行。完成後輸出 [TASK_COMPLETE]。`);
             }}
-            disabled={crawlingAll}
-            className="mt-auto px-3 py-1.5 text-xs rounded bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors"
+            className="mt-auto px-3 py-1.5 text-xs rounded bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
           >
-            {crawlingAll ? '派發 Agent...' : '爬取全部頁面'}
+            爬取全部頁面
           </button>
         ) : null}
       </div>
@@ -324,6 +333,29 @@ export function MockupView() {
           </div>
         )}
       </div>
+
+      {/* MCP Command Modal */}
+      {mcpCommand && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setMcpCommand(null)}>
+          <div className="bg-card border border-border rounded-xl shadow-2xl w-[680px] max-w-[90vw] p-6" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold">Crawl Axure via MCP</h3>
+              <button onClick={() => setMcpCommand(null)} className="p-1 rounded hover:bg-muted transition-colors text-muted-foreground">&times;</button>
+            </div>
+            <p className="text-sm text-muted-foreground mb-3">Copy this instruction and paste it into Claude Code:</p>
+            <div className="relative">
+              <pre className="bg-muted/50 border border-border rounded-lg p-4 text-sm text-foreground whitespace-pre-wrap font-mono leading-relaxed select-all max-h-[50vh] overflow-y-auto">{mcpCommand}</pre>
+              <button
+                onClick={() => { navigator.clipboard.writeText(mcpCommand); }}
+                className="absolute top-2 right-2 px-3 py-1.5 rounded-md bg-primary text-primary-foreground text-xs font-medium hover:opacity-90 transition-opacity"
+              >Copy</button>
+            </div>
+            <div className="mt-4 flex justify-end">
+              <button onClick={() => setMcpCommand(null)} className="px-4 py-2 rounded-lg bg-muted text-muted-foreground hover:bg-muted/80 text-sm transition-colors">Close</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
