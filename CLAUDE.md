@@ -50,11 +50,12 @@ A dual-mode AI collaborative development system. Originally orchestrated multipl
 - **絕對不要輸出 raw JSON**
 
 ### 選擇任務後
-1. 取得任務詳情 `get_task(taskId)`
-2. 自動查找：SVN 文件 `get_documents()`、Axure 原型 `ls docs/axure-snapshots/{projectId}/{code}-*.html`
-3. 告知使用者找到什麼
-4. 問：「有沒有額外文件？沒有的話說『執行』」
-5. 使用者說「執行」才派 subagent
+1. 先問：「要做**前端**、**後端**、還是**都做**？」
+2. 取得任務詳情 `get_task(taskId)`
+3. 自動查找：SVN 文件 `get_documents()`、Axure 原型 `ls docs/axure-snapshots/{projectId}/{code}-*.html`
+4. 告知使用者找到什麼
+5. 問：「有沒有額外文件？沒有的話說『執行』」
+6. 使用者說「執行」才派 subagent（前端 → cwd=frontendPath，後端 → cwd=backendPath，都做 → 派兩個 subagent）
 
 ### 執行時
 - `create_task` + `update_task_status("in_progress")`
