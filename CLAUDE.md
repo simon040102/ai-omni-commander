@@ -53,9 +53,23 @@ A dual-mode AI collaborative development system. Originally orchestrated multipl
 1. 先問：「要做**前端**、**後端**、還是**都做**？」
 2. 取得任務詳情 `get_task(taskId)`
 3. 自動查找：SVN 文件 `get_documents()`、Axure 原型 `ls docs/axure-snapshots/{projectId}/{code}-*.html`
-4. 告知使用者找到什麼
-5. 問：「有沒有額外文件？沒有的話說『執行』」
-6. 使用者說「執行」才派 subagent（前端 → cwd=frontendPath，後端 → cwd=backendPath，都做 → 派兩個 subagent）
+4. **檢查規格文件是否齊全**：
+   - 前端任務 → 必須有 **SA 文件**（系統分析規格），沒有就告知使用者並詢問是否提供
+   - 後端任務 → 必須有 **SD 文件**（系統設計規格），沒有就告知使用者並詢問是否提供
+   - 都做 → SA + SD 都要有
+   - Axure 原型（前端任務建議有，非必要）
+   - **規格不齊全不執行**，明確告知缺什麼：
+     ```
+     ⚠️ 缺少規格文件：
+     - SA 文件：❌ 未找到（前端開發必要）
+     - SD 文件：✅ WA05-design-spec.md
+     - Axure 原型：✅ 6 個頁面
+
+     請提供 SA 文件路徑，或說「跳過」強制執行。
+     ```
+5. 告知使用者找到什麼
+6. 問：「有沒有額外文件？沒有的話說『執行』」
+7. 使用者說「執行」才派 subagent（前端 → cwd=frontendPath，後端 → cwd=backendPath，都做 → 派兩個 subagent）
 
 ### 執行時
 - `create_task` + `update_task_status("in_progress")`
