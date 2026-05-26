@@ -54,7 +54,7 @@ A dual-mode AI collaborative development system. Originally orchestrated multipl
 2. 取得任務詳情 `get_task(taskId)`
 3. 自動查找：SVN 文件 `get_documents()`、Axure 原型 `ls docs/axure-snapshots/{projectId}/{code}-*.html`
 4. **檢查規格文件是否齊全**：
-   - 前端任務 → 必須有 **SA 文件**（系統分析規格），沒有就告知使用者並詢問是否提供
+   - 前端任務 → 必須有 **SA 文件**（系統分析規格）+ **SD 文件**（系統設計規格），沒有就告知使用者並詢問是否提供
    - 後端任務 → 必須有 **SD 文件**（系統設計規格），沒有就告知使用者並詢問是否提供
    - 都做 → SA + SD 都要有
    - Axure 原型（前端任務建議有，非必要）
