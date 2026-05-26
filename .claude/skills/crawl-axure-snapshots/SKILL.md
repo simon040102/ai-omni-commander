@@ -52,8 +52,11 @@ node docs/axure-snapshots/crawl-axure.mjs <axure_url> <output_dir>
 ### 表單欄位配對
 - y 差 < 15px = 同一行
 - labels 行 + 下一行 inputs → 按 x 近似配對
-- **一律兩欄一排 `col-md-6`**（即使 Axure 有 3 個同行，第 3 個另起一行）
-- 單欄 → `col-md-12`
+- **欄數由同行的 label 數量決定**：
+  - 1 個 → `col-md-12`
+  - 2 個 → `col-md-6`
+  - 3 個 → `col-md-4`
+  - 4 個 → `col-md-3`
 - label 有 `*` → `<span class="asterisk">欄位名</span>`（去掉 `*`）
 - **`<label>` 不加 class** — mock CSS 用 `.form-item label` 做浮動效果，加 `class="form-label"` 會破壞
 - 檢視頁的 input 加 `readonly`
@@ -161,6 +164,7 @@ node docs/axure-snapshots/crawl-axure.mjs <axure_url> <output_dir>
   <style>
     .tabeIcon::before{background-image:url(../images/icon.svg)!important;}
     .main-content-box{margin-left:0!important;max-width:100%!important;width:100%!important;}
+    .form-item label{position:relative!important;transform:none!important;font-size:13px!important;color:#888!important;margin-bottom:2px!important;}
   </style>
 </head>
 <body>
