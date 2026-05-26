@@ -38,4 +38,5 @@ test-*.mjs
 test-*.ps1
 
 docs/
+!docs/axure-snapshots/
 *.zip

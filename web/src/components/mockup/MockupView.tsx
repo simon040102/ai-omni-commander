@@ -25,6 +25,7 @@ export function MockupView() {
   const [crawlingAll, setCrawlingAll] = useState(false);
   const [mcpCommand, setMcpCommand] = useState<string | null>(null);
   const [omniRoot, setOmniRoot] = useState('');
+  const [groupLabels, setGroupLabels] = useState<Record<string, string>>({});
 
   useEffect(() => {
     fetch('/api/health').then(r => r.json()).then(d => { if (d.projectRoot) setOmniRoot(d.projectRoot); }).catch(() => {});
@@ -40,18 +41,12 @@ export function MockupView() {
     setLoading(true);
     try {
       const res = await fetch(`/api/projects/${project.id}/mockups`);
-      const data = await res.json() as { files: MockupFile[] };
+      const data = await res.json() as { files: MockupFile[]; groupLabels?: Record<string, string> };
       const newFiles: MockupFile[] = data.files || [];
       setFiles(newFiles);
-      // Collapse any newly appeared group codes by default
-      setCollapsedGroups(prev => {
-        const next = new Set(prev);
-        newFiles.forEach(f => {
-          const code = f.filename.match(/^([a-zA-Z0-9]+)-/)?.[1]?.toUpperCase() ?? f.filename;
-          if (!next.has(code)) next.add(code);
-        });
-        return next;
-      });
+      if (data.groupLabels) setGroupLabels(data.groupLabels);
+      // Expand all groups by default (clear collapsed set)
+      setCollapsedGroups(new Set());
     } finally {
       setLoading(false);
     }
@@ -221,6 +216,7 @@ Output directory: ${omniRoot}/docs/axure-snapshots/${project.id}/${skipSection}
                         />
                         <div className="flex items-center gap-1 flex-1 cursor-pointer" onClick={toggleCollapse}>
                           <span className="text-xs font-bold text-muted-foreground uppercase tracking-wide">{code}</span>
+                          {groupLabels[code.toLowerCase()] && <span className="text-xs text-muted-foreground ml-1">{groupLabels[code.toLowerCase()]}</span>}
                           <span className="text-xs text-muted-foreground">({groupFiles.length})</span>
                         </div>
                       </div>
@@ -325,7 +321,7 @@ Output directory: ${omniRoot}/docs/axure-snapshots/${project.id}/${skipSection}
             src={previewUrl}
             className="w-full h-full"
             title={previewFile || ''}
-            sandbox="allow-same-origin"
+            sandbox="allow-same-origin allow-scripts"
           />
         ) : (
           <div className="flex items-center justify-center h-full text-sm text-muted-foreground">

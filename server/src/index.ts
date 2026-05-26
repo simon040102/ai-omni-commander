@@ -249,6 +249,9 @@ async function main() {
   // ============ Mockup HTML Snapshots ============
   const SNAPSHOTS_DIR = path.join(path.dirname(config.dbPath), '..', 'docs', 'axure-snapshots');
 
+  // Serve shared static assets (CSS, images) for mockup HTML
+  app.use('/api/mockup-assets', express.static(SNAPSHOTS_DIR, { maxAge: '1d' }));
+
   app.get('/api/projects/:id/mockups', (req, res) => {
     if (!isSafePathParam(req.params['id'])) { res.status(400).json({ error: 'Invalid project ID' }); return; }
     const dir = path.join(SNAPSHOTS_DIR, req.params['id']);
@@ -269,7 +272,36 @@ async function main() {
       if (codeFilter) {
         files = files.filter(f => f.filename.toLowerCase().startsWith(codeFilter + '-'));
       }
-      res.json({ files });
+      // Build group labels from _sitemap.json (moduleCode → Chinese name)
+      // sitemap items have {moduleCode, name, pageType}
+      // Group label = common prefix of page names, or extract from moduleCode parent node name
+      let groupLabels: Record<string, string> = {};
+      const sitemapPath = path.join(dir, '_sitemap.json');
+      if (fs.existsSync(sitemapPath)) {
+        try {
+          const sitemap = JSON.parse(fs.readFileSync(sitemapPath, 'utf-8')) as Array<{moduleCode: string; name: string; pageType: string}>;
+          for (const page of sitemap) {
+            if (page.moduleCode && !groupLabels[page.moduleCode]) {
+              // Method 1: page name minus pageType = module Chinese name
+              // e.g. name="系統代碼維護-查詢", pageType="查詢" → "系統代碼維護"
+              let label = page.name;
+              // Strip module code prefix (e.g. "SM03_人員帳號維護" → "人員帳號維護")
+              label = label.replace(/^[A-Za-z]+\d+[_]?/, '');
+              // Strip page type suffix
+              if (page.pageType && label.endsWith(page.pageType)) {
+                label = label.slice(0, -page.pageType.length).replace(/[-_]$/, '');
+              } else if (page.pageType) {
+                // Try removing pageType with separator
+                label = label.replace(new RegExp('[-_]?' + page.pageType.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$'), '');
+              }
+              if (label && label.length > 0) {
+                groupLabels[page.moduleCode] = label;
+              }
+            }
+          }
+        } catch {}
+      }
+      res.json({ files, groupLabels });
     } catch {
       res.status(400).json({ error: 'Cannot read mockup directory' });
     }
@@ -282,10 +314,20 @@ async function main() {
     try {
       if (!fs.existsSync(filepath)) { res.status(404).json({ error: 'File not found' }); return; }
       const content = fs.readFileSync(filepath, 'utf-8');
-      // Wrap fragment in minimal full HTML doc for iframe rendering
-      const wrapped = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{font-family:sans-serif;font-size:13px;padding:8px;}</style></head><body>${content}</body></html>`;
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.send(wrapped);
+      // If file is already a full HTML document, send as-is; otherwise wrap in minimal doc
+      if (content.trimStart().toLowerCase().startsWith('<!doctype') || content.trimStart().toLowerCase().startsWith('<html')) {
+        // Rewrite relative asset paths to API paths for iframe serving
+        let rewritten = content.replace(/href="\.\.\/style\.min\.css"/g, 'href="/api/mockup-assets/style.min.css"')
+                                .replace(/src="\.\.\/images\//g, 'src="/api/mockup-assets/images/');
+        // Inject inline style to fix icon sprite path (CSS relative URL doesn't resolve correctly in iframe)
+        const iconFix = '<style>.tabeIcon::before{background-image:url(/api/mockup-assets/images/icon.svg)!important;}</style>';
+        rewritten = rewritten.replace('</head>', iconFix + '</head>');
+        res.send(rewritten);
+      } else {
+        const wrapped = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{font-family:sans-serif;font-size:13px;padding:8px;}</style></head><body>${content}</body></html>`;
+        res.send(wrapped);
+      }
     } catch {
       res.status(400).json({ error: 'Cannot read file' });
     }
