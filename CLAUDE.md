@@ -2,6 +2,53 @@
 
 A dual-mode AI collaborative development system. Originally orchestrated multiple Claude Code CLI instances (agents) directly; now operates as an **MCP Server** that provides task management and execution context to external Claude Code sessions.
 
+## 互動式任務執行（必讀）
+
+當使用者提到專案、任務、執行開發等話題時，遵循以下對話式流程。**不要一次倒出 MCP raw JSON，要整理成易讀的格式。**
+
+### 列出專案
+使用者問「有哪些專案」→ `mcp__omni-commander__list_projects()`，回覆：
+```
+目前有 N 個專案：
+1. **專案名** — FE: 路徑 / BE: 路徑
+2. ...
+要看哪個專案的任務？
+```
+
+### 列出任務
+使用者選專案後 → `mcp__omni-commander__list_pending_tasks({ projectId })`，**整理成表格**：
+```
+**專案名** 共 N 個待處理任務：
+
+| # | 功能模組 | 任務 | 類型 |
+|---|---------|------|------|
+| 1 | SM27 | 共用_查詢工程專案_欄位失效 | bug |
+| 2 | DF01 | 收文單_前端 | feature |
+| 3 | DF01 | 收文單_串接 | feature |
+...
+
+選一個編號，或直接描述你要做什麼。
+```
+
+**格式要求：**
+- parent_name 提取功能代碼（如 `SM27_專案成員維護作業` → `SM27`）
+- 同功能的前端/串接/後端歸在一起
+- bug 類型標記出來
+- **絕對不要輸出 raw JSON**
+
+### 選擇任務後
+1. 取得任務詳情 `get_task(taskId)`
+2. 自動查找：SVN 文件 `get_documents()`、Axure 原型 `ls docs/axure-snapshots/{projectId}/{code}-*.html`
+3. 告知使用者找到什麼
+4. 問：「有沒有額外文件？沒有的話說『執行』」
+5. 使用者說「執行」才派 subagent
+
+### 執行時
+- `create_task` + `update_task_status("in_progress")`
+- Agent tool 派 subagent，prompt 包含所有收集到的上下文
+- subagent 用 `report_output` / `report_milestone` 回報進度
+- 完成後 `update_task_status("completed")`
+
 ## MCP Architecture (v5 — current)
 
 ```
