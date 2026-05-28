@@ -16,7 +16,11 @@ A dual-mode AI collaborative development system. Originally orchestrated multipl
 ```
 
 ### 列出任務
-使用者選專案後 → `mcp__omni-commander__list_pending_tasks({ projectId })`，**整理成分組列表**：
+使用者選專案後：
+1. 先呼叫 `mcp__omni-commander__sync_asana_tasks({ projectId })` — 如果 5 分鐘內已同步過會自動跳過
+2. 再呼叫 `mcp__omni-commander__list_pending_tasks({ projectId })`
+
+**整理成分組列表**：
 
 ```
 **專案名** 有 N 個待處理任務：

@@ -653,6 +653,26 @@ async function main() {
   // 6. Register WebSocket message handlers
   registerHandlers(wsServer, orchestrator, agentManager, workspaceScanner, skillGenerator, asanaClient, asanaSyncService, quickModeHandler, svnSpecService, specHandler.getDocumentParser());
 
+  // ── Asana sync REST endpoint (for MCP tool) ──────────────────
+  app.post('/api/asana-sync/:projectId', async (req, res) => {
+    const projectId = req.params['projectId'];
+    if (!projectId) { res.status(400).json({ error: 'Missing projectId' }); return; }
+    try {
+      const result = await asanaSyncService.syncOnce(projectId);
+      res.json(result);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  app.get('/api/asana-sync/:projectId/status', (req, res) => {
+    const projectId = req.params['projectId'];
+    if (!projectId) { res.status(400).json({ error: 'Missing projectId' }); return; }
+    const lastSync = asanaSyncService.getLastSyncAt(projectId);
+    res.json({ projectId, lastSyncAt: lastSync || null });
+  });
+
   // ── MCP Notification endpoint ──────────────────────────
   // Receives notifications from the MCP Server process (separate process)
   // and broadcasts them via WebSocket to the Web UI.

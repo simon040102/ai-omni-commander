@@ -277,4 +277,59 @@ ${saFlowSection}
       return { content: [{ type: 'text' as const, text: `Task ${taskId} status updated to "${status}"${notifyWarning}` }] };
     },
   );
+
+  // ── sync_asana_tasks ──────────────────────────────────────
+  server.tool(
+    'sync_asana_tasks',
+    'Sync Asana tasks for a project. Checks last sync time first — if synced within the last 5 minutes, returns cached data. Use force=true to override.',
+    {
+      projectId: z.string().describe('The project ID'),
+      force: z.boolean().optional().describe('Force sync even if recently synced (default: false)'),
+    },
+    async ({ projectId, force }) => {
+      const notifyUrl = process.env['NOTIFY_URL'] || 'http://localhost:3457';
+      const baseUrl = notifyUrl.replace('/api/mcp-notify', '');
+
+      try {
+        // Check last sync time first
+        if (!force) {
+          const statusRes = await fetch(`${baseUrl}/api/asana-sync/${projectId}/status`);
+          if (statusRes.ok) {
+            const statusData = await statusRes.json() as { lastSyncAt: string | null };
+            if (statusData.lastSyncAt) {
+              const lastSync = new Date(statusData.lastSyncAt);
+              const now = new Date();
+              const diffMinutes = (now.getTime() - lastSync.getTime()) / 60000;
+              if (diffMinutes < 5) {
+                return {
+                  content: [{
+                    type: 'text' as const,
+                    text: `Asana tasks already synced ${Math.round(diffMinutes)} minutes ago (${statusData.lastSyncAt}). Use force=true to sync again.`,
+                  }],
+                };
+              }
+            }
+          }
+        }
+
+        // Trigger sync via web server REST API
+        const res = await fetch(`${baseUrl}/api/asana-sync/${projectId}`, { method: 'POST' });
+        if (!res.ok) {
+          const err = await res.json() as { error: string };
+          return { content: [{ type: 'text' as const, text: `Asana sync failed: ${err.error}` }], isError: true };
+        }
+
+        const result = await res.json() as { newTasks: number; updatedTasks: number; removedTasks: number; lastSyncAt: string };
+        return {
+          content: [{
+            type: 'text' as const,
+            text: `Asana sync completed: +${result.newTasks} new, ~${result.updatedTasks} updated, -${result.removedTasks} removed. Last sync: ${result.lastSyncAt}`,
+          }],
+        };
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: 'text' as const, text: `Asana sync error: ${msg}. Is the web server running?` }], isError: true };
+      }
+    },
+  );
 }
