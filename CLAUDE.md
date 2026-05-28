@@ -83,10 +83,25 @@ subagent 的 prompt 開頭必須包含以下指示：
 這確保 subagent 會使用 workspace 自己的 CLAUDE.md 和 .claude/skills/，而不是只用 OmniCommander 的規則。
 
 ### 執行時
-- `create_task` + `update_task_status("in_progress")`
+- `update_task_status(taskId, "in_progress")`（用已存在的 Asana 任務 ID，不需要 create_task）
 - Agent tool 派 subagent，prompt 包含所有收集到的上下文
 - subagent 用 `report_output` / `report_milestone` 回報進度
-- 完成後 `update_task_status("completed")`
+- 完成後 `update_task_status(taskId, "completed")`
+
+### 任務完成後驗證
+subagent 完成開發後，必須在標記 completed 之前：
+1. 確認程式碼可以 build（執行 workspace 的 build 指令）
+2. 如果有 lint/typecheck 指令，也要跑
+3. build 失敗 → 修復後再試，最多 3 次
+4. 最終失敗 → `update_task_status(taskId, "failed", "build 失敗：錯誤訊息")`
+
+### 錯誤處理
+- subagent 執行中遇到無法解決的問題 → `update_task_status(taskId, "failed", "原因")`
+- 回報給使用者，詢問是否要調整後重試
+
+### 編號對應
+列出任務時，內部記住每個編號對應的 taskId。使用者回覆編號時，用對應的 taskId 取得任務詳情。
+如果同功能有前端+串接兩個任務（如 DF01），使用者選了後再問「要做前端還是串接？」來決定具體 taskId。
 
 ## MCP Architecture (v5 — current)
 
