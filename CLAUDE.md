@@ -92,7 +92,18 @@ A dual-mode AI collaborative development system. Originally orchestrated multipl
 在開發過程中主動使用這些 skill 來確保品質。
 ```
 
-#### 2. 讀取 Workspace 規範
+#### 2. 確實閱讀規格文件
+subagent prompt 中必須加入：
+```
+## 規格文件閱讀（強制，寫 code 之前必須完成）
+1. 用 Read tool 完整讀取 SA 文件 — 不是掃過去，是逐項讀每個欄位名稱、按鈕文字、訊息文字、操作流程
+2. 用 Read tool 完整讀取 SD 文件 — 逐個 API 讀清楚 path、method、每個參數名和型別、response 結構
+3. 如果有 Axure HTML — 用 Read tool 讀取，對照 SA 確認 UI 結構
+4. 讀完後，在 report_output 摘要你理解的重點（欄位清單、API 清單、特殊邏輯）
+5. 開發過程中遇到任何文字、欄位名、API 路徑，回頭查規格確認，不要憑印象寫
+```
+
+#### 3. 讀取 Workspace 規範
 subagent 的 prompt 必須包含：
 ```
 ## Workspace 規範（必讀）

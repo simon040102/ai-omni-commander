@@ -144,6 +144,13 @@ Subagent prompt 組裝：
 - 所有任務 → 完成前使用 /verification-before-completion skill 確認品質
 在開發過程中主動觸發對應的 skill。
 
+## 規格文件閱讀（強制，寫 code 之前必須完成）
+1. 用 Read tool **完整讀取** SA 文件 — 逐項讀每個欄位名稱、按鈕文字、訊息文字、操作流程
+2. 用 Read tool **完整讀取** SD 文件 — 逐個 API 讀 path、method、參數名和型別、response
+3. 如果有 Axure HTML — 用 Read tool 讀取，對照 SA 確認 UI
+4. 讀完後用 report_output 摘要你理解的重點（欄位清單、API 清單、特殊邏輯）
+5. 開發過程中遇到文字、欄位名、API 路徑，**回頭查規格確認，不要憑印象寫**
+
 ## Workspace 規範（最優先！開始開發前必須先完成）
 1. 用 Read tool 讀取 {workspacePath}/CLAUDE.md — 了解專案架構、命名規範、開發規則
 2. 用 Bash 執行 ls {workspacePath}/.claude/skills/ — 列出所有可用 skill
