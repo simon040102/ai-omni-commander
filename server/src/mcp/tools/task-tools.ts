@@ -215,9 +215,24 @@ ${saFlowSection}
     async ({ taskId, status, summary }) => {
       const db = getMcpDb();
 
-      const task = db.prepare('SELECT id, project_id FROM tasks WHERE id = ?').get(taskId) as { id: string; project_id: string } | undefined;
+      const task = db.prepare('SELECT id, project_id, status FROM tasks WHERE id = ?').get(taskId) as { id: string; project_id: string; status: string } | undefined;
       if (!task) {
         return { content: [{ type: 'text' as const, text: `Error: Task "${taskId}" not found` }], isError: true };
+      }
+
+      // [I2] State transition validation
+      const allowedTransitions: Record<string, string[]> = {
+        'pending': ['in_progress'],
+        'queued': ['in_progress'],
+        'assigned': ['in_progress'],
+        'in_progress': ['completed', 'failed'],
+      };
+      const allowed = allowedTransitions[task.status];
+      if (!allowed || !allowed.includes(status)) {
+        return {
+          content: [{ type: 'text' as const, text: `Error: Invalid state transition "${task.status}" → "${status}". Allowed transitions from "${task.status}": ${allowed ? allowed.join(', ') : 'none (terminal state)'}` }],
+          isError: true,
+        };
       }
 
       const sets = [`status = ?`, `updated_at = datetime('now')`];
@@ -231,13 +246,35 @@ ${saFlowSection}
       values.push(taskId);
       db.prepare(`UPDATE tasks SET ${sets.join(', ')} WHERE id = ?`).run(...values);
 
-      // Notify Web Server
-      await notifyWebServer({
+      // [C1] When task completes/fails, also stop synthetic MCP agents
+      let notifyWarning = '';
+      if (status === 'completed' || status === 'failed') {
+        const agentResult = db.prepare(
+          `UPDATE agents SET status = 'stopped', updated_at = datetime('now') WHERE id LIKE 'mcp-%' AND project_id = ? AND status = 'running'`
+        ).run(task.project_id);
+
+        if (agentResult.changes > 0) {
+          // Notify Web UI about agent completion
+          const ok = await notifyWebServer({
+            event: 'agent.completed',
+            data: { projectId: task.project_id, agentId: `mcp-${taskId}`, status: 'stopped' },
+          });
+          if (!ok) {
+            notifyWarning = ' (warning: agent.completed notification to Web UI failed)';
+          }
+        }
+      }
+
+      // Notify Web Server about task status change
+      const taskNotifyOk = await notifyWebServer({
         event: 'task.statusChange',
         data: { taskId, projectId: task.project_id, status, summary: summary || null },
       });
+      if (!taskNotifyOk) {
+        notifyWarning += ' (warning: task.statusChange notification to Web UI failed)';
+      }
 
-      return { content: [{ type: 'text' as const, text: `Task ${taskId} status updated to "${status}"` }] };
+      return { content: [{ type: 'text' as const, text: `Task ${taskId} status updated to "${status}"${notifyWarning}` }] };
     },
   );
 }

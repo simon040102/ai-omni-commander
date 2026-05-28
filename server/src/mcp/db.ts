@@ -29,7 +29,7 @@ export function getMcpDb(): Database.Database {
   instance = new Database(resolvedPath);
   instance.pragma('journal_mode = WAL');
   instance.pragma('foreign_keys = ON');
-  instance.pragma('busy_timeout = 5000');
+  instance.pragma('busy_timeout = 30000');
 
   // Run migrations to ensure schema is up to date
   runMigrations(instance);

@@ -52,7 +52,7 @@ A dual-mode AI collaborative development system. Originally orchestrated multipl
 ### 選擇任務後
 1. 先問：「要做**前端**、**後端**、還是**都做**？」
 2. 取得任務詳情 `get_task(taskId)`
-3. 自動查找：SVN 文件 `get_documents()`、Axure 原型 `ls docs/axure-snapshots/{projectId}/{code}-*.html`
+3. 自動查找：SVN 文件 `get_documents()`、Axure 原型 `ls D:/暫存檔/claude\ code/ai-omni-commander-v5/docs/axure-snapshots/{projectId}/{code}-*.html`
 4. **檢查規格文件是否齊全**：
    - 前端任務 → 必須有 **SA 文件**（系統分析規格）+ **SD 文件**（系統設計規格），沒有就告知使用者並詢問是否提供
    - 後端任務 → 必須有 **SD 文件**（系統設計規格），沒有就告知使用者並詢問是否提供
@@ -60,16 +60,16 @@ A dual-mode AI collaborative development system. Originally orchestrated multipl
    - Axure 原型（前端任務建議有，非必要）
    - **規格不齊全不執行**，明確告知缺什麼：
      ```
-     ⚠️ 缺少規格文件：
-     - SA 文件：❌ 未找到（前端開發必要）
-     - SD 文件：✅ WA05-design-spec.md
-     - Axure 原型：✅ 6 個頁面
+     缺少規格文件：
+     - SA 文件：未找到（前端開發必要）
+     - SD 文件：WA05-design-spec.md
+     - Axure 原型：6 個頁面
 
      請提供 SA 文件路徑，或說「跳過」強制執行。
      ```
-5. 告知使用者找到什麼
-6. 問：「有沒有額外文件？沒有的話說『執行』」
-7. 使用者說「執行」才派 subagent（前端 → cwd=frontendPath，後端 → cwd=backendPath，都做 → 派兩個 subagent）
+   - **跳過時必須用 `report_output` 記錄**：`[SKIP] 使用者跳過規格檢查：缺少 {缺少的文件類型} 文件`
+5. 告知使用者找到什麼，同時問：「有沒有額外文件？沒有的話說『執行』」
+6. 使用者說「執行」才派 subagent（前端 → cwd=frontendPath，後端 → cwd=backendPath，都做 → 派兩個 subagent）
 
 ### 派 subagent 時必須做的事
 subagent 的 prompt 開頭必須包含以下指示：
@@ -83,7 +83,9 @@ subagent 的 prompt 開頭必須包含以下指示：
 這確保 subagent 會使用 workspace 自己的 CLAUDE.md 和 .claude/skills/，而不是只用 OmniCommander 的規則。
 
 ### 執行時
-- `update_task_status(taskId, "in_progress")`（用已存在的 Asana 任務 ID，不需要 create_task）
+- **任務來源決定流程**：
+  - **Asana 已存在的任務**（已有 taskId）→ 直接 `update_task_status(taskId, "in_progress")`
+  - **使用者口述的新任務**（沒有 taskId）→ 先 `create_task(projectId, title, label, ...)`，用回傳的 taskId，再 `update_task_status(taskId, "in_progress")`
 - Agent tool 派 subagent，prompt 包含所有收集到的上下文
 - subagent 用 `report_output` / `report_milestone` 回報進度
 - 完成後 `update_task_status(taskId, "completed")`
@@ -294,51 +296,6 @@ Claude Code / Claude Desktop
 | `DocumentUpload.tsx` | Drag-and-drop file upload + paste area. Auto-detects SA/SD from filename. Doc type toggle per file. |
 | `FolderPicker.tsx` | Server-side directory browser for selecting workspace paths. |
 | `InterviewChat.tsx` | Creative mode interview UI. |
-
-## Key Flows
-
-### Spec Mode (primary flow)
-1. User creates project with workspaces (label + path)
-2. User uploads SA/SD documents with type tags
-3. User clicks "Start Execution"
-4. `SpecModeHandler.execute()`:
-   - Routes documents by type: Frontend gets SA+SD, Backend gets SD
-   - For each workspace: spawns an agent with `cwd` = workspace path
-   - Agent prompt includes document content/PDF paths
-   - Each agent reads its workspace's CLAUDE.md/.claude/ and follows those skills
-5. Agents work autonomously. Output streams via EventBus → WebSocket → frontend terminal
-6. When all agents complete, project status auto-transitions to `completed`
-
-### Iterative Execution
-After a project completes, the Dashboard shows a "New Execution" panel:
-- Upload additional SA/SD documents
-- Click "Start Execution" to spawn new agents with ALL documents (old + new)
-- Old agent outputs remain visible; new agents get new IDs
-
-### Send Instruction to Running Agent
-- Terminal input → `agent.command` WS message → `AgentManager.sendInputToAgent()` → `AgentProcess.sendInput()` → writes JSON to Claude's stdin (requires `--input-format stream-json`)
-- Feedback message `[USER INSTRUCTION]` appears in terminal output
-
-## Development
-
-```bash
-# Install dependencies
-pnpm install
-
-# Start server (with auto-rebuild)
-cd server && pnpm dev
-
-# Start frontend (Vite dev server with HMR)
-cd web && pnpm dev
-
-# TypeScript check
-npx tsc --build shared/tsconfig.json server/tsconfig.json web/tsconfig.json
-```
-
-- Server runs on port 3457 (configurable via `PORT` env var)
-- Vite dev server runs on port 5174 and proxies `/omni-ws` and `/api` to server
-- SQLite database: `data/omni.db` (persists across restarts)
-- Claude CLI path: configurable via `CLAUDE_PATH` env var (default: `claude`)
 
 #### `server/src/svn/` — SVN integration
 | File | Purpose |

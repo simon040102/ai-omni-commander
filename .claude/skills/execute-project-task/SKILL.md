@@ -74,15 +74,17 @@ mcp__omni-commander__get_documents({ projectId, taskId })
 已找到以下規格文件：
 - SA_OV01_電子銷項產生.docx（已轉 markdown）
 - SD_OV01_電子銷項產生.pdf
-
 ```
+
+如果缺少必要規格（前端需 SA+SD，後端需 SD），告知使用者並詢問是否提供。
+使用者說「跳過」時，必須用 `report_output` 記錄：`[SKIP] 使用者跳過規格檢查：缺少 {缺少的文件類型} 文件`
 
 ### State 5：收集 Axure 原型
 
-自動查找對應的 Axure snapshot：
+自動查找對應的 Axure snapshot（使用 OmniCommander 專案的絕對路徑）：
 
 ```bash
-ls docs/axure-snapshots/{projectId}/ov01-*.html
+ls D:/暫存檔/claude\ code/ai-omni-commander-v5/docs/axure-snapshots/{projectId}/{code}-*.html
 ```
 
 如果有，告知：
@@ -98,42 +100,35 @@ ls docs/axure-snapshots/{projectId}/ov01-*.html
 此功能尚未爬取 Axure 原型。要先爬取嗎？
 ```
 
-### State 6：詢問額外文件
+### State 6：確認資訊並詢問額外文件
 
-```
-有沒有要提供額外的文件或資料夾？
-（可以貼檔案路徑或資料夾路徑，沒有的話直接說「執行」）
-```
-
-使用者可能：
-- 提供路徑 → 讀取並加入上下文
-- 說「沒有」/「就這樣」→ 進入 State 7
-- 說「執行」→ 進入 State 7
-
-### State 7：確認並執行
-
-彙整所有收集到的資訊，讓使用者確認：
+彙整所有收集到的資訊，同時詢問是否有額外文件：
 
 ```
 準備執行：
 
-📋 專案：電子發票
-📌 任務：OV01.電子銷項產生_查詢頁 (frontend)
-📄 規格文件：
-  - SA_OV01.md ✓
-  - SD_OV01.pdf ✓
-🎨 Axure 原型：ov01-查詢.html, ov01-檢視.html ✓
-📁 額外文件：D:\specs\OV01-notes.md ✓
-🗂️ Workspace：D:\fork\ofeinvoice_ui
+專案：電子發票
+任務：OV01.電子銷項產生_查詢頁 (frontend)
+規格文件：
+  - SA_OV01.md
+  - SD_OV01.pdf
+Axure 原型：ov01-查詢.html, ov01-檢視.html
+Workspace：D:\fork\ofeinvoice_ui
 
-確認執行？
+有額外文件要提供嗎？沒有的話說「執行」。
 ```
 
-使用者說「好」/「執行」/「確認」→ 開始執行。
+使用者可能：
+- 提供路徑 → 讀取並加入上下文，再次顯示更新後的摘要
+- 說「執行」/「好」/「確認」→ 進入 State 7
 
-### State 8：執行
+### State 7：執行
 
-1. `create_task(projectId, title, label, taskType, description, prompt)`
+根據任務來源決定流程：
+- **Asana 已存在的任務**（已有 taskId）→ 直接用現有 taskId
+- **使用者口述的新任務**（沒有 taskId）→ 先 `create_task(projectId, title, label, taskType, description, prompt)`，用回傳的 taskId
+
+1. （如果是新任務）`create_task(projectId, title, label, taskType, description, prompt)`
 2. `update_task_status(taskId, "in_progress")`
 3. Agent tool → 派 subagent
 
