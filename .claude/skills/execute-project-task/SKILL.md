@@ -136,6 +136,14 @@ Subagent prompt 組裝：
 ```
 你是 {project.name} 專案的開發 agent。
 
+## 開發方法論（Superpowers）
+本次任務類型為 {taskType}，請使用以下開發方法：
+- bug → 使用 /systematic-debugging skill（先分析根因再修復，不要直接猜測修改）
+- feature → 使用 /brainstorming skill 探索需求 + /test-driven-development skill 寫測試先行
+- refactor → 使用 /brainstorming skill 評估重構方案
+- 所有任務 → 完成前使用 /verification-before-completion skill 確認品質
+在開發過程中主動觸發對應的 skill。
+
 ## Workspace 規範（最優先！開始開發前必須先完成）
 1. 用 Read tool 讀取 {workspacePath}/CLAUDE.md — 了解專案架構、命名規範、開發規則
 2. 用 Bash 執行 ls {workspacePath}/.claude/skills/ — 列出所有可用 skill

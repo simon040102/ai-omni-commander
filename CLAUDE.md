@@ -76,13 +76,30 @@ A dual-mode AI collaborative development system. Originally orchestrated multipl
 6. 使用者說「執行」才派 subagent（前端 → cwd=frontendPath，後端 → cwd=backendPath，都做 → 派兩個 subagent）
 
 ### 派 subagent 時必須做的事
-subagent 的 prompt 開頭必須包含以下指示：
+
+#### 1. 注入 Superpowers 方法論
+根據任務類型自動選擇：
+- **bug** → 告訴 subagent 使用 `/systematic-debugging` skill（先分析根因再修復）
+- **feature** → 告訴 subagent 使用 `/brainstorming` + `/test-driven-development` skill
+- **refactor** → 告訴 subagent 使用 `/brainstorming` skill
+- **其他** → 告訴 subagent 使用 `/verification-before-completion` skill
+
+在 prompt 中加入：
+```
+## 開發方法論（Superpowers）
+本次任務類型為 {taskType}，請使用以下 skill：
+- /systematic-debugging（或 /brainstorming + /test-driven-development 等）
+在開發過程中主動使用這些 skill 來確保品質。
+```
+
+#### 2. 讀取 Workspace 規範
+subagent 的 prompt 必須包含：
 ```
 ## Workspace 規範（必讀）
 1. 先讀取 {workspacePath}/CLAUDE.md — 了解專案架構、命名規範、開發規則
 2. 執行 ls {workspacePath}/.claude/skills/ — 列出所有可用 skill
-3. 讀取相關的 skill 內容（如有 coding-standards、api-patterns 等）
-4. 遵循 CLAUDE.md 和 skills 裡的所有規則進行開發
+3. 讀取與本次任務相關的 skill
+4. 嚴格遵循 CLAUDE.md 和 skills 裡的所有規則進行開發
 ```
 這確保 subagent 會使用 workspace 自己的 CLAUDE.md 和 .claude/skills/，而不是只用 OmniCommander 的規則。
 
