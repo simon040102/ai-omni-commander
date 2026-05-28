@@ -71,6 +71,17 @@ A dual-mode AI collaborative development system. Originally orchestrated multipl
 6. 問：「有沒有額外文件？沒有的話說『執行』」
 7. 使用者說「執行」才派 subagent（前端 → cwd=frontendPath，後端 → cwd=backendPath，都做 → 派兩個 subagent）
 
+### 派 subagent 時必須做的事
+subagent 的 prompt 開頭必須包含以下指示：
+```
+## Workspace 規範（必讀）
+1. 先讀取 {workspacePath}/CLAUDE.md — 了解專案架構、命名規範、開發規則
+2. 執行 ls {workspacePath}/.claude/skills/ — 列出所有可用 skill
+3. 讀取相關的 skill 內容（如有 coding-standards、api-patterns 等）
+4. 遵循 CLAUDE.md 和 skills 裡的所有規則進行開發
+```
+這確保 subagent 會使用 workspace 自己的 CLAUDE.md 和 .claude/skills/，而不是只用 OmniCommander 的規則。
+
 ### 執行時
 - `create_task` + `update_task_status("in_progress")`
 - Agent tool 派 subagent，prompt 包含所有收集到的上下文

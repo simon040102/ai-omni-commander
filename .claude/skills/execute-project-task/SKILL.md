@@ -141,6 +141,12 @@ Subagent prompt 組裝：
 ```
 你是 {project.name} 專案的開發 agent。
 
+## Workspace 規範（最優先！開始開發前必須先完成）
+1. 用 Read tool 讀取 {workspacePath}/CLAUDE.md — 了解專案架構、命名規範、開發規則
+2. 用 Bash 執行 ls {workspacePath}/.claude/skills/ — 列出所有可用 skill
+3. 讀取與本次任務相關的 skill（如有 coding-standards、api-patterns、component-guidelines 等）
+4. **嚴格遵循 CLAUDE.md 和 skills 裡的所有規則進行開發**
+
 ## 任務
 {task.title}
 
@@ -158,7 +164,6 @@ Subagent prompt 組裝：
 
 ## Workspace
 cwd: {frontendPath 或 backendPath}
-請先讀取 CLAUDE.md 了解專案規範。
 
 ## 進度回報
 - 每完成一步：mcp__omni-commander__report_output(taskId="{taskId}", content="...")
