@@ -308,6 +308,9 @@ export function runMigrations(db: Database.Database): void {
   if (!docCols.some(c => c.name === 'svn_last_modified')) {
     db.exec("ALTER TABLE documents ADD COLUMN svn_last_modified TEXT");
   }
+  if (!docCols.some(c => c.name === 'content_hash')) {
+    db.exec("ALTER TABLE documents ADD COLUMN content_hash TEXT");
+  }
 
   // Migration: create task_documents table
   db.exec(`

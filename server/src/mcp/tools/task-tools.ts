@@ -186,6 +186,9 @@ export function registerTaskTools(server: McpServer): void {
 2. **每完成一個重要步驟時**：呼叫 \`report_output\`，taskId 為 \`${task.id}\`，content 為你正在做什麼的簡短描述
 3. **關鍵節點**：呼叫 \`report_milestone\`（例如「讀取規格文件完成」「程式碼實作完成」「Build 通過」）
 4. **完成時**：呼叫 \`update_task_status\`，taskId 為 \`${task.id}\`，status 為 "completed"，summary 為完成摘要
+5. **失敗時**：呼叫 \`update_task_status\`，taskId 為 \`${task.id}\`，status 為 "failed"，summary 為失敗原因
+
+**⚠ 重要：任務結束前必須呼叫 update_task_status，否則任務會一直卡在 in_progress 狀態。不論成功或失敗，都必須回報。**
 
 這些呼叫會讓 Web UI 即時顯示你的 agent 狀態和輸出。
 ${saFlowSection}
@@ -279,56 +282,134 @@ ${saFlowSection}
   );
 
   // ── sync_asana_tasks ──────────────────────────────────────
+  // Track last sync per project (in-memory, resets on MCP server restart)
+  const lastSyncAt = new Map<string, string>();
+
   server.tool(
     'sync_asana_tasks',
-    'Sync Asana tasks for a project. Checks last sync time first — if synced within the last 5 minutes, returns cached data. Use force=true to override.',
+    'Sync Asana tasks for a project. Fetches tasks from Asana and upserts into local DB. Checks last sync time — if synced within 5 minutes, returns cached. Use force=true to override.',
     {
       projectId: z.string().describe('The project ID'),
       force: z.boolean().optional().describe('Force sync even if recently synced (default: false)'),
     },
     async ({ projectId, force }) => {
-      const notifyUrl = process.env['NOTIFY_URL'] || 'http://localhost:3457';
-      const baseUrl = notifyUrl.replace('/api/mcp-notify', '');
+      const db = getMcpDb();
+      const ASANA_API_BASE = 'https://app.asana.com/api/1.0';
 
       try {
-        // Check last sync time first
+        // Check last sync time
         if (!force) {
-          const statusRes = await fetch(`${baseUrl}/api/asana-sync/${projectId}/status`);
-          if (statusRes.ok) {
-            const statusData = await statusRes.json() as { lastSyncAt: string | null };
-            if (statusData.lastSyncAt) {
-              const lastSync = new Date(statusData.lastSyncAt);
-              const now = new Date();
-              const diffMinutes = (now.getTime() - lastSync.getTime()) / 60000;
-              if (diffMinutes < 5) {
-                return {
-                  content: [{
-                    type: 'text' as const,
-                    text: `Asana tasks already synced ${Math.round(diffMinutes)} minutes ago (${statusData.lastSyncAt}). Use force=true to sync again.`,
-                  }],
-                };
-              }
+          const prev = lastSyncAt.get(projectId);
+          if (prev) {
+            const diffMinutes = (Date.now() - new Date(prev).getTime()) / 60000;
+            if (diffMinutes < 5) {
+              return { content: [{ type: 'text' as const, text: `Asana tasks already synced ${Math.round(diffMinutes)} minutes ago (${prev}). Use force=true to sync again.` }] };
             }
           }
         }
 
-        // Trigger sync via web server REST API
-        const res = await fetch(`${baseUrl}/api/asana-sync/${projectId}`, { method: 'POST' });
-        if (!res.ok) {
-          const err = await res.json() as { error: string };
-          return { content: [{ type: 'text' as const, text: `Asana sync failed: ${err.error}` }], isError: true };
+        // Get project info
+        const project = db.prepare('SELECT id, asana_project_gid FROM projects WHERE id = ?').get(projectId) as { id: string; asana_project_gid: string | null } | undefined;
+        if (!project) return { content: [{ type: 'text' as const, text: `Error: Project "${projectId}" not found` }], isError: true };
+        if (!project.asana_project_gid) return { content: [{ type: 'text' as const, text: `Error: Project "${projectId}" has no Asana project GID. Set it in project settings.` }], isError: true };
+
+        // Get Asana PAT from global_config or env
+        const patRow = db.prepare("SELECT value FROM global_config WHERE key = 'asana.pat'").get() as { value: string } | undefined;
+        const asanaPat = patRow?.value || process.env['ASANA_PAT'];
+        if (!asanaPat) return { content: [{ type: 'text' as const, text: 'Error: Asana PAT not configured. Set it in global settings or ASANA_PAT env var.' }], isError: true };
+
+        // Get current user GID
+        const userRes = await fetch(`${ASANA_API_BASE}/users/me`, {
+          headers: { 'Authorization': `Bearer ${asanaPat}`, 'Accept': 'application/json' },
+        });
+        if (!userRes.ok) return { content: [{ type: 'text' as const, text: `Asana API error: ${userRes.status} ${await userRes.text()}` }], isError: true };
+        const userData = await userRes.json() as { data?: { gid?: string } };
+        const userGid = userData.data?.gid;
+
+        // Fetch all project tasks with pagination
+        const optFields = 'name,notes,due_on,completed,permalink_url,tags.name,parent.gid,parent.name,parent.notes,assignee.gid';
+        let allTasks: Array<Record<string, unknown>> = [];
+        let nextUrl: string | null = `${ASANA_API_BASE}/tasks?project=${project.asana_project_gid}&limit=100&completed_since=now&opt_fields=${optFields}`;
+
+        while (nextUrl) {
+          const res = await fetch(nextUrl, {
+            headers: { 'Authorization': `Bearer ${asanaPat}`, 'Accept': 'application/json' },
+          });
+          if (!res.ok) return { content: [{ type: 'text' as const, text: `Asana API error fetching tasks: ${res.status}` }], isError: true };
+          const data = await res.json() as { data?: Record<string, unknown>[]; next_page?: { uri?: string } };
+          allTasks.push(...(data.data || []));
+          nextUrl = data.next_page?.uri || null;
         }
 
-        const result = await res.json() as { newTasks: number; updatedTasks: number; removedTasks: number; lastSyncAt: string };
-        return {
-          content: [{
-            type: 'text' as const,
-            text: `Asana sync completed: +${result.newTasks} new, ~${result.updatedTasks} updated, -${result.removedTasks} removed. Last sync: ${result.lastSyncAt}`,
-          }],
+        // Filter to tasks assigned to me
+        const myTasks = userGid ? allTasks.filter(t => (t['assignee'] as Record<string, unknown> | null)?.['gid'] === userGid) : allTasks;
+
+        // Get existing Asana tasks in local DB
+        const existingTasks = db.prepare('SELECT id, title, description, label, status, source_ref, parent_name FROM tasks WHERE project_id = ? AND source = ?').all(projectId, 'asana') as Array<{
+          id: string; title: string; description: string | null; label: string; status: string; source_ref: string | null; parent_name: string | null;
+        }>;
+        const existingByGid = new Map(existingTasks.filter(t => t.source_ref).map(t => [t.source_ref!, t]));
+
+        let newCount = 0, updatedCount = 0;
+
+        // Label detection (regex-based)
+        const detectLabel = (title: string): string => {
+          if (/前端|串接/.test(title)) return 'frontend';
+          if (/後端/.test(title)) return 'backend';
+          return 'frontend';
         };
+
+        // Task type detection (regex-based)
+        const detectTaskType = (title: string, notes: string): string => {
+          const text = `${title} ${notes}`.toLowerCase();
+          if (/bug|fix|error|crash|broken|fail|issue|problem|wrong|incorrect|失效|錯誤/.test(text)) return 'bug';
+          if (/refactor|restructure|reorganize|重構/.test(text)) return 'refactor';
+          if (/add|create|implement|build|new|feature|新增|開發/.test(text)) return 'feature';
+          return 'other';
+        };
+
+        // Upsert: create new tasks, update existing if changed
+        for (const asanaTask of myTasks) {
+          const gid = String(asanaTask['gid'] || '');
+          const name = String(asanaTask['name'] || '');
+          const notes = String(asanaTask['notes'] || '');
+          const description = notes.length > 2000 ? notes.substring(0, 2000) + '...' : notes;
+          const parentRaw = asanaTask['parent'] as { name?: string } | null | undefined;
+          const parentName = parentRaw?.name || null;
+
+          const existing = existingByGid.get(gid);
+
+          if (existing) {
+            const titleChanged = existing.title !== name;
+            const descChanged = (existing.description || '') !== description;
+            const parentChanged = (existing.parent_name || '') !== (parentName || '');
+            const newLabel = detectLabel(name);
+            const labelChanged = newLabel !== existing.label;
+
+            if (titleChanged || descChanged || parentChanged || labelChanged) {
+              db.prepare("UPDATE tasks SET title = ?, description = ?, parent_name = ?, label = ?, updated_at = datetime('now') WHERE id = ?")
+                .run(name, description || null, parentName, newLabel, existing.id);
+              updatedCount++;
+            }
+          } else {
+            const taskId = crypto.randomUUID();
+            db.prepare(`INSERT INTO tasks (id, project_id, title, description, label, status, priority, task_type, source, source_ref, parent_name, created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, 'asana', ?, ?, datetime('now'), datetime('now'))`)
+              .run(taskId, projectId, name, description || null, detectLabel(name), detectTaskType(name, notes), gid, parentName);
+            newCount++;
+          }
+        }
+
+        const syncTime = new Date().toISOString();
+        lastSyncAt.set(projectId, syncTime);
+
+        // Notify Web Server if available (best-effort, non-blocking)
+        notifyWebServer({ event: 'asana.syncResult', data: { projectId, newTasks: newCount, updatedTasks: updatedCount, removedTasks: 0, lastSyncAt: syncTime } }).catch(() => {});
+
+        return { content: [{ type: 'text' as const, text: `Asana sync completed: +${newCount} new, ~${updatedCount} updated. Total fetched: ${myTasks.length}. Last sync: ${syncTime}` }] };
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
-        return { content: [{ type: 'text' as const, text: `Asana sync error: ${msg}. Is the web server running?` }], isError: true };
+        return { content: [{ type: 'text' as const, text: `Asana sync error: ${msg}` }], isError: true };
       }
     },
   );

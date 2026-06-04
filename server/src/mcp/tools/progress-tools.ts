@@ -76,7 +76,7 @@ export function registerProgressTools(server: McpServer): void {
         },
       });
 
-      return { content: [{ type: 'text' as const, text: 'Output reported' }] };
+      return { content: [{ type: 'text' as const, text: `Output reported. ⚠ 提醒：任務全部完成時，請務必呼叫 update_task_status(taskId="${taskId}", status="completed", summary="...") 回報完成狀態。` }] };
     },
   );
 
@@ -135,7 +135,7 @@ export function registerProgressTools(server: McpServer): void {
         data: { taskId, projectId: task.project_id, milestone, details: details || null },
       });
 
-      return { content: [{ type: 'text' as const, text: `Milestone reported: ${milestone}` }] };
+      return { content: [{ type: 'text' as const, text: `Milestone reported: ${milestone}. ⚠ 提醒：任務全部完成時，請務必呼叫 update_task_status(taskId="${taskId}", status="completed", summary="...") 回報完成狀態。` }] };
     },
   );
 }

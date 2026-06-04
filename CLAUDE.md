@@ -75,6 +75,27 @@ A dual-mode AI collaborative development system. Originally orchestrated multipl
 5. 告知使用者找到什麼，同時問：「有沒有額外文件？沒有的話說『執行』」
 6. 使用者說「執行」才派 subagent（前端 → cwd=frontendPath，後端 → cwd=backendPath，都做 → 派兩個 subagent）
 
+### Orchestrator 角色定位（強制）
+
+**我（orchestrator）不直接修改任何專案的程式碼。** 所有開發工作（包含 bug 修復、feature、refactor）都必須派 subagent 執行。
+
+原因：
+- 每個專案有自己的 CLAUDE.md 和 .claude/skills/，subagent 會讀取並遵循
+- 我直接改會跳過專案的規範和 coding standards
+- subagent 的 cwd 設在對應的 workspace，能正確 build 和測試
+
+**唯一例外**：OmniCommander 自己的程式碼（server/、web/、CLAUDE.md、.claude/skills/）我可以直接改。
+
+### 前端 + 串接同時派的衝突處理
+
+前端 agent 和串接 agent 的 workspace 相同（都在 frontendPath），可能同時改同一個檔案（如 Index.tsx）。
+
+**處理方式：**
+- **前端 agent** 負責：頁面結構、UI 元件、樣式、表單驗證
+- **串接 agent** 負責：API 呼叫、資料處理、狀態管理
+- 如果功能簡單（如 WA03 這種查詢+刪除+復原），**不要同時派前端和串接兩個 agent**，合併成一個 agent 做完
+- 只有功能複雜到需要拆分時（如 DF01 收文單有大量 UI + 複雜 API 流程），才分成兩個 agent
+
 ### 派 subagent 時必須做的事
 
 #### 1. 注入 Superpowers 方法論
@@ -103,6 +124,60 @@ subagent prompt 中必須加入：
 5. 開發過程中遇到任何文字、欄位名、API 路徑，回頭查規格確認，不要憑印象寫
 ```
 
+**⚠ 嚴禁在 prompt 中手動摘要規格內容。** prompt 只放規格文件的完整路徑，讓 subagent 自己用 Read tool 讀取原始文件。手動摘要容易打錯字或遺漏細節（如「儲存」寫成「存儲」），subagent 會照著錯的摘要實作而不會核對原始文件。
+
+#### 2a. 嚴禁自行編造（最高原則）
+
+subagent prompt 中必須包含以下指令：
+```
+## 規格遵循（最高原則 — 違反此規則等同任務失敗）
+
+**所有實作都必須有規格依據。規格沒寫的東西，不做。規格寫的東西，照做。**
+
+具體規則：
+1. 欄位名稱、按鈕文字、訊息文字 → 必須從 SA/SD 文件逐字抄，不可以自己翻譯或改寫
+2. API 路徑、參數名、型別 → 必須從 SD 文件抄，不可以自己命名
+3. SQL 欄位名 → 必須從 DB schema 或 Entity @Column 確認，不可以猜
+4. UI 元件選擇（checkbox/radio/select）→ 必須從 SA 或 Axure 確認，不可以自己決定
+5. 查詢邏輯（WHERE 條件、JOIN、排序）→ 必須照 SD 規格的 SQL/規則實作，不可以簡化或替代
+6. DDL 欄位 → 必須讀 Entity 的 @Column name + MetaData.java 確認，不可以猜
+
+如果規格不清楚或有矛盾：
+- 用 report_output 說明你不確定的地方
+- 不要自己做決定，標記 [NEEDS_CLARIFICATION] 繼續做其他部分
+- 寧可不做也不要做錯
+```
+
+#### 2b. 後端 subagent 必須先做效能分析
+
+後端 subagent 的 prompt 中必須包含：
+```
+## 效能分析（強制 — 寫 code 之前必須完成，用 report_output 記錄）
+
+寫任何 Service 方法前，先完成以下分析：
+
+1. 列出涉及的所有資料表 + 估計資料量（不知道就問使用者）
+2. 對每個 DB 查詢寫出 WHERE 條件（對應 SD 的哪條規則）+ 預期回傳筆數
+3. 寫完後檢查每個迴圈裡有沒有 DB 查詢（N+1 問題）
+4. 從 Controller 到 DB 走一遍完整資料流：總共打幾次 DB？最大查詢回幾筆？
+
+⚠ 禁止 findAll() + Java 記憶體過濾。Legacy 表（NaNa）可能有幾十萬筆。
+```
+
+#### 2c. 安全弱點檢查
+
+後端 subagent 的 prompt 中必須包含：
+```
+## 安全檢查（完成實作後逐項確認）
+
+- SQL 參數用 @Param 綁定，禁止字串拼接
+- API 驗證當前使用者只能操作自己的資料
+- Controller 參數有長度限制和格式驗證
+- response 不回傳密碼、token、內部 ID
+- 批次操作有上限（如一次最多 100 筆）
+- log 不印密碼、token、個資
+```
+
 #### 3. 讀取 Workspace 規範
 subagent 的 prompt 必須包含：
 ```
@@ -114,6 +189,26 @@ subagent 的 prompt 必須包含：
 ```
 這確保 subagent 會使用 workspace 自己的 CLAUDE.md 和 .claude/skills/，而不是只用 OmniCommander 的規則。
 
+#### 4. 注入專案 Extra Prompt（強制）
+每次派 subagent 前，**必須**先讀取專案的 `config_json`，檢查是否有 `frontendExtraPrompt` 或 `backendExtraPrompt`。如果有，**必須**原封不動加入 subagent prompt 中。
+
+```python
+# 虛擬碼
+project = get_project(projectId)
+config = JSON.parse(project.config_json)
+
+if task.label == 'frontend' and config.frontendExtraPrompt:
+    prompt += f"\n## 專案額外指示（來自專案設定，必須遵守）\n{config.frontendExtraPrompt}\n"
+
+if task.label == 'backend' and config.backendExtraPrompt:
+    prompt += f"\n## 專案額外指示（來自專案設定，必須遵守）\n{config.backendExtraPrompt}\n"
+```
+
+**注意事項：**
+- `{AXURE_SNAPSHOT_PATH}` 變數要替換成實際的 Axure snapshot 路徑
+- 不要修改 extraPrompt 的內容，原封不動傳給 subagent
+- 這個步驟適用於所有專案，不只特定專案
+
 ### 執行時
 - **任務來源決定流程**：
   - **Asana 已存在的任務**（已有 taskId）→ 直接 `update_task_status(taskId, "in_progress")`
@@ -122,12 +217,43 @@ subagent 的 prompt 必須包含：
 - subagent 用 `report_output` / `report_milestone` 回報進度
 - 完成後 `update_task_status(taskId, "completed")`
 
+### 狀態回報（強制 — subagent 必須確實執行）
+
+**⚠ subagent prompt 中必須包含以下狀態回報指令，並且在 prompt 的最後再次強調：**
+
+```
+## 狀態回報（強制）
+- 每完成一個主要步驟用 mcp__omni-commander__report_output(taskId="{taskId}", content="...")
+- 重要節點用 mcp__omni-commander__report_milestone(taskId="{taskId}", milestone="...")
+- ⚠ 全部完成後【必須】呼叫 mcp__omni-commander__update_task_status(taskId="{taskId}", status="completed", summary="...")
+- ⚠ 如果失敗【必須】呼叫 mcp__omni-commander__update_task_status(taskId="{taskId}", status="failed", summary="失敗原因")
+- 不論成功或失敗，結束前一定要回報狀態，否則任務會永遠卡在 in_progress
+```
+
+**為什麼需要強調三次（prompt 開頭 + 結尾 + MCP tool response）：** subagent 在長時間執行後，早期的 prompt 可能被 context compaction 壓縮掉。多處重複確保 subagent 在任何時刻都能看到這個要求。
+
 ### 任務完成後驗證
 subagent 完成開發後，必須在標記 completed 之前：
 1. 確認程式碼可以 build（執行 workspace 的 build 指令）
 2. 如果有 lint/typecheck 指令，也要跑
 3. build 失敗 → 修復後再試，最多 3 次
 4. 最終失敗 → `update_task_status(taskId, "failed", "build 失敗：錯誤訊息")`
+
+### subagent 完成後的 orchestrator 驗證（我自己要做）
+
+subagent 回報完成後，**我（orchestrator）必須自己驗證**，不能直接信 subagent 的結果：
+
+#### 後端任務
+1. **靜態檢查**：grep ServiceImpl 有沒有 `findAll()`
+2. **DDL 比對**：確認 CREATE TABLE 欄位名與 Entity @Column name 一致（特別是 MetaData 的 CREATE_DATE / MODIFY_DATE / DATA_REMARK）
+3. **API 煙霧測試**：啟動服務後 curl 每個新 API，確認回 200 不是 500
+4. **seed SQL 檢查**：確認 INSERT 欄位數量與 VALUES 參數數量一致
+
+#### 前端任務
+1. **tsc --noEmit**：確認 TypeScript 零錯誤
+2. **瀏覽器測試**：用 Playwright 開頁面確認能正常操作（如果服務有跑的話）
+
+**單元測試只驗邏輯，不驗 SQL 和欄位名。API 煙霧測試才是真正的驗收。**
 
 ### 錯誤處理
 - subagent 執行中遇到無法解決的問題 → `update_task_status(taskId, "failed", "原因")`

@@ -125,6 +125,70 @@ export function registerProjectTools(server: McpServer): void {
     },
   );
 
+  // ── update_project ────────────────────────────────────────
+  server.tool(
+    'update_project',
+    'Update an existing project (name, paths, config, etc.)',
+    {
+      projectId: z.string().describe('The project ID'),
+      name: z.string().optional().describe('New project name'),
+      frontendPath: z.string().optional().describe('Absolute path to frontend workspace'),
+      backendPath: z.string().optional().describe('Absolute path to backend workspace'),
+      workingDir: z.string().optional().describe('Absolute path to the main working directory'),
+      asanaProjectGid: z.string().optional().describe('Asana project GID'),
+      dbConnectionString: z.string().optional().describe('Database connection string'),
+      configJson: z.string().optional().describe('Project config as JSON string'),
+    },
+    async ({ projectId, name, frontendPath, backendPath, workingDir, asanaProjectGid, dbConnectionString, configJson }) => {
+      const db = getMcpDb();
+      const project = db.prepare('SELECT * FROM projects WHERE id = ?').get(projectId) as ProjectRow | undefined;
+      if (!project) {
+        return { content: [{ type: 'text' as const, text: `Error: Project "${projectId}" not found` }], isError: true };
+      }
+
+      // Build SET clause dynamically from provided fields
+      const updates: string[] = [];
+      const values: unknown[] = [];
+
+      if (name !== undefined) { updates.push('name = ?'); values.push(name); }
+      if (frontendPath !== undefined) { updates.push('frontend_path = ?'); values.push(frontendPath); }
+      if (backendPath !== undefined) { updates.push('backend_path = ?'); values.push(backendPath); }
+      if (workingDir !== undefined) { updates.push('working_dir = ?'); values.push(workingDir); }
+      if (asanaProjectGid !== undefined) { updates.push('asana_project_gid = ?'); values.push(asanaProjectGid); }
+      if (dbConnectionString !== undefined) { updates.push('db_connection_string = ?'); values.push(dbConnectionString); }
+      if (configJson !== undefined) { updates.push('config_json = ?'); values.push(configJson); }
+
+      if (updates.length === 0) {
+        return { content: [{ type: 'text' as const, text: 'Error: No fields to update' }], isError: true };
+      }
+
+      updates.push("updated_at = datetime('now')");
+      values.push(projectId);
+
+      db.prepare(`UPDATE projects SET ${updates.join(', ')} WHERE id = ?`).run(...values);
+
+      const updated = db.prepare('SELECT * FROM projects WHERE id = ?').get(projectId) as ProjectRow;
+
+      await notifyWebServer({
+        event: 'project.updated',
+        data: { projectId, name: updated.name },
+      });
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            id: updated.id,
+            name: updated.name,
+            workingDir: updated.working_dir,
+            frontendPath: updated.frontend_path,
+            backendPath: updated.backend_path,
+          }, null, 2),
+        }],
+      };
+    },
+  );
+
   // ── create_task ───────────────────────────────────────────
   server.tool(
     'create_task',

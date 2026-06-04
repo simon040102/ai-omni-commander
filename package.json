@@ -10,7 +10,8 @@
 	],
 	"scripts": {
 		"build": "npm run build --workspaces",
-		"dev": "concurrently -n server,web -c blue,green \"npm run dev -w server\" \"npm run dev -w web\"",
+		"dev": "concurrently -n server,web -c blue,green \"npm run start -w server\" \"npm run dev -w web\"",
+		"dev:watch": "concurrently -n server,web -c blue,green \"npm run dev -w server\" \"npm run dev -w web\"",
 		"dev:server": "npm run dev -w server",
 		"dev:web": "npm run dev -w web",
 		"test": "npx vitest run --config server/vitest.config.ts",

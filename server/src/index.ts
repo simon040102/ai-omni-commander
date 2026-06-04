@@ -788,9 +788,6 @@ async function main() {
   // 8b. Recover agents that were running before server shutdown/crash
   await agentManager.recoverRunningAgents();
 
-  // 8c. Start VSCode sync poller (5s interval for stopped agents)
-  agentManager.startVsCodeSyncPoller();
-
   // 9. Listen
   httpServer.listen(config.port, () => {
     logger.info({ port: config.port }, 'AI-OmniCommander server is running');

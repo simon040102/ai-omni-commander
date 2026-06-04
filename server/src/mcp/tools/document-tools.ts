@@ -1,10 +1,16 @@
 /**
  * MCP tools for document access.
- * get_documents, read_document
+ * get_documents, read_document, fetch_svn_specs
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { randomUUID, createHash } from 'node:crypto';
+import mammoth from 'mammoth';
+import iconv from 'iconv-lite';
 import { getMcpDb } from '../db.js';
 
 interface DocumentRow {
@@ -120,4 +126,710 @@ export function registerDocumentTools(server: McpServer): void {
       return { content: [{ type: 'text' as const, text: `File not found at: ${doc.file_path}` }], isError: true };
     },
   );
+
+  // ── fetch_task_attachments ───────────────────────────────────
+  server.tool(
+    'fetch_task_attachments',
+    '從 Asana 任務下載附件圖片。解析任務描述中的 Asana asset URL，下載圖片並存到本地供 subagent 使用。',
+    {
+      projectId: z.string().describe('專案 ID'),
+      taskId: z.string().describe('任務 ID'),
+    },
+    async ({ projectId, taskId }) => {
+      const db = getMcpDb();
+
+      // Get task description
+      const task = db.prepare('SELECT description, title, source_ref FROM tasks WHERE id = ?').get(taskId) as {
+        description: string | null; title: string; source_ref: string | null;
+      } | undefined;
+      if (!task) return { content: [{ type: 'text' as const, text: `Error: Task "${taskId}" not found` }], isError: true };
+
+      // Get Asana PAT
+      const patRow = db.prepare("SELECT value FROM global_config WHERE key = 'asana.pat'").get() as { value: string } | undefined;
+      const asanaPat = patRow?.value || process.env['ASANA_PAT'];
+      if (!asanaPat) return { content: [{ type: 'text' as const, text: 'Error: Asana PAT not configured.' }], isError: true };
+
+      // Extract asset IDs from description
+      const description = task.description || '';
+      const assetIds = [...description.matchAll(/get_asset\?asset_id=(\d+)/g)].map(m => m[1]!);
+
+      // Also try fetching attachments via Asana API if we have source_ref (task GID)
+      if (task.source_ref) {
+        try {
+          const attRes = await fetch(`https://app.asana.com/api/1.0/tasks/${task.source_ref}/attachments?opt_fields=gid,name,download_url`, {
+            headers: { 'Authorization': `Bearer ${asanaPat}`, 'Accept': 'application/json' },
+          });
+          if (attRes.ok) {
+            const attData = await attRes.json() as { data?: Array<{ gid: string; name: string; download_url: string }> };
+            for (const att of attData.data || []) {
+              if (!assetIds.includes(att.gid)) assetIds.push(att.gid);
+            }
+          }
+        } catch { /* ignore */ }
+      }
+
+      if (assetIds.length === 0) {
+        return { content: [{ type: 'text' as const, text: 'No attachments found in this task.' }] };
+      }
+
+      // Setup download directory
+      const dbPath = process.env['DB_PATH'] || './data/omni.db';
+      const dataDir = path.dirname(path.isAbsolute(dbPath) ? dbPath : path.resolve(process.cwd(), dbPath));
+      const uploadsDir = path.join(dataDir, 'uploads', projectId);
+      const attachDir = path.join(uploadsDir, `attachments_${taskId.slice(0, 8)}`);
+      fs.mkdirSync(attachDir, { recursive: true });
+
+      const results: string[] = [];
+
+      for (let i = 0; i < assetIds.length; i++) {
+        const assetId = assetIds[i]!;
+        try {
+          // Get attachment info
+          const res = await fetch(`https://app.asana.com/api/1.0/attachments/${assetId}`, {
+            headers: { 'Authorization': `Bearer ${asanaPat}`, 'Accept': 'application/json' },
+          });
+          if (!res.ok) continue;
+
+          const data = await res.json() as { data?: { name: string; download_url: string } };
+          if (!data.data?.download_url) continue;
+
+          const filename = data.data.name || `attachment-${i + 1}.png`;
+          const ext = path.extname(filename) || '.png';
+          const localFilename = `${i + 1}-${filename}`;
+          const localPath = path.join(attachDir, localFilename);
+
+          // Skip if already downloaded
+          if (fs.existsSync(localPath)) {
+            results.push(`${localFilename} (cached)`);
+            continue;
+          }
+
+          // Download
+          const imgRes = await fetch(data.data.download_url);
+          if (!imgRes.ok) continue;
+          const buf = Buffer.from(await imgRes.arrayBuffer());
+          fs.writeFileSync(localPath, buf);
+
+          results.push(`${localFilename} (${Math.round(buf.length / 1024)}KB)`);
+        } catch {
+          // Skip failed downloads
+        }
+      }
+
+      if (results.length === 0) {
+        return { content: [{ type: 'text' as const, text: 'Found asset IDs but all downloads failed.' }], isError: true };
+      }
+
+      const attachDirNorm = attachDir.replace(/\\/g, '/');
+      return {
+        content: [{
+          type: 'text' as const,
+          text: `Downloaded ${results.length} attachments:\n${results.map(r => `- ${r}`).join('\n')}\n\nSaved to: ${attachDirNorm}\nUse Read tool to view images.`,
+        }],
+      };
+    },
+  );
+
+  // ── fetch_svn_specs ─────────────────────────────────────────
+  server.tool(
+    'fetch_svn_specs',
+    '從 SVN 自動抓取任務的 SA/SD 規格文件。根據任務的 parent_name 提取功能代碼，搜尋 SVN 中匹配的規格文件並下載。',
+    {
+      projectId: z.string().describe('專案 ID'),
+      taskId: z.string().describe('任務 ID'),
+    },
+    async ({ projectId, taskId }) => {
+      const db = getMcpDb();
+
+      // 1. Get task info
+      const task = db.prepare('SELECT parent_name, label FROM tasks WHERE id = ?').get(taskId) as
+        { parent_name: string | null; label: string } | undefined;
+      if (!task) {
+        return { content: [{ type: 'text' as const, text: `Error: Task "${taskId}" not found` }], isError: true };
+      }
+      if (!task.parent_name) {
+        return { content: [{ type: 'text' as const, text: `Error: Task "${taskId}" has no parent_name — cannot determine function code for SVN search` }], isError: true };
+      }
+
+      // 2. Get project SVN config
+      const project = db.prepare('SELECT config_json FROM projects WHERE id = ?').get(projectId) as
+        { config_json: string | null } | undefined;
+      if (!project) {
+        return { content: [{ type: 'text' as const, text: `Error: Project "${projectId}" not found` }], isError: true };
+      }
+
+      let svnConfig: { frontendSpecPath?: string; backendSpecPath?: string } = {};
+      if (project.config_json) {
+        try {
+          const config = JSON.parse(project.config_json);
+          svnConfig = config.svnConfig || {};
+        } catch { /* ignore parse error */ }
+      }
+
+      if (!svnConfig.frontendSpecPath && !svnConfig.backendSpecPath) {
+        return { content: [{ type: 'text' as const, text: `Error: Project has no SVN spec paths configured. Set svnConfig.frontendSpecPath and/or svnConfig.backendSpecPath in project settings.` }], isError: true };
+      }
+
+      // 3. Get SVN credentials
+      const svnUser = db.prepare("SELECT value FROM global_config WHERE key = 'svn.username'").get() as { value: string } | undefined;
+      const svnPass = db.prepare("SELECT value FROM global_config WHERE key = 'svn.password'").get() as { value: string } | undefined;
+      const credentials = {
+        username: svnUser?.value || '',
+        password: svnPass?.value || '',
+      };
+
+      // 4. Extract function code and root code
+      const functionCode = extractFunctionCode(task.parent_name) || task.parent_name;
+      const rootCode = extractRootCode(functionCode);
+      if (!rootCode) {
+        return { content: [{ type: 'text' as const, text: `Error: Could not extract root code from parent_name "${task.parent_name}"` }], isError: true };
+      }
+
+      // 5. Determine SVN roots based on task label
+      const svnRoots = resolveSvnRoots(svnConfig, task.label);
+      if (svnRoots.length === 0) {
+        return { content: [{ type: 'text' as const, text: `No SVN root paths configured for task label "${task.label}"` }], isError: true };
+      }
+
+      // Detect svn binary and NTLM mode
+      const svnPath = detectSvnBinary();
+      let ntlmMode = false;
+
+      // 6. Search SVN for matching files
+      const frontendRoot = svnConfig.frontendSpecPath ? normalizeSvnUrl(svnConfig.frontendSpecPath) : null;
+      const allMatchedFiles: Array<{ fileUrl: string; isFrontendRoot: boolean }> = [];
+
+      for (const svnRoot of svnRoots) {
+        try {
+          const listResult = svnList(svnPath, svnRoot, credentials, false, ntlmMode);
+          ntlmMode = listResult.ntlmMode;
+          const topItems = listResult.items;
+
+          const matchedFolder = findMatchingFolder(topItems, rootCode);
+
+          let searchUrl: string;
+          let allFiles: string[];
+
+          if (matchedFolder) {
+            searchUrl = `${svnRoot}/${matchedFolder.replace(/[^\x00-\x7F]/g, c => encodeURIComponent(c))}`;
+            const subResult = svnList(svnPath, searchUrl, credentials, true, ntlmMode);
+            ntlmMode = subResult.ntlmMode;
+            allFiles = subResult.items;
+          } else {
+            searchUrl = svnRoot;
+            allFiles = topItems;
+          }
+
+          const matchedFiles = findMatchingFiles(allFiles, functionCode);
+
+          // Fallback: check 0_共用/ if nothing found
+          if (matchedFiles.length === 0 && matchedFolder) {
+            const sharedFiles = allFiles.filter(f =>
+              f.startsWith('0_') && !f.endsWith('/') && hasSpecExtension(f)
+            );
+            matchedFiles.push(...sharedFiles);
+          }
+
+          const isFrontendRoot = svnRoot === frontendRoot;
+          for (const file of matchedFiles) {
+            const encodedFile = file.replace(/[^\x00-\x7F]/g, c => encodeURIComponent(c));
+            allMatchedFiles.push({ fileUrl: `${searchUrl}/${encodedFile}`, isFrontendRoot });
+          }
+        } catch {
+          // Skip failed SVN roots
+        }
+      }
+
+      if (allMatchedFiles.length === 0) {
+        return {
+          content: [{ type: 'text' as const, text: `No spec files found for "${functionCode}" (rootCode: ${rootCode}) in SVN.\nSearched roots: ${svnRoots.join(', ')}` }],
+        };
+      }
+
+      // 7. Download files and save to DB
+      const dbPath = process.env['DB_PATH'] || './data/omni.db';
+      const dataDir = path.dirname(path.isAbsolute(dbPath) ? dbPath : path.resolve(process.cwd(), dbPath));
+      const uploadsDir = path.join(dataDir, 'uploads', projectId);
+      fs.mkdirSync(uploadsDir, { recursive: true });
+
+      const subFolder = `${functionCode}_${taskId.slice(0, 8)}`;
+      const targetDir = path.join(uploadsDir, subFolder);
+      fs.mkdirSync(targetDir, { recursive: true });
+
+      const results: Array<{ docType: string; filename: string; mdPath?: string }> = [];
+
+      for (const { fileUrl, isFrontendRoot } of allMatchedFiles) {
+        try {
+          const filename = decodeURIComponent(fileUrl.split('/').pop() || 'unknown');
+          const docType = isFrontendRoot ? 'SA' : 'SD';
+
+          // Check if already exists by source_url
+          const existing = db.prepare(
+            "SELECT id, file_path, svn_last_modified, content_hash FROM documents WHERE project_id = ? AND source_url = ?"
+          ).get(projectId, fileUrl) as { id: string; file_path: string; svn_last_modified: string | null; content_hash: string | null } | undefined;
+
+          // Step 1: Check SVN last modified date (no download needed)
+          let svnLastModified: string | null = null;
+          try {
+            svnLastModified = svnInfoLastModified(svnPath, fileUrl, credentials, ntlmMode);
+          } catch { /* ignore */ }
+
+          // If cached, date unchanged, and file exists → skip (no download)
+          if (existing && svnLastModified && existing.svn_last_modified === svnLastModified && fs.existsSync(existing.file_path)) {
+            db.prepare(
+              'INSERT OR IGNORE INTO task_documents (task_id, document_id) VALUES (?, ?)'
+            ).run(taskId, existing.id);
+            results.push({ docType, filename });
+            continue;
+          }
+
+          // Step 2: Date changed or no cache → download
+          const tempExt = path.extname(filename);
+          const tempPath = path.join(os.tmpdir(), `omni-svn-${Date.now()}${tempExt}`);
+          svnExport(svnPath, fileUrl, tempPath, credentials, ntlmMode);
+
+          if (!fs.existsSync(tempPath)) {
+            continue;
+          }
+
+          const buffer = fs.readFileSync(tempPath);
+          const newHash = createHash('sha256').update(buffer).digest('hex');
+
+          // Step 3: Compare hash — if content identical, just update date and bind
+          if (existing && existing.content_hash === newHash && fs.existsSync(existing.file_path)) {
+            db.prepare(
+              "UPDATE documents SET svn_last_modified = ? WHERE id = ?"
+            ).run(svnLastModified || '', existing.id);
+            db.prepare(
+              'INSERT OR IGNORE INTO task_documents (task_id, document_id) VALUES (?, ?)'
+            ).run(taskId, existing.id);
+            try { fs.unlinkSync(tempPath); } catch { /* ignore */ }
+            results.push({ docType, filename });
+            continue;
+          }
+
+          // Step 4: Content changed or new → process file
+          if (existing) {
+            fs.writeFileSync(existing.file_path, buffer);
+
+            let parsedText: string;
+            if (filename.toLowerCase().endsWith('.docx')) {
+              try {
+                const mdPath = await convertDocxToMarkdown(buffer, existing.id, targetDir, filename);
+                parsedText = `[Document saved at: ${mdPath.replace(/\\/g, '/')}]`;
+                results.push({ docType, filename, mdPath });
+              } catch {
+                parsedText = `[DOCX file saved at: ${existing.file_path}]`;
+                results.push({ docType, filename });
+              }
+            } else if (filename.toLowerCase().endsWith('.pdf')) {
+              parsedText = `[PDF file - use Read tool to view: ${existing.file_path}]`;
+              results.push({ docType, filename });
+            } else {
+              parsedText = fs.readFileSync(existing.file_path, 'utf-8');
+              results.push({ docType, filename });
+            }
+
+            db.prepare(
+              "UPDATE documents SET svn_last_modified = ?, content_hash = ?, parsed_text = ?, created_at = datetime('now') WHERE id = ?"
+            ).run(svnLastModified || '', newHash, parsedText, existing.id);
+
+            db.prepare(
+              'INSERT OR IGNORE INTO task_documents (task_id, document_id) VALUES (?, ?)'
+            ).run(taskId, existing.id);
+
+            try { fs.unlinkSync(tempPath); } catch { /* ignore */ }
+            continue;
+          }
+
+          // New document
+          const docId = randomUUID();
+          const labeledFilename = `[${docType}] ${filename}`;
+          const filePath = path.join(targetDir, `${docId}-${labeledFilename}`);
+          fs.writeFileSync(filePath, buffer);
+
+          let parsedText: string;
+          if (filename.toLowerCase().endsWith('.docx')) {
+            try {
+              const mdPath = await convertDocxToMarkdown(buffer, docId, targetDir, filename);
+              parsedText = `[Document saved at: ${mdPath.replace(/\\/g, '/')}]`;
+              results.push({ docType, filename, mdPath });
+            } catch {
+              parsedText = `[DOCX file saved at: ${filePath}]`;
+              results.push({ docType, filename });
+            }
+          } else if (filename.toLowerCase().endsWith('.pdf')) {
+            parsedText = `[PDF file - use Read tool to view: ${filePath}]`;
+            results.push({ docType, filename });
+          } else if (['.md', '.txt'].some(ext => filename.toLowerCase().endsWith(ext))) {
+            parsedText = buffer.toString('utf-8');
+            results.push({ docType, filename });
+          } else {
+            parsedText = `[Binary file saved at: ${filePath}]`;
+            results.push({ docType, filename });
+          }
+
+          db.prepare(`
+            INSERT INTO documents (id, project_id, filename, file_path, file_type, doc_type, parsed_text, source, source_url, svn_last_modified, content_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'svn', ?, ?, ?)
+          `).run(docId, projectId, labeledFilename, filePath, 'binary', docType, parsedText, fileUrl, svnLastModified || null, newHash);
+
+          db.prepare(
+            'INSERT OR IGNORE INTO task_documents (task_id, document_id) VALUES (?, ?)'
+          ).run(taskId, docId);
+
+          try { fs.unlinkSync(tempPath); } catch { /* ignore */ }
+        } catch {
+          // Skip failed files
+        }
+      }
+
+      // 8. Format result
+      if (results.length === 0) {
+        return {
+          content: [{ type: 'text' as const, text: `Found ${allMatchedFiles.length} matching files in SVN but all failed to download.` }],
+          isError: true,
+        };
+      }
+
+      const lines = results.map(r => {
+        const mdNote = r.mdPath ? ` → ${path.basename(r.mdPath)}` : '';
+        return `- [${r.docType}] ${r.filename}${mdNote}`;
+      });
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: `Found ${results.length} spec files for ${functionCode}:\n${lines.join('\n')}\n\nFiles saved to ${targetDir.replace(/\\/g, '/')}`,
+        }],
+      };
+    },
+  );
+}
+
+// =============================================
+// SVN helper functions (standalone, no class dependency)
+// =============================================
+
+const SPEC_EXTENSIONS = new Set(['.docx', '.doc', '.pdf', '.md', '.txt']);
+
+function hasSpecExtension(filename: string): boolean {
+  const ext = path.extname(filename).toLowerCase();
+  return SPEC_EXTENSIONS.has(ext);
+}
+
+function extractFunctionCode(text: string): string | null {
+  const match = text.match(/(?:^|[^A-Za-z])([A-Za-z]{2,}[0-9]+)(?=[^A-Za-z0-9]|$)/);
+  if (match && match[1]!.length >= 3) {
+    return match[1]!.toUpperCase();
+  }
+  return null;
+}
+
+function extractRootCode(code: string): string | null {
+  const match = code.match(/^([A-Za-z]+)/);
+  return match ? match[1]!.toUpperCase() : null;
+}
+
+function escapeRegex(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function normalizeSvnUrl(url: string): string {
+  const match = url.match(/^(https?:\/\/[^/]+)\/!\/(?:#|%23)([^/]+)\/view\/head\/?(.*)?$/i);
+  if (match) {
+    const [, origin, repo, rest] = match;
+    const decodedRepo = decodeURIComponent(repo!);
+    const decodedRest = rest ? decodeURIComponent(rest) : '';
+    const encodePath = (s: string) => s.split('/').map(part =>
+      part.replace(/[^\x20-\x7E]/g, c => encodeURIComponent(c))
+    ).join('/');
+    return decodedRest
+      ? `${origin}/svn/${encodePath(decodedRepo)}/${encodePath(decodedRest)}`
+      : `${origin}/svn/${encodePath(decodedRepo)}`;
+  }
+  return url.replace(/[^\x00-\x7F]/g, c => encodeURIComponent(c));
+}
+
+function resolveSvnRoots(
+  svnConfig: { frontendSpecPath?: string; backendSpecPath?: string },
+  taskLabel: string,
+): string[] {
+  const roots: string[] = [];
+  if (taskLabel === 'backend') {
+    if (svnConfig.backendSpecPath) roots.push(normalizeSvnUrl(svnConfig.backendSpecPath));
+  } else if (taskLabel === 'frontend') {
+    if (svnConfig.frontendSpecPath) roots.push(normalizeSvnUrl(svnConfig.frontendSpecPath));
+    if (svnConfig.backendSpecPath) roots.push(normalizeSvnUrl(svnConfig.backendSpecPath));
+  } else {
+    if (svnConfig.frontendSpecPath) roots.push(normalizeSvnUrl(svnConfig.frontendSpecPath));
+    if (svnConfig.backendSpecPath) roots.push(normalizeSvnUrl(svnConfig.backendSpecPath));
+  }
+  return roots;
+}
+
+function detectSvnBinary(): string {
+  // PATH 的 svn 優先（正確輸出 CP950），TortoiseSVN 在 pipe 模式下會把中文變成 ?
+  try {
+    const result = spawnSync(
+      process.platform === 'win32' ? 'where' : 'which',
+      [process.platform === 'win32' ? 'svn.exe' : 'svn'],
+      { encoding: 'utf-8', timeout: 5000 },
+    );
+    if (result.status === 0 && result.stdout) return result.stdout.trim().split('\n')[0]!;
+  } catch { /* not found */ }
+  // Fallback: TortoiseSVN（注意：pipe 模式下中文可能變 ?）
+  const candidates = process.platform === 'win32'
+    ? ['C:/Program Files/TortoiseSVN/bin/svn.exe', 'C:/Program Files (x86)/TortoiseSVN/bin/svn.exe']
+    : [];
+  for (const c of candidates) {
+    if (fs.existsSync(c)) return c;
+  }
+  return 'svn';
+}
+
+function decodeSvnOutput(buf: Buffer): string {
+  // Windows 上 svn 指令輸出通常是系統 codepage（CP950/Big5），優先嘗試 CP950
+  if (process.platform === 'win32') {
+    try {
+      const cp950 = iconv.decode(buf, 'cp950');
+      // 如果 CP950 解碼結果包含合理的中文字元，就用它
+      if (/[\u4e00-\u9fff]/.test(cp950)) return cp950;
+    } catch { /* fall through */ }
+  }
+  const utf8 = buf.toString('utf-8');
+  if (!utf8.includes('\uFFFD')) return utf8;
+  try { return iconv.decode(buf, 'cp950'); } catch { return utf8; }
+}
+
+function isNtlmError(msg: string): boolean {
+  return /E120190|authentication context|NTLM|Negotiate/i.test(msg);
+}
+
+function buildAuthArgs(creds: { username: string; password: string }): string[] {
+  const parts = ['--non-interactive', '--trust-server-cert',
+    '--trust-server-cert-failures=unknown-ca,cn-mismatch,expired,not-yet-valid,other', '--no-auth-cache'];
+  if (creds.username) parts.push('--username', creds.username);
+  if (creds.password) parts.push('--password', creds.password);
+  return parts;
+}
+
+function curlAuthArgs(creds: { username: string; password: string }): string[] {
+  const args = ['--ntlm', '--silent', '--insecure', '--fail-with-body'];
+  if (creds.username || creds.password) args.push('-u', `${creds.username || ''}:${creds.password || ''}`);
+  return args;
+}
+
+function curlList(url: string, creds: { username: string; password: string }, recursive: boolean, prefix = ''): string[] {
+  const listUrl = url.endsWith('/') ? url : url + '/';
+  const result = spawnSync('curl', [...curlAuthArgs(creds), listUrl], {
+    encoding: 'buffer', timeout: 60000, maxBuffer: 10 * 1024 * 1024,
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error(result.stderr?.toString('utf-8') ?? `curl exit ${result.status}`);
+
+  const text = result.stdout.toString('utf-8');
+  const items: string[] = [];
+  const fileRe = /<file[^>]+name="([^"]+)"/g;
+  const dirRe = /<dir[^>]+name="([^"]+)"\s+href="([^"]+)"/g;
+  let m: RegExpExecArray | null;
+  while ((m = fileRe.exec(text)) !== null) items.push(prefix + m[1]);
+  while ((m = dirRe.exec(text)) !== null) {
+    items.push(prefix + m[1] + '/');
+    if (recursive) {
+      const subItems = curlList(listUrl + m[2], creds, true, prefix + m[1] + '/');
+      items.push(...subItems);
+    }
+  }
+  return items;
+}
+
+function svnList(
+  svnPath: string, url: string, creds: { username: string; password: string },
+  recursive: boolean, ntlmMode: boolean,
+): { items: string[]; ntlmMode: boolean } {
+  if (!ntlmMode) {
+    // Use --xml for proper UTF-8 output (TortoiseSVN's plain text replaces CJK with ?)
+    const args = ['list', ...(recursive ? ['-R'] : []), '--xml', url, ...buildAuthArgs(creds)];
+    const result = spawnSync(svnPath, args, { encoding: 'utf-8', timeout: 60000, maxBuffer: 10 * 1024 * 1024 });
+    if (!result.error && result.status === 0) {
+      const items = parseSvnListXml(result.stdout, recursive);
+      return { items, ntlmMode: false };
+    }
+    const stderr = result.stderr || '';
+    if (isNtlmError(stderr)) {
+      ntlmMode = true;
+    } else {
+      return { items: [], ntlmMode: false };
+    }
+  }
+  try {
+    return { items: curlList(url, creds, recursive), ntlmMode: true };
+  } catch {
+    return { items: [], ntlmMode: true };
+  }
+}
+
+/**
+ * Parse `svn list --xml` output into a list of file/folder names.
+ * XML output is always UTF-8, avoiding TortoiseSVN's CJK encoding issues.
+ */
+function parseSvnListXml(xml: string, recursive: boolean): string[] {
+  const items: string[] = [];
+  // Match each <entry> element
+  const entryPattern = /<entry\s+kind="([^"]+)"[^>]*>\s*<name>([^<]+)<\/name>/g;
+  let match;
+  while ((match = entryPattern.exec(xml)) !== null) {
+    const kind = match[1]; // "file" or "dir"
+    const name = match[2]!.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"');
+    if (kind === 'dir') {
+      items.push(name + '/');
+    } else {
+      items.push(name);
+    }
+  }
+  return items;
+}
+
+function svnInfoLastModified(
+  svnPath: string, url: string, creds: { username: string; password: string }, ntlmMode: boolean,
+): string | null {
+  if (!ntlmMode) {
+    const args = ['info', url, ...buildAuthArgs(creds)];
+    const result = spawnSync(svnPath, args, { encoding: 'buffer', timeout: 30000, maxBuffer: 1024 * 1024 });
+    if (!result.error && result.status === 0) {
+      const text = decodeSvnOutput(result.stdout);
+      const m = text.match(/Last Changed Date:\s*(.+)/i);
+      return m ? m[1]!.trim() : null;
+    }
+    const stderr = result.stderr ? decodeSvnOutput(result.stderr) : '';
+    if (!isNtlmError(stderr)) return null;
+  }
+  // PROPFIND fallback
+  const body = '<?xml version="1.0" encoding="utf-8"?><D:propfind xmlns:D="DAV:"><D:prop><D:getlastmodified/></D:prop></D:propfind>';
+  const result = spawnSync('curl', [
+    ...curlAuthArgs(creds), '-X', 'PROPFIND', '-H', 'Depth: 0',
+    '-H', 'Content-Type: text/xml; charset=utf-8', '-d', body, url,
+  ], { encoding: 'buffer', timeout: 30000, maxBuffer: 1024 * 1024 });
+  if (result.error || result.status !== 0) return null;
+  const text = result.stdout.toString('utf-8');
+  const m = text.match(/<[Dd]:getlastmodified[^>]*>([^<]+)<\/[Dd]:getlastmodified>/);
+  return m ? m[1]!.trim() : null;
+}
+
+function svnExport(
+  svnPath: string, url: string, localPath: string,
+  creds: { username: string; password: string }, ntlmMode: boolean,
+): void {
+  if (!ntlmMode) {
+    const args = ['export', '--force', url, localPath, ...buildAuthArgs(creds)];
+    const result = spawnSync(svnPath, args, { encoding: 'buffer', timeout: 120000, maxBuffer: 50 * 1024 * 1024 });
+    if (!result.error && result.status === 0) return;
+    const stderr = result.stderr ? decodeSvnOutput(result.stderr) : '';
+    if (!isNtlmError(stderr)) throw new Error(stderr || `exit ${result.status}`);
+  }
+  // curl fallback
+  const result = spawnSync('curl', [...curlAuthArgs(creds), '-o', localPath, '-L', url], {
+    encoding: 'buffer', timeout: 120000, maxBuffer: 50 * 1024 * 1024,
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error(result.stderr?.toString('utf-8') ?? `curl exit ${result.status}`);
+}
+
+function findMatchingFolder(folders: string[], rootCode: string): string | null {
+  const code = rootCode.toUpperCase();
+  const dirs = folders.filter(f => f.endsWith('/')).map(f => f.slice(0, -1));
+  const prefixMatch = dirs.find(d => {
+    const upper = d.toUpperCase();
+    return upper === code || upper.startsWith(code + '.') || upper.startsWith(code + '_');
+  });
+  if (prefixMatch) return prefixMatch;
+  const containsMatch = dirs.find(d => d.toUpperCase().includes(code));
+  return containsMatch || null;
+}
+
+function findMatchingFiles(allFiles: string[], parentName: string): string[] {
+  const code = parentName.toUpperCase();
+  const codePattern = new RegExp(`(?<![A-Z0-9])${escapeRegex(code)}(?![0-9])`, 'i');
+  const matched: string[] = [];
+  for (const file of allFiles) {
+    if (file.endsWith('/')) continue;
+    if (!hasSpecExtension(file)) continue;
+    const parts = file.split('/');
+    if (parts.some(p => p.toLowerCase() === 'old')) continue;
+    const basename = path.basename(file);
+    if (codePattern.test(basename)) { matched.push(file); continue; }
+    if (parts.length > 1) {
+      const parentDir = parts[0]!;
+      if (codePattern.test(parentDir)) { matched.push(file); continue; }
+    }
+  }
+  return matched;
+}
+
+async function convertDocxToMarkdown(buffer: Buffer, docId: string, outDir: string, filename: string): Promise<string> {
+  fs.mkdirSync(outDir, { recursive: true });
+  const images: string[] = [];
+  let imgIdx = 0;
+
+  const result = await mammoth.convertToHtml(
+    { buffer },
+    {
+      convertImage: mammoth.images.imgElement(async (image) => {
+        const imageBuffer = await image.read();
+        const ext = (image.contentType?.split('/')[1] || 'png').replace('jpeg', 'jpg');
+        const imgFilename = `${docId}-img-${imgIdx++}.${ext}`;
+        const imgPath = path.join(outDir, imgFilename);
+        fs.writeFileSync(imgPath, imageBuffer);
+        images.push(imgPath);
+        return { src: imgFilename };
+      }),
+    },
+  );
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const TurndownService = ((await import('turndown')) as any).default ?? (await import('turndown'));
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const gfm = ((await import('turndown-plugin-gfm')) as any).gfm ?? (await import('turndown-plugin-gfm'));
+  const td = new TurndownService({ headingStyle: 'atx' });
+  td.use(gfm);
+
+  // Strip <p> inside table cells for correct GFM tables
+  const cleanedHtml = result.value.replace(
+    /(<(?:td|th)[^>]*>)([\s\S]*?)(<\/(?:td|th)>)/gi,
+    (_match: string, open: string, content: string, close: string) => {
+      const cleaned = content.replace(/<p>([\s\S]*?)<\/p>/gi, '$1 ').replace(/<br\s*\/?>/gi, ' ').trim();
+      return `${open}${cleaned}${close}`;
+    },
+  );
+
+  // Custom table rule (mammoth doesn't produce <thead>)
+  td.addRule('htmlTableToGfm', {
+    filter: 'table',
+    replacement(_content: string, node: Node) {
+      const el = node as HTMLElement;
+      const rows = Array.from(el.querySelectorAll('tr'));
+      if (rows.length === 0) return '';
+      const parseRow = (tr: Element): string[] =>
+        Array.from(tr.querySelectorAll('td, th')).map(cell => cell.textContent?.trim().replace(/\|/g, '\\|').replace(/\n/g, ' ') || '');
+      const headerCells = parseRow(rows[0]!);
+      const header = `| ${headerCells.join(' | ')} |`;
+      const separator = `| ${headerCells.map(() => '---').join(' | ')} |`;
+      const bodyRows = rows.slice(1).map(tr => `| ${parseRow(tr).join(' | ')} |`);
+      return `\n\n${header}\n${separator}\n${bodyRows.join('\n')}\n\n`;
+    },
+  });
+
+  let markdown = td.turndown(cleanedHtml);
+  markdown = markdown.replace(/\n{3,}/g, '\n\n').trim();
+
+  for (const absPath of images) {
+    const relName = path.basename(absPath);
+    markdown = markdown.replaceAll(relName, absPath.replace(/\\/g, '/'));
+  }
+
+  const mdFilename = `${docId}-${path.parse(filename).name}.md`;
+  const mdPath = path.join(outDir, mdFilename);
+  fs.writeFileSync(mdPath, markdown, 'utf-8');
+  return mdPath;
 }

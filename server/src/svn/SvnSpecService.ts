@@ -509,17 +509,19 @@ export class SvnSpecService {
    * Decode SVN output buffer. Try UTF-8 first, fallback to Big5 (CP950).
    */
   private decodeSvnOutput(buf: Buffer): string {
-    // Try UTF-8 first
-    const utf8 = buf.toString('utf-8');
-    // Check for replacement characters — indicates it wasn't valid UTF-8
-    if (!utf8.includes('\uFFFD') && !/[\x80-\xFF]/.test(utf8.replace(/[\u0080-\uFFFF]/g, ''))) {
-      return utf8;
+    // Windows 上 svn 指令輸出通常是系統 codepage（CP950/Big5），優先嘗試 CP950
+    if (process.platform === 'win32') {
+      try {
+        const cp950 = iconv.decode(buf, 'cp950');
+        if (/[\u4e00-\u9fff]/.test(cp950)) return cp950;
+      } catch { /* fall through */ }
     }
-    // Fallback to Big5/CP950
+    const utf8 = buf.toString('utf-8');
+    if (!utf8.includes('\uFFFD')) return utf8;
     try {
       return iconv.decode(buf, 'cp950');
     } catch {
-      return utf8; // Give up, return raw
+      return utf8;
     }
   }
 
@@ -682,9 +684,22 @@ function isNtlmError(msg: string): boolean {
 
 /**
  * Detect the svn binary path on the current platform.
- * Checks TortoiseSVN on Windows, then falls back to PATH lookup.
+ * PATH 的 svn 優先（正確輸出 CP950），TortoiseSVN 在 pipe 模式下會把中文變成 ?
  */
 export function detectSvnBinary(): string {
+  // PATH svn first — outputs CP950 correctly in pipe mode
+  try {
+    const result = spawnSync(
+      process.platform === 'win32' ? 'where' : 'which',
+      [process.platform === 'win32' ? 'svn.exe' : 'svn'],
+      { encoding: 'utf-8', timeout: 5000 },
+    );
+    if (result.status === 0 && result.stdout) {
+      return result.stdout.trim().split('\n')[0]!;
+    }
+  } catch { /* not found */ }
+
+  // Fallback: TortoiseSVN（注意：pipe 模式下中文可能變 ?）
   const candidates =
     process.platform === 'win32'
       ? [
@@ -696,17 +711,6 @@ export function detectSvnBinary(): string {
   for (const candidate of candidates) {
     if (fs.existsSync(candidate)) return candidate;
   }
-
-  try {
-    const result = spawnSync(
-      process.platform === 'win32' ? 'where' : 'which',
-      [process.platform === 'win32' ? 'svn.exe' : 'svn'],
-      { encoding: 'utf-8', timeout: 5000 },
-    );
-    if (result.status === 0 && result.stdout) {
-      return result.stdout.trim().split('\n')[0]!;
-    }
-  } catch { /* not found */ }
 
   return 'svn';
 }

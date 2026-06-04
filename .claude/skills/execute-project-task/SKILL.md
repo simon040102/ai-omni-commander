@@ -172,6 +172,9 @@ Subagent prompt 組裝：
 ## 額外參考文件
 {使用者提供的文件內容}
 
+## 專案額外指示（來自專案設定，必須遵守）
+{從 project.config_json 的 frontendExtraPrompt 或 backendExtraPrompt 取得，原封不動貼上。{AXURE_SNAPSHOT_PATH} 替換成實際路徑。}
+
 ## Workspace
 cwd: {frontendPath 或 backendPath}
 
