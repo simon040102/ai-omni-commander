@@ -8,6 +8,7 @@ import { registerDocumentTools } from './tools/document-tools.js';
 import { registerProjectTools } from './tools/project-tools.js';
 import { registerProgressTools } from './tools/progress-tools.js';
 import { registerWorkspaceTools } from './tools/workspace-tools.js';
+import { registerDbTools } from './tools/db-tools.js';
 
 export function createOmniMcpServer(): McpServer {
   const server = new McpServer(
@@ -43,6 +44,7 @@ Typical workflow:
   registerProjectTools(server);
   registerProgressTools(server);
   registerWorkspaceTools(server);
+  registerDbTools(server);
 
   return server;
 }

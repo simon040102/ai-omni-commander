@@ -101,15 +101,16 @@ export function registerProjectTools(server: McpServer): void {
       workingDir: z.string().describe('Absolute path to the working directory'),
       frontendPath: z.string().optional().describe('Optional: absolute path to frontend workspace'),
       backendPath: z.string().optional().describe('Optional: absolute path to backend workspace'),
+      asanaProjectGid: z.string().optional().describe('Optional: Asana project GID for task sync'),
     },
-    async ({ name, workingDir, frontendPath, backendPath }) => {
+    async ({ name, workingDir, frontendPath, backendPath, asanaProjectGid }) => {
       const db = getMcpDb();
       const id = genId();
 
       db.prepare(`
-        INSERT INTO projects (id, name, working_dir, frontend_path, backend_path)
-        VALUES (?, ?, ?, ?, ?)
-      `).run(id, name, workingDir, frontendPath || null, backendPath || null);
+        INSERT INTO projects (id, name, working_dir, frontend_path, backend_path, asana_project_gid)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(id, name, workingDir, frontendPath || null, backendPath || null, asanaProjectGid || null);
 
       await notifyWebServer({
         event: 'project.created',
@@ -184,6 +185,68 @@ export function registerProjectTools(server: McpServer): void {
             frontendPath: updated.frontend_path,
             backendPath: updated.backend_path,
           }, null, 2),
+        }],
+      };
+    },
+  );
+
+  // ── set_extra_prompt ─────────────────────────────────────
+  server.tool(
+    'set_extra_prompt',
+    'Set the extra prompt for a project. This prompt is automatically injected into every subagent dispatched for this project.',
+    {
+      projectId: z.string().describe('The project ID'),
+      label: z.enum(['frontend', 'backend']).describe('Which extra prompt to set'),
+      prompt: z.string().describe('The extra prompt content (set empty string to clear)'),
+    },
+    async ({ projectId, label, prompt }) => {
+      const db = getMcpDb();
+      const project = db.prepare('SELECT id, config_json FROM projects WHERE id = ?').get(projectId) as { id: string; config_json: string | null } | undefined;
+      if (!project) {
+        return { content: [{ type: 'text' as const, text: `Error: Project "${projectId}" not found` }], isError: true };
+      }
+
+      const config = project.config_json ? JSON.parse(project.config_json) : {};
+      const key = label === 'frontend' ? 'frontendExtraPrompt' : 'backendExtraPrompt';
+      config[key] = prompt || undefined;
+
+      db.prepare("UPDATE projects SET config_json = ?, updated_at = datetime('now') WHERE id = ?")
+        .run(JSON.stringify(config), projectId);
+
+      await notifyWebServer({ event: 'project.updated', data: { projectId } }).catch(() => {});
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: prompt
+            ? `${label} extra prompt 已設定（${prompt.length} 字）`
+            : `${label} extra prompt 已清除`,
+        }],
+      };
+    },
+  );
+
+  // ── set_global_config ──────────────────────────────────────
+  server.tool(
+    'set_global_config',
+    '設定全域設定（SVN 帳密、Asana PAT）',
+    {
+      key: z.enum(['svn.username', 'svn.password', 'asana.pat']).describe('設定項'),
+      value: z.string().describe('設定值'),
+    },
+    async ({ key, value }) => {
+      const db = getMcpDb();
+      db.prepare('INSERT OR REPLACE INTO global_config (key, value) VALUES (?, ?)').run(key, value);
+
+      // Mask sensitive values in response
+      const masked = (key === 'svn.password' || key === 'asana.pat')
+        ? value.substring(0, 4) + '***'
+        : value;
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: `全域設定已更新：${key} = ${masked}`,
         }],
       };
     },

@@ -281,6 +281,110 @@ ${saFlowSection}
     },
   );
 
+  // ── list_asana_projects ────────────────────────────────────
+  server.tool(
+    'list_asana_projects',
+    '列出 Asana workspace 的所有專案。用於找到 project GID 來綁定本地專案。',
+    {},
+    async () => {
+      const db = getMcpDb();
+      const ASANA_API_BASE = 'https://app.asana.com/api/1.0';
+
+      try {
+        // Get Asana PAT
+        const patRow = db.prepare("SELECT value FROM global_config WHERE key = 'asana.pat'").get() as { value: string } | undefined;
+        const asanaPat = patRow?.value || process.env['ASANA_PAT'];
+        if (!asanaPat) {
+          return { content: [{ type: 'text' as const, text: 'Error: Asana PAT not configured. Use set_global_config to set asana.pat.' }], isError: true };
+        }
+
+        // Get current user's workspaces
+        const userRes = await fetch(`${ASANA_API_BASE}/users/me`, {
+          headers: { 'Authorization': `Bearer ${asanaPat}`, 'Accept': 'application/json' },
+        });
+        if (!userRes.ok) {
+          return { content: [{ type: 'text' as const, text: `Asana API error: ${userRes.status} ${await userRes.text()}` }], isError: true };
+        }
+        const userData = await userRes.json() as { data?: { workspaces?: Array<{ gid: string; name: string }> } };
+        const workspaces = userData.data?.workspaces || [];
+
+        if (workspaces.length === 0) {
+          return { content: [{ type: 'text' as const, text: 'No workspaces found for this Asana user.' }] };
+        }
+
+        // Fetch projects from all workspaces
+        const allProjects: Array<{ gid: string; name: string; workspace: string }> = [];
+        for (const ws of workspaces) {
+          const res = await fetch(`${ASANA_API_BASE}/projects?workspace=${ws.gid}&limit=100&opt_fields=name,archived`, {
+            headers: { 'Authorization': `Bearer ${asanaPat}`, 'Accept': 'application/json' },
+          });
+          if (!res.ok) continue;
+          const data = await res.json() as { data?: Array<{ gid: string; name: string; archived: boolean }> };
+          const projects = (data.data || []).filter(p => !p.archived);
+          allProjects.push(...projects.map(p => ({ gid: p.gid, name: p.name, workspace: ws.name })));
+        }
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ count: allProjects.length, projects: allProjects }, null, 2),
+          }],
+        };
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: 'text' as const, text: `Error fetching Asana projects: ${msg}` }], isError: true };
+      }
+    },
+  );
+
+  // ── get_asana_task_comments ───────────────────────────────
+  server.tool(
+    'get_asana_task_comments',
+    '取得 Asana 任務的評論/故事。用於查看需求討論串。',
+    {
+      taskGid: z.string().describe('Asana 任務 GID（source_ref 欄位）'),
+    },
+    async ({ taskGid }) => {
+      const db = getMcpDb();
+      const ASANA_API_BASE = 'https://app.asana.com/api/1.0';
+
+      try {
+        // Get Asana PAT
+        const patRow = db.prepare("SELECT value FROM global_config WHERE key = 'asana.pat'").get() as { value: string } | undefined;
+        const asanaPat = patRow?.value || process.env['ASANA_PAT'];
+        if (!asanaPat) {
+          return { content: [{ type: 'text' as const, text: 'Error: Asana PAT not configured. Use set_global_config to set asana.pat.' }], isError: true };
+        }
+
+        const res = await fetch(`${ASANA_API_BASE}/tasks/${taskGid}/stories?opt_fields=type,text,created_by.name,created_at`, {
+          headers: { 'Authorization': `Bearer ${asanaPat}`, 'Accept': 'application/json' },
+        });
+        if (!res.ok) {
+          return { content: [{ type: 'text' as const, text: `Asana API error: ${res.status} ${await res.text()}` }], isError: true };
+        }
+
+        const data = await res.json() as { data?: Array<{ type: string; text: string; created_by?: { name: string }; created_at: string }> };
+        const comments = (data.data || [])
+          .filter(s => s.type === 'comment')
+          .map(s => ({
+            author: s.created_by?.name || 'Unknown',
+            text: s.text,
+            createdAt: s.created_at,
+          }));
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ taskGid, count: comments.length, comments }, null, 2),
+          }],
+        };
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: 'text' as const, text: `Error fetching Asana comments: ${msg}` }], isError: true };
+      }
+    },
+  );
+
   // ── sync_asana_tasks ──────────────────────────────────────
   // Track last sync per project (in-memory, resets on MCP server restart)
   const lastSyncAt = new Map<string, string>();
