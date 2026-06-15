@@ -242,13 +242,13 @@ export function registerDocumentTools(server: McpServer): void {
       const db = getMcpDb();
 
       // 1. Get task info
-      const task = db.prepare('SELECT parent_name, label FROM tasks WHERE id = ?').get(taskId) as
-        { parent_name: string | null; label: string } | undefined;
+      const task = db.prepare('SELECT parent_name, title, label FROM tasks WHERE id = ?').get(taskId) as
+        { parent_name: string | null; title: string; label: string } | undefined;
       if (!task) {
         return { content: [{ type: 'text' as const, text: `Error: Task "${taskId}" not found` }], isError: true };
       }
-      if (!task.parent_name) {
-        return { content: [{ type: 'text' as const, text: `Error: Task "${taskId}" has no parent_name — cannot determine function code for SVN search` }], isError: true };
+      if (!task.parent_name && !task.title) {
+        return { content: [{ type: 'text' as const, text: `Error: Task "${taskId}" has no parent_name or title` }], isError: true };
       }
 
       // 2. Get project SVN config
@@ -279,10 +279,23 @@ export function registerDocumentTools(server: McpServer): void {
       };
 
       // 4. Extract function code and root code
-      const functionCode = extractFunctionCode(task.parent_name) || task.parent_name;
-      const rootCode = extractRootCode(functionCode);
+      // Try: parent_name → title → Chinese name fallback
+      const searchText = task.parent_name || task.title;
+      const functionCode = extractFunctionCode(searchText) || extractFunctionCode(task.title) || searchText;
+      let rootCode = extractRootCode(functionCode);
+
+      // If no alphabetic root code (e.g. parent_name is "收文單"), try to extract from title
+      if (!rootCode && task.title) {
+        const titleCode = extractFunctionCode(task.title);
+        if (titleCode) {
+          rootCode = extractRootCode(titleCode);
+        }
+      }
+
+      // If still no root code, use Chinese name to search all folders (no folder filtering)
+      const chineseFallback = !rootCode;
       if (!rootCode) {
-        return { content: [{ type: 'text' as const, text: `Error: Could not extract root code from parent_name "${task.parent_name}"` }], isError: true };
+        rootCode = '__ALL__'; // signal to skip folder matching, search all files
       }
 
       // 5. Determine SVN roots based on task label
@@ -305,22 +318,41 @@ export function registerDocumentTools(server: McpServer): void {
           ntlmMode = listResult.ntlmMode;
           const topItems = listResult.items;
 
-          const matchedFolder = findMatchingFolder(topItems, rootCode);
-
           let searchUrl: string;
           let allFiles: string[];
 
-          if (matchedFolder) {
-            searchUrl = `${svnRoot}/${matchedFolder.replace(/[^\x00-\x7F]/g, c => encodeURIComponent(c))}`;
-            const subResult = svnList(svnPath, searchUrl, credentials, true, ntlmMode);
+          if (chineseFallback) {
+            // No root code — search ALL subfolders recursively
+            const subResult = svnList(svnPath, svnRoot, credentials, true, ntlmMode);
             ntlmMode = subResult.ntlmMode;
             allFiles = subResult.items;
-          } else {
             searchUrl = svnRoot;
-            allFiles = topItems;
+          } else {
+            const matchedFolder = findMatchingFolder(topItems, rootCode);
+            if (matchedFolder) {
+              searchUrl = `${svnRoot}/${matchedFolder.replace(/[^\x00-\x7F]/g, c => encodeURIComponent(c))}`;
+              const subResult = svnList(svnPath, searchUrl, credentials, true, ntlmMode);
+              ntlmMode = subResult.ntlmMode;
+              allFiles = subResult.items;
+            } else {
+              searchUrl = svnRoot;
+              allFiles = topItems;
+            }
           }
 
-          const matchedFiles = findMatchingFiles(allFiles, functionCode);
+          // Extract Chinese names for fallback matching (e.g. "收文單" from "收文單_前端" or "DF01_收文單")
+          const chineseNames: string[] = [];
+          const searchText = task.parent_name || task.title;
+          // Remove code prefix and label suffix, keep Chinese part
+          const cnMatch = searchText.replace(/^[A-Za-z0-9]+[_\s]*/g, '').replace(/[_\s]*(前端|後端|串接)$/g, '');
+          if (cnMatch && /[一-鿿]/.test(cnMatch)) chineseNames.push(cnMatch);
+          // Also try title
+          if (task.title) {
+            const titleCn = task.title.replace(/^[A-Za-z0-9]+[_\s]*/g, '').replace(/[_\s]*(前端|後端|串接)$/g, '');
+            if (titleCn && /[一-鿿]/.test(titleCn) && !chineseNames.includes(titleCn)) chineseNames.push(titleCn);
+          }
+
+          const matchedFiles = findMatchingFiles(allFiles, functionCode, chineseNames);
 
           // Fallback: check 0_共用/ if nothing found
           if (matchedFiles.length === 0 && matchedFolder) {
@@ -748,8 +780,8 @@ function findMatchingFolder(folders: string[], rootCode: string): string | null 
   return containsMatch || null;
 }
 
-function findMatchingFiles(allFiles: string[], parentName: string): string[] {
-  const code = parentName.toUpperCase();
+function findMatchingFiles(allFiles: string[], functionCode: string, chineseNames?: string[]): string[] {
+  const code = functionCode.toUpperCase();
   const codePattern = new RegExp(`(?<![A-Z0-9])${escapeRegex(code)}(?![0-9])`, 'i');
   const matched: string[] = [];
   for (const file of allFiles) {
@@ -758,10 +790,17 @@ function findMatchingFiles(allFiles: string[], parentName: string): string[] {
     const parts = file.split('/');
     if (parts.some(p => p.toLowerCase() === 'old')) continue;
     const basename = path.basename(file);
+    // Match by code (e.g. DF01, WA03)
     if (codePattern.test(basename)) { matched.push(file); continue; }
     if (parts.length > 1) {
       const parentDir = parts[0]!;
       if (codePattern.test(parentDir)) { matched.push(file); continue; }
+    }
+    // Match by Chinese name (e.g. 收文單, 部門代碼)
+    if (chineseNames && chineseNames.length > 0) {
+      for (const cn of chineseNames) {
+        if (cn && basename.includes(cn)) { matched.push(file); break; }
+      }
     }
   }
   return matched;
