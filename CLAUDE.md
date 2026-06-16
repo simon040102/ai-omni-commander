@@ -300,8 +300,8 @@ Claude Code / Claude Desktop
 ### MCP Tools (14 total)
 | Tool | Purpose |
 |------|---------|
-| `get_task` | Fetch task details with project context |
-| `list_pending_tasks` | List pending/queued tasks |
+| `get_task` | Fetch task details (documents excluded by default; use `includeDocuments=true` to include) |
+| `list_pending_tasks` | List tasks with sourceRef. Filters: `taskType`, `label`, `keyword`, `statuses` |
 | `get_execution_plan` | Full execution prompt (superpowers + docs + strategy + completion criteria) |
 | `update_task_status` | Update task status (in_progress/completed/failed) |
 | `get_documents` | List documents for project/task |

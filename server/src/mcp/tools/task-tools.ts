@@ -54,9 +54,12 @@ export function registerTaskTools(server: McpServer): void {
   // ── get_task ──────────────────────────────────────────────
   server.tool(
     'get_task',
-    'Get detailed information about a specific task including its project context',
-    { taskId: z.string().describe('The task ID') },
-    async ({ taskId }) => {
+    'Get detailed information about a specific task including its project context. Documents are excluded by default to reduce payload — use includeDocuments=true or get_documents when needed.',
+    {
+      taskId: z.string().describe('The task ID'),
+      includeDocuments: z.boolean().optional().describe('Include associated documents (default: false). Use get_documents for document listing instead.'),
+    },
+    async ({ taskId, includeDocuments }) => {
       const db = getMcpDb();
       const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId) as TaskRow | undefined;
       if (!task) {
@@ -65,19 +68,7 @@ export function registerTaskTools(server: McpServer): void {
 
       const project = db.prepare('SELECT * FROM projects WHERE id = ?').get(task.project_id) as ProjectRow | undefined;
 
-      // Get bound documents
-      const docs = db.prepare(`
-        SELECT d.id, d.filename, d.file_path, d.file_type, d.doc_type, d.parsed_text
-        FROM task_documents td JOIN documents d ON d.id = td.document_id
-        WHERE td.task_id = ?
-      `).all(taskId) as DocumentRow[];
-
-      // Get project-level documents if no task-specific ones
-      const projectDocs = docs.length === 0
-        ? db.prepare('SELECT id, filename, file_path, file_type, doc_type, parsed_text FROM documents WHERE project_id = ?').all(task.project_id) as DocumentRow[]
-        : [];
-
-      const result = {
+      const result: Record<string, unknown> = {
         task: {
           id: task.id,
           projectId: task.project_id,
@@ -103,14 +94,27 @@ export function registerTaskTools(server: McpServer): void {
           frontendPath: project.frontend_path,
           backendPath: project.backend_path,
         } : null,
-        documents: (docs.length > 0 ? docs : projectDocs).map(d => ({
+      };
+
+      if (includeDocuments) {
+        const docs = db.prepare(`
+          SELECT d.id, d.filename, d.file_path, d.file_type, d.doc_type
+          FROM task_documents td JOIN documents d ON d.id = td.document_id
+          WHERE td.task_id = ?
+        `).all(taskId) as DocumentRow[];
+
+        const projectDocs = docs.length === 0
+          ? db.prepare('SELECT id, filename, file_path, file_type, doc_type FROM documents WHERE project_id = ?').all(task.project_id) as DocumentRow[]
+          : [];
+
+        result.documents = (docs.length > 0 ? docs : projectDocs).map(d => ({
           id: d.id,
           filename: d.filename,
           filePath: d.file_path,
           fileType: d.file_type,
           docType: d.doc_type,
-        })),
-      };
+        }));
+      }
 
       return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
     },
@@ -119,16 +123,43 @@ export function registerTaskTools(server: McpServer): void {
   // ── list_pending_tasks ────────────────────────────────────
   server.tool(
     'list_pending_tasks',
-    'List all tasks with pending/queued status for a project, ordered by priority',
-    { projectId: z.string().describe('The project ID') },
-    async ({ projectId }) => {
+    'List tasks for a project. Defaults to pending/queued/assigned. Supports filtering by taskType, label, keyword, and custom status list. Returns sourceRef (Asana GID) for direct use with get_asana_task_comments.',
+    {
+      projectId: z.string().describe('The project ID'),
+      taskType: z.string().optional().describe('Filter by task_type (bug/feature/refactor/other)'),
+      label: z.string().optional().describe('Filter by label (frontend/backend/fullstack)'),
+      keyword: z.string().optional().describe('Search keyword in title or description'),
+      statuses: z.array(z.string()).optional().describe('Override status filter (default: ["pending","queued","assigned"])'),
+    },
+    async ({ projectId, taskType, label, keyword, statuses }) => {
       const db = getMcpDb();
-      const tasks = db.prepare(`
-        SELECT id, title, description, label, status, priority, task_type, preferred_model, parent_name
+      const statusList = statuses && statuses.length > 0 ? statuses : ['pending', 'queued', 'assigned'];
+      const placeholders = statusList.map(() => '?').join(',');
+
+      let sql = `
+        SELECT id, title, description, label, status, priority, task_type, preferred_model, parent_name, source_ref
         FROM tasks
-        WHERE project_id = ? AND status IN ('pending', 'queued', 'assigned')
-        ORDER BY priority DESC, created_at ASC
-      `).all(projectId) as Array<Record<string, unknown>>;
+        WHERE project_id = ? AND status IN (${placeholders})
+      `;
+      const params: unknown[] = [projectId, ...statusList];
+
+      if (taskType) {
+        sql += ' AND task_type = ?';
+        params.push(taskType);
+      }
+      if (label) {
+        sql += ' AND label = ?';
+        params.push(label);
+      }
+      if (keyword) {
+        sql += ' AND (title LIKE ? OR description LIKE ?)';
+        const like = `%${keyword}%`;
+        params.push(like, like);
+      }
+
+      sql += ' ORDER BY priority DESC, created_at ASC';
+
+      const tasks = db.prepare(sql).all(...params) as Array<Record<string, unknown>>;
 
       return {
         content: [{
@@ -340,34 +371,48 @@ ${saFlowSection}
   // ── get_asana_task_comments ───────────────────────────────
   server.tool(
     'get_asana_task_comments',
-    '取得 Asana 任務的評論/故事。用於查看需求討論串。',
+    '取得 Asana 任務的評論/故事。可傳 taskId（omni UUID，自動查 sourceRef）或 taskGid（Asana GID）。回傳包含 authorGid 供精確比對。',
     {
-      taskGid: z.string().describe('Asana 任務 GID（source_ref 欄位）'),
+      taskId: z.string().optional().describe('Omni task UUID — 會自動從 DB 查 sourceRef (Asana GID)'),
+      taskGid: z.string().optional().describe('Asana 任務 GID（直接傳，跳過 DB 查詢）'),
     },
-    async ({ taskGid }) => {
+    async ({ taskId, taskGid }) => {
       const db = getMcpDb();
       const ASANA_API_BASE = 'https://app.asana.com/api/1.0';
 
+      // Resolve GID
+      let resolvedGid = taskGid;
+      if (!resolvedGid && taskId) {
+        const row = db.prepare('SELECT source_ref FROM tasks WHERE id = ?').get(taskId) as { source_ref: string | null } | undefined;
+        if (!row) return { content: [{ type: 'text' as const, text: `Error: Task "${taskId}" not found` }], isError: true };
+        if (!row.source_ref) return { content: [{ type: 'text' as const, text: `Error: Task "${taskId}" has no Asana sourceRef (not synced from Asana)` }], isError: true };
+        resolvedGid = row.source_ref;
+      }
+      if (!resolvedGid) {
+        return { content: [{ type: 'text' as const, text: 'Error: Must provide either taskId or taskGid' }], isError: true };
+      }
+
       try {
-        // Get Asana PAT
         const patRow = db.prepare("SELECT value FROM global_config WHERE key = 'asana.pat'").get() as { value: string } | undefined;
         const asanaPat = patRow?.value || process.env['ASANA_PAT'];
         if (!asanaPat) {
           return { content: [{ type: 'text' as const, text: 'Error: Asana PAT not configured. Use set_global_config to set asana.pat.' }], isError: true };
         }
 
-        const res = await fetch(`${ASANA_API_BASE}/tasks/${taskGid}/stories?opt_fields=type,text,created_by.name,created_at`, {
+        const res = await fetch(`${ASANA_API_BASE}/tasks/${resolvedGid}/stories?opt_fields=type,text,created_by.gid,created_by.name,created_by.email,created_at`, {
           headers: { 'Authorization': `Bearer ${asanaPat}`, 'Accept': 'application/json' },
         });
         if (!res.ok) {
           return { content: [{ type: 'text' as const, text: `Asana API error: ${res.status} ${await res.text()}` }], isError: true };
         }
 
-        const data = await res.json() as { data?: Array<{ type: string; text: string; created_by?: { name: string }; created_at: string }> };
+        const data = await res.json() as { data?: Array<{ type: string; text: string; created_by?: { gid: string; name: string; email?: string }; created_at: string }> };
         const comments = (data.data || [])
           .filter(s => s.type === 'comment')
           .map(s => ({
+            authorGid: s.created_by?.gid || null,
             author: s.created_by?.name || 'Unknown',
+            authorEmail: s.created_by?.email || null,
             text: s.text,
             createdAt: s.created_at,
           }));
@@ -375,7 +420,7 @@ ${saFlowSection}
         return {
           content: [{
             type: 'text' as const,
-            text: JSON.stringify({ taskGid, count: comments.length, comments }, null, 2),
+            text: JSON.stringify({ taskGid: resolvedGid, count: comments.length, comments }, null, 2),
           }],
         };
       } catch (err: unknown) {

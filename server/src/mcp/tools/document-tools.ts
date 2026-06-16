@@ -320,6 +320,7 @@ export function registerDocumentTools(server: McpServer): void {
 
           let searchUrl: string;
           let allFiles: string[];
+          let matchedFolder: string | null | undefined;
 
           if (chineseFallback) {
             // No root code — search ALL subfolders recursively
@@ -328,7 +329,7 @@ export function registerDocumentTools(server: McpServer): void {
             allFiles = subResult.items;
             searchUrl = svnRoot;
           } else {
-            const matchedFolder = findMatchingFolder(topItems, rootCode);
+            matchedFolder = findMatchingFolder(topItems, rootCode);
             if (matchedFolder) {
               searchUrl = `${svnRoot}/${matchedFolder.replace(/[^\x00-\x7F]/g, c => encodeURIComponent(c))}`;
               const subResult = svnList(svnPath, searchUrl, credentials, true, ntlmMode);
