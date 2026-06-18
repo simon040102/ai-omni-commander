@@ -633,11 +633,30 @@ async function main() {
   app.get('/api/execution-plan/:taskId', async (req, res) => {
     try {
       const { taskId } = req.params;
-      const result = await pipeline.buildExecutionPlan(taskId);
-      res.json({ prompt: result.prompt, workingDir: result.workingDir, model: result.model });
+      const role = req.query['role'] as string | undefined;
+      logger.info({ taskId, role }, 'Building execution plan');
+
+      let result: { prompt: string; workingDir: string; model: string };
+      if (role && (role === 'frontend' || role === 'backend')) {
+        result = await pipeline.preparePromptForRole(taskId, role);
+      } else {
+        result = await pipeline.buildExecutionPlan(taskId);
+      }
+
+      // Always include both paths for orchestrator
+      const task = getTask(taskId);
+      const project = task ? getProject(task.projectId) : null;
+
+      res.json({
+        prompt: result.prompt,
+        workingDir: result.workingDir,
+        model: result.model,
+        frontendPath: project?.frontendPath || null,
+        backendPath: project?.backendPath || null,
+      });
     } catch (err: any) {
-      logger.error({ err }, 'Failed to build execution plan');
-      res.status(404).json({ error: err.message || 'Failed to build execution plan' });
+      logger.error({ err, taskId: req.params['taskId'] }, 'Failed to build execution plan');
+      res.status(500).json({ error: err.message || 'Failed to build execution plan', stack: err.stack });
     }
   });
 

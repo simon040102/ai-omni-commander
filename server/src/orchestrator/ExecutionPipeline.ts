@@ -1,5 +1,6 @@
 import path from 'node:path';
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import type { AgentRole, SuperpowersFeature, TaskType, ProjectConfig, TestOptions } from '@omni/shared';
 import type { AgentManager } from '../agent/AgentManager.js';
 import { FullstackController } from './FullstackController.js';
@@ -277,10 +278,10 @@ export class ExecutionPipeline {
       const saDoc = this.findSaDocument(taskId, task.projectId, allSvnDocs);
       if (saDoc) {
         // Check cache only — don't call PTY
-        const saHash = require('node:crypto').createHash('sha256').update(saDoc.content).digest('hex').slice(0, 16);
+        const saHash = crypto.createHash('sha256').update(saDoc.content).digest('hex').slice(0, 16);
         const cachedPath = this.saFlowAnalyzer.getFlowPath(task.projectId, saHash);
-        if (require('node:fs').existsSync(cachedPath)) {
-          const cachedFlow = require('node:fs').readFileSync(cachedPath, 'utf-8');
+        if (fs.existsSync(cachedPath)) {
+          const cachedFlow = fs.readFileSync(cachedPath, 'utf-8');
           saFlowResult = { fullFlow: cachedFlow, relevantFlow: cachedFlow, flowPath: cachedPath };
         }
         // If not cached, saFlowResult stays null → assembleContext won't include it

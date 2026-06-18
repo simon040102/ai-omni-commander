@@ -173,29 +173,37 @@ export function registerTaskTools(server: McpServer): void {
   // ── get_execution_plan ────────────────────────────────────
   server.tool(
     'get_execution_plan',
-    'Get a complete execution plan for a task — includes superpowers methodology, documents, workspace paths, role instructions, completion criteria, and verification requirements. This is the main tool to call before starting task execution.',
-    { taskId: z.string().describe('The task ID to generate an execution plan for') },
-    async ({ taskId }) => {
+    'Get a complete execution plan for a task. Returns prompt, workspace paths (frontendPath + backendPath), and model. Use role param to get role-specific plan (frontend/backend). Orchestrator should ask user "前端、後端、還是都做？" before calling.',
+    {
+      taskId: z.string().describe('The task ID to generate an execution plan for'),
+      role: z.enum(['frontend', 'backend']).optional().describe('Override role for plan generation. Omit to use task label.'),
+    },
+    async ({ taskId, role }) => {
       const db = getMcpDb();
       const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId) as TaskRow | undefined;
       if (!task) {
         return { content: [{ type: 'text' as const, text: `Error: Task "${taskId}" not found` }], isError: true };
       }
 
-      // Call the Web Server's execution plan API (uses the full ExecutionPipeline.assembleContext)
       const notifyUrl = process.env['NOTIFY_URL'] || 'http://localhost:3457/api/mcp-notify';
       const baseUrl = notifyUrl.replace('/api/mcp-notify', '');
+      const roleParam = role ? `?role=${role}` : '';
 
       try {
-        const response = await fetch(`${baseUrl}/api/execution-plan/${taskId}`, {
+        const response = await fetch(`${baseUrl}/api/execution-plan/${taskId}${roleParam}`, {
           signal: AbortSignal.timeout(30000),
         });
 
         if (response.ok) {
-          const data = await response.json() as { prompt: string; workingDir: string; model: string };
+          const data = await response.json() as {
+            prompt: string; workingDir: string; model: string;
+            frontendPath: string | null; backendPath: string | null;
+          };
+
+          const effectiveRole = role || task.label;
 
           // Check if prompt contains SA documents (frontend tasks)
-          const hasSaDoc = task.label === 'frontend' && data.prompt.includes('[SA]');
+          const hasSaDoc = effectiveRole === 'frontend' && data.prompt.includes('[SA]');
           const saFlowSection = hasSaDoc ? `
 ## SA 操作流程圖產生
 
@@ -204,9 +212,11 @@ export function registerTaskTools(server: McpServer): void {
 這會讓 Web UI 的 SA Flow 面板可以顯示流程圖。
 ` : '';
 
-          // Prepend workspace and MCP progress instructions
           const header = `**Task ID:** ${task.id}
+**Role:** ${effectiveRole}
 **Workspace:** ${data.workingDir}
+**Frontend Path:** ${data.frontendPath || 'N/A'}
+**Backend Path:** ${data.backendPath || 'N/A'}
 **Model:** ${data.model}
 
 ## MCP 進度回報（必須執行）
@@ -229,10 +239,12 @@ ${saFlowSection}
           return { content: [{ type: 'text' as const, text: header + data.prompt }] };
         }
 
-        // Web Server not available — fall back to basic plan from DB
-        return { content: [{ type: 'text' as const, text: `Error: Web Server returned ${response.status}. Make sure the OmniCommander web server is running.` }], isError: true };
-      } catch {
-        return { content: [{ type: 'text' as const, text: `Error: Could not connect to Web Server at ${baseUrl}. Make sure it is running (pnpm dev).` }], isError: true };
+        let errorDetail = '';
+        try { errorDetail = await response.text(); } catch { /* ignore */ }
+        return { content: [{ type: 'text' as const, text: `Error: Web Server returned ${response.status}. ${errorDetail}` }], isError: true };
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: 'text' as const, text: `Error: Could not connect to Web Server at ${baseUrl}. ${msg}` }], isError: true };
       }
     },
   );

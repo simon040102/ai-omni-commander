@@ -9,11 +9,37 @@ import { getMcpDb } from '../db.js';
 
 interface DbConnection {
   label: string;
-  server: string;
-  database: string;
-  user: string;
-  password: string;
+  server?: string;
+  database?: string;
+  user?: string;
+  password?: string;
   port?: number;
+  connectionString?: string;
+  dbType?: string;
+}
+
+function parseConnectionString(connStr: string): { server: string; database: string; user: string; password: string; port?: number } {
+  const parts: Record<string, string> = {};
+  for (const part of connStr.split(';')) {
+    const eq = part.indexOf('=');
+    if (eq > 0) {
+      const key = part.substring(0, eq).trim().toLowerCase();
+      const val = part.substring(eq + 1).trim();
+      parts[key] = val;
+    }
+  }
+  const server = parts['server'] || parts['data source'] || '';
+  const database = parts['database'] || parts['initial catalog'] || '';
+  const user = parts['user id'] || parts['uid'] || parts['user'] || '';
+  const password = parts['password'] || parts['pwd'] || '';
+  const portMatch = server.match(/,(\d+)$/);
+  return {
+    server: portMatch ? server.replace(/,\d+$/, '') : server,
+    database,
+    user,
+    password,
+    port: portMatch ? parseInt(portMatch[1], 10) : undefined,
+  };
 }
 
 export function registerDbTools(server: McpServer): void {
@@ -85,15 +111,27 @@ export function registerDbTools(server: McpServer): void {
         }
       }
 
+      // Resolve connection params: prefer explicit fields, fall back to connectionString parsing
+      const parsed = conn.connectionString ? parseConnectionString(conn.connectionString) : null;
+      const connServer = conn.server || parsed?.server;
+      const connDatabase = conn.database || parsed?.database;
+      const connUser = conn.user || parsed?.user;
+      const connPassword = conn.password || parsed?.password;
+      const connPort = conn.port || parsed?.port;
+
+      if (!connServer) {
+        return { content: [{ type: 'text' as const, text: `Error: DB connection "${connectionLabel}" has no server configured. Check project DB settings.` }], isError: true };
+      }
+
       // Connect and execute
       let pool: mssql.ConnectionPool | null = null;
       try {
         pool = await mssql.connect({
-          server: conn.server,
-          database: conn.database,
-          user: conn.user,
-          password: conn.password,
-          port: conn.port || 1433,
+          server: connServer,
+          database: connDatabase || '',
+          user: connUser || '',
+          password: connPassword || '',
+          port: connPort || 1433,
           options: {
             encrypt: false,
             trustServerCertificate: true,
