@@ -436,4 +436,19 @@ export function runMigrations(db: Database.Database): void {
       db.exec('PRAGMA foreign_keys = ON');
     }
   }
+
+  // =============================================
+  // v6 Migration: Asana classification dimensions on tasks
+  // section / tags / custom_fields / assignee from Asana.
+  // Added at the end so the fullstack table-rebuild above cannot drop them.
+  // =============================================
+  {
+    const tcols = db.prepare("PRAGMA table_info(tasks)").all() as Array<{ name: string }>;
+    const names = tcols.map(c => c.name);
+    if (!names.includes('section')) db.exec("ALTER TABLE tasks ADD COLUMN section TEXT");
+    if (!names.includes('tags')) db.exec("ALTER TABLE tasks ADD COLUMN tags TEXT");           // JSON array of tag names
+    if (!names.includes('custom_fields')) db.exec("ALTER TABLE tasks ADD COLUMN custom_fields TEXT"); // JSON object name -> display_value
+    if (!names.includes('assignee')) db.exec("ALTER TABLE tasks ADD COLUMN assignee TEXT");
+    if (!names.includes('assignee_gid')) db.exec("ALTER TABLE tasks ADD COLUMN assignee_gid TEXT");
+  }
 }

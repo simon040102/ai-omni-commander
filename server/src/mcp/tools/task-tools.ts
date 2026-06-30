@@ -26,8 +26,19 @@ interface TaskRow {
   spec_url: string | null;
   preferred_model: string | null;
   parent_name: string | null;
+  section: string | null;
+  tags: string | null;
+  custom_fields: string | null;
+  assignee: string | null;
+  assignee_gid: string | null;
   created_at: string;
   updated_at: string;
+}
+
+/** Safely parse a JSON column; returns fallback on null/invalid. */
+function parseJson<T>(value: unknown, fallback: T): T {
+  if (typeof value !== 'string' || value === '') return fallback;
+  try { return JSON.parse(value) as T; } catch { return fallback; }
 }
 
 interface ProjectRow {
@@ -85,6 +96,11 @@ export function registerTaskTools(server: McpServer): void {
           specUrl: task.spec_url,
           preferredModel: task.preferred_model,
           parentName: task.parent_name,
+          section: task.section ?? null,
+          tags: parseJson<string[]>(task.tags, []),
+          customFields: parseJson<Record<string, string>>(task.custom_fields, {}),
+          assignee: task.assignee ?? null,
+          assigneeGid: task.assignee_gid ?? null,
           createdAt: task.created_at,
         },
         project: project ? {
@@ -123,21 +139,24 @@ export function registerTaskTools(server: McpServer): void {
   // ── list_pending_tasks ────────────────────────────────────
   server.tool(
     'list_pending_tasks',
-    'List tasks for a project. Defaults to pending/queued/assigned. Supports filtering by taskType, label, keyword, and custom status list. Returns sourceRef (Asana GID) for direct use with get_asana_task_comments.',
+    'List tasks for a project. Defaults to pending/queued/assigned. Supports filtering by taskType, label, keyword, section (exact Asana Section name, e.g. "UT"), tag (matches any one of the task\'s Asana tags), and custom status list. Returns sourceRef (Asana GID), plus section/tags/customFields dimensions.',
     {
       projectId: z.string().describe('The project ID'),
       taskType: z.string().optional().describe('Filter by task_type (bug/feature/refactor/other)'),
       label: z.string().optional().describe('Filter by label (frontend/backend/fullstack)'),
       keyword: z.string().optional().describe('Search keyword in title or description'),
+      section: z.string().optional().describe('Filter by Asana Section name (exact match, e.g. "UT")'),
+      tag: z.string().optional().describe('Filter by Asana tag (matches if the task has this tag, exact tag name)'),
       statuses: z.array(z.string()).optional().describe('Override status filter (default: ["pending","queued","assigned"])'),
     },
-    async ({ projectId, taskType, label, keyword, statuses }) => {
+    async ({ projectId, taskType, label, keyword, section, tag, statuses }) => {
       const db = getMcpDb();
       const statusList = statuses && statuses.length > 0 ? statuses : ['pending', 'queued', 'assigned'];
       const placeholders = statusList.map(() => '?').join(',');
 
       let sql = `
-        SELECT id, title, description, label, status, priority, task_type, preferred_model, parent_name, source_ref
+        SELECT id, title, description, label, status, priority, task_type, preferred_model, parent_name, source_ref,
+               section, tags, custom_fields, assignee, assignee_gid
         FROM tasks
         WHERE project_id = ? AND status IN (${placeholders})
       `;
@@ -156,10 +175,26 @@ export function registerTaskTools(server: McpServer): void {
         const like = `%${keyword}%`;
         params.push(like, like);
       }
+      if (section) {
+        sql += ' AND section = ?';
+        params.push(section);
+      }
+      if (tag) {
+        // tags stored as JSON array of names; match if any element equals the tag (exact)
+        sql += ' AND EXISTS (SELECT 1 FROM json_each(tasks.tags) WHERE json_each.value = ?)';
+        params.push(tag);
+      }
 
       sql += ' ORDER BY priority DESC, created_at ASC';
 
-      const tasks = db.prepare(sql).all(...params) as Array<Record<string, unknown>>;
+      const rows = db.prepare(sql).all(...params) as Array<Record<string, unknown>>;
+
+      // Parse JSON dimensions for output; back-compat: old tasks → [] / {} / null
+      const tasks = rows.map(r => ({
+        ...r,
+        tags: parseJson<string[]>(r['tags'], []),
+        custom_fields: parseJson<Record<string, string>>(r['custom_fields'], {}),
+      }));
 
       return {
         content: [{
@@ -487,8 +522,10 @@ ${saFlowSection}
         const userData = await userRes.json() as { data?: { gid?: string } };
         const userGid = userData.data?.gid;
 
-        // Fetch all project tasks with pagination
-        const optFields = 'name,notes,due_on,completed,permalink_url,tags.name,parent.gid,parent.name,parent.notes,assignee.gid';
+        // Fetch all project tasks with pagination.
+        // memberships.section.name → 分區(Section)；memberships.project.gid 用來挑出本專案對應的 membership
+        // tags.name → 標籤；custom_fields.* → 自訂欄位（用 display_value 落地最穩，enum 另取 enum_value.name 備援）
+        const optFields = 'name,notes,due_on,completed,permalink_url,memberships.section.name,memberships.project.gid,tags.name,assignee.name,assignee.gid,custom_fields.name,custom_fields.display_value,custom_fields.enum_value.name,parent.gid,parent.name,parent.notes';
         let allTasks: Array<Record<string, unknown>> = [];
         let nextUrl: string | null = `${ASANA_API_BASE}/tasks?project=${project.asana_project_gid}&limit=100&completed_since=now&opt_fields=${optFields}`;
 
@@ -506,12 +543,38 @@ ${saFlowSection}
         const myTasks = userGid ? allTasks.filter(t => (t['assignee'] as Record<string, unknown> | null)?.['gid'] === userGid) : allTasks;
 
         // Get existing Asana tasks in local DB
-        const existingTasks = db.prepare('SELECT id, title, description, label, status, source_ref, parent_name FROM tasks WHERE project_id = ? AND source = ?').all(projectId, 'asana') as Array<{
+        const existingTasks = db.prepare('SELECT id, title, description, label, status, source_ref, parent_name, section, tags, custom_fields FROM tasks WHERE project_id = ? AND source = ?').all(projectId, 'asana') as Array<{
           id: string; title: string; description: string | null; label: string; status: string; source_ref: string | null; parent_name: string | null;
+          section: string | null; tags: string | null; custom_fields: string | null;
         }>;
         const existingByGid = new Map(existingTasks.filter(t => t.source_ref).map(t => [t.source_ref!, t]));
 
         let newCount = 0, updatedCount = 0;
+
+        // --- Asana 分類維度抽取 ---
+        // Section：一張 task 在不同 project 會有多筆 membership，挑出本專案 (asana_project_gid) 對應的那筆
+        const extractSection = (task: Record<string, unknown>): string | null => {
+          const memberships = task['memberships'] as Array<{ project?: { gid?: string }; section?: { name?: string } }> | undefined;
+          if (!memberships || memberships.length === 0) return null;
+          const match = memberships.find(m => m.project?.gid === project.asana_project_gid) || memberships[0];
+          return match?.section?.name || null;
+        };
+        // Tags：字串陣列
+        const extractTags = (task: Record<string, unknown>): string[] => {
+          const tags = task['tags'] as Array<{ name?: string }> | undefined;
+          return (tags || []).map(t => t.name).filter((n): n is string => !!n);
+        };
+        // 自訂欄位：name -> display_value（enum/text/number 都能拿到字串；display_value 缺則退回 enum_value.name）
+        const extractCustomFields = (task: Record<string, unknown>): Record<string, string> => {
+          const cfs = task['custom_fields'] as Array<{ name?: string; display_value?: string | null; enum_value?: { name?: string } | null }> | undefined;
+          const obj: Record<string, string> = {};
+          for (const cf of cfs || []) {
+            if (!cf.name) continue;
+            const v = cf.display_value ?? cf.enum_value?.name ?? null;
+            if (v !== null && v !== undefined && String(v) !== '') obj[cf.name] = String(v);
+          }
+          return obj;
+        };
 
         // Label detection (regex-based)
         const detectLabel = (title: string): string => {
@@ -538,6 +601,14 @@ ${saFlowSection}
           const parentRaw = asanaTask['parent'] as { name?: string } | null | undefined;
           const parentName = parentRaw?.name || null;
 
+          // Asana 分類維度
+          const section = extractSection(asanaTask);
+          const tagsJson = JSON.stringify(extractTags(asanaTask));
+          const customFieldsJson = JSON.stringify(extractCustomFields(asanaTask));
+          const assigneeRaw = asanaTask['assignee'] as { name?: string; gid?: string } | null | undefined;
+          const assigneeName = assigneeRaw?.name || null;
+          const assigneeGid = assigneeRaw?.gid || null;
+
           const existing = existingByGid.get(gid);
 
           if (existing) {
@@ -546,17 +617,20 @@ ${saFlowSection}
             const parentChanged = (existing.parent_name || '') !== (parentName || '');
             const newLabel = detectLabel(name);
             const labelChanged = newLabel !== existing.label;
+            const sectionChanged = (existing.section || null) !== (section || null);
+            const tagsChanged = (existing.tags || '[]') !== tagsJson;
+            const cfChanged = (existing.custom_fields || '{}') !== customFieldsJson;
 
-            if (titleChanged || descChanged || parentChanged || labelChanged) {
-              db.prepare("UPDATE tasks SET title = ?, description = ?, parent_name = ?, label = ?, updated_at = datetime('now') WHERE id = ?")
-                .run(name, description || null, parentName, newLabel, existing.id);
+            if (titleChanged || descChanged || parentChanged || labelChanged || sectionChanged || tagsChanged || cfChanged) {
+              db.prepare("UPDATE tasks SET title = ?, description = ?, parent_name = ?, label = ?, section = ?, tags = ?, custom_fields = ?, assignee = ?, assignee_gid = ?, updated_at = datetime('now') WHERE id = ?")
+                .run(name, description || null, parentName, newLabel, section, tagsJson, customFieldsJson, assigneeName, assigneeGid, existing.id);
               updatedCount++;
             }
           } else {
             const taskId = crypto.randomUUID();
-            db.prepare(`INSERT INTO tasks (id, project_id, title, description, label, status, priority, task_type, source, source_ref, parent_name, created_at, updated_at)
-              VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, 'asana', ?, ?, datetime('now'), datetime('now'))`)
-              .run(taskId, projectId, name, description || null, detectLabel(name), detectTaskType(name, notes), gid, parentName);
+            db.prepare(`INSERT INTO tasks (id, project_id, title, description, label, status, priority, task_type, source, source_ref, parent_name, section, tags, custom_fields, assignee, assignee_gid, created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, 'asana', ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`)
+              .run(taskId, projectId, name, description || null, detectLabel(name), detectTaskType(name, notes), gid, parentName, section, tagsJson, customFieldsJson, assigneeName, assigneeGid);
             newCount++;
           }
         }
