@@ -287,7 +287,8 @@ export class AsanaMcpClient {
 
       const completedSince = options?.includeCompleted ? '' : '&completed_since=now';
       const limit = options?.limit || 100;
-      const optFields = 'name,notes,due_on,completed,permalink_url,projects.name,projects.gid,tags.name,parent.gid,parent.name,parent.notes,assignee.gid';
+      // section 在 memberships[].section.name（配 memberships.project.gid 挑出本專案）；custom_fields 用 display_value 落地
+      const optFields = 'name,notes,due_on,completed,permalink_url,projects.name,projects.gid,tags.name,parent.gid,parent.name,parent.notes,assignee.gid,assignee.name,memberships.section.name,memberships.project.gid,custom_fields.name,custom_fields.display_value';
 
       // Fetch all project tasks with pagination (to avoid missing tasks beyond first page)
       let allTasks: Record<string, unknown>[] = [];
@@ -314,7 +315,7 @@ export class AsanaMcpClient {
       const filtered = userGid
         ? allTasks.filter(t => (t['assignee'] as Record<string, unknown> | null)?.['gid'] === userGid)
         : allTasks;
-      const tasks = filtered.map(task => this.mapToAsanaTask(task));
+      const tasks = filtered.map(task => this.mapToAsanaTask(task, projectGid));
 
       logger.info({ projectGid, count: tasks.length }, 'Fetched my tasks for Asana project');
       this._connected = true;
@@ -364,8 +365,11 @@ export class AsanaMcpClient {
     }
   }
 
-  /** Map raw Asana API response to AsanaTask interface */
-  private mapToAsanaTask(raw: Record<string, unknown>): AsanaTask {
+  /**
+   * Map raw Asana API response to AsanaTask interface.
+   * @param boundProjectGid the project we're syncing — used to pick the right Section from memberships[]
+   */
+  private mapToAsanaTask(raw: Record<string, unknown>, boundProjectGid?: string): AsanaTask {
     // Extract project info
     let projectName = 'No Project';
     let projectGid = '';
@@ -378,6 +382,30 @@ export class AsanaMcpClient {
 
     // Extract tags
     const tags = (raw['tags'] as Array<{ name: string }> | undefined)?.map(t => t.name) || [];
+
+    // Extract assignee
+    const assigneeRaw = raw['assignee'] as { gid?: string; name?: string } | null | undefined;
+    const assignee = assigneeRaw?.gid
+      ? { gid: String(assigneeRaw.gid), name: String(assigneeRaw.name || '') }
+      : null;
+
+    // Extract Section from memberships — a task can belong to multiple projects,
+    // so pick the membership whose project matches the project we're syncing.
+    const memberships = raw['memberships'] as Array<{ project?: { gid?: string }; section?: { name?: string } }> | undefined;
+    let section: string | null = null;
+    if (memberships && memberships.length > 0) {
+      const match = (boundProjectGid && memberships.find(m => m.project?.gid === boundProjectGid)) || memberships[0];
+      section = match?.section?.name || null;
+    }
+
+    // Extract custom fields → { name: display_value }
+    const customFields: Record<string, string> = {};
+    const cfs = raw['custom_fields'] as Array<{ name?: string; display_value?: string | null }> | undefined;
+    for (const cf of cfs || []) {
+      if (cf.name && cf.display_value !== null && cf.display_value !== undefined && String(cf.display_value) !== '') {
+        customFields[cf.name] = String(cf.display_value);
+      }
+    }
 
     // Extract parent task info
     const parentRaw = raw['parent'] as { gid?: string; name?: string; notes?: string } | null | undefined;
@@ -397,6 +425,9 @@ export class AsanaMcpClient {
       completed: Boolean(raw['completed']),
       permalink_url: String(raw['permalink_url'] || ''),
       tags,
+      section,
+      assignee,
+      customFields,
       parent,
     };
   }

@@ -24,6 +24,12 @@ export interface AsanaTask {
   permalink_url: string;
   /** Tag names attached to this task */
   tags: string[];
+  /** Section name within the bound project (from memberships[].section.name) */
+  section?: string | null;
+  /** Assignee (gid + display name), or null if unassigned */
+  assignee?: { gid: string; name: string } | null;
+  /** Custom fields as name → display_value */
+  customFields?: Record<string, string>;
   /** Parent task (if this is a subtask) */
   parent?: {
     gid: string;

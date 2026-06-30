@@ -134,16 +134,28 @@ export class AsanaSyncService {
 
       const existing = existingByGid.get(asanaTask.gid);
 
+      // Asana 分類維度（新欄位）
+      const newSection = asanaTask.section ?? null;
+      const newTags = asanaTask.tags ?? [];
+      const newCustomFields = asanaTask.customFields ?? {};
+      const newAssignee = asanaTask.assignee?.name ?? null;
+      const newAssigneeGid = asanaTask.assignee?.gid ?? null;
+
       if (existing) {
         // Update if title or description changed
         const titleChanged = existing.title !== asanaTask.name;
         const descChanged = (existing.description || '') !== description;
         const parentChanged = (existing.parentName || '') !== (asanaTask.parent?.name || '');
+        // 分類維度變更偵測（否則既有單不會觸發 update）
+        const sectionChanged = (existing.section ?? null) !== newSection;
+        const tagsChanged = JSON.stringify(existing.tags ?? []) !== JSON.stringify(newTags);
+        const cfChanged = JSON.stringify(existing.customFields ?? {}) !== JSON.stringify(newCustomFields);
+        const assigneeChanged = (existing.assignee ?? null) !== newAssignee || (existing.assigneeGid ?? null) !== newAssigneeGid;
 
         // Always apply explicit Chinese role markers (前端/後端) regardless of whether title changed
           const forcedLabel = this.classifier.detectLabelFromTitle(asanaTask.name);
 
-      if (titleChanged || descChanged || parentChanged || (forcedLabel && forcedLabel !== existing.label)) {
+      if (titleChanged || descChanged || parentChanged || (forcedLabel && forcedLabel !== existing.label) || sectionChanged || tagsChanged || cfChanged || assigneeChanged) {
           // Re-classify label if title changed (catches keyword changes like 前端/後端)
           let newLabel = forcedLabel ?? existing.label;
           if (titleChanged && !forcedLabel) {
@@ -162,6 +174,11 @@ export class AsanaSyncService {
             description: description || null,
             parentName: asanaTask.parent?.name || null,
             label: newLabel,
+            section: newSection,
+            tags: newTags,
+            customFields: newCustomFields,
+            assignee: newAssignee,
+            assigneeGid: newAssigneeGid,
           });
           updatedTasks++;
           logger.info({ taskId: existing.id, asanaGid: asanaTask.gid }, 'Updated Asana task');
@@ -194,6 +211,11 @@ export class AsanaSyncService {
           source: 'asana',
           sourceRef: asanaTask.gid,
           parentName: asanaTask.parent?.name || undefined,
+          section: newSection,
+          tags: newTags,
+          customFields: newCustomFields,
+          assignee: newAssignee,
+          assigneeGid: newAssigneeGid,
         });
 
         newTasks++;

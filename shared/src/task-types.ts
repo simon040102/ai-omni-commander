@@ -30,6 +30,16 @@ export interface Task {
   specUrl: string | null;
   preferredModel: string | null;
   parentName: string | null;
+  /** Asana Section name (null if not from Asana / no section) */
+  section: string | null;
+  /** Asana tag names */
+  tags: string[];
+  /** Asana custom fields: name → display_value */
+  customFields: Record<string, string>;
+  /** Asana assignee display name */
+  assignee: string | null;
+  /** Asana assignee GID */
+  assigneeGid: string | null;
   createdAt: string;
   updatedAt: string;
 }

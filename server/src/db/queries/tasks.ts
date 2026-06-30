@@ -15,16 +15,25 @@ export function createTask(data: {
   specUrl?: string;
   preferredModel?: string;
   parentName?: string;
+  section?: string | null;
+  tags?: string[];
+  customFields?: Record<string, string>;
+  assignee?: string | null;
+  assigneeGid?: string | null;
 }): Task {
   const db = getDb();
   const id = genId();
   db.prepare(`
-    INSERT INTO tasks (id, project_id, title, description, label, prompt, priority, task_type, source, source_ref, spec_url, preferred_model, parent_name)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO tasks (id, project_id, title, description, label, prompt, priority, task_type, source, source_ref, spec_url, preferred_model, parent_name, section, tags, custom_fields, assignee, assignee_gid)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(id, data.projectId, data.title, data.description || null,
     data.label, data.prompt || null, data.priority || 0,
     data.taskType || 'other', data.source || 'manual', data.sourceRef || null,
-    data.specUrl || null, data.preferredModel || null, data.parentName || null);
+    data.specUrl || null, data.preferredModel || null, data.parentName || null,
+    data.section ?? null,
+    data.tags !== undefined ? JSON.stringify(data.tags) : null,
+    data.customFields !== undefined ? JSON.stringify(data.customFields) : null,
+    data.assignee ?? null, data.assigneeGid ?? null);
   return getTask(id)!;
 }
 
@@ -121,6 +130,11 @@ export function updateTaskFields(id: string, data: Partial<{
   status: TaskStatus;
   preferredModel: string | null;
   parentName: string | null;
+  section: string | null;
+  tags: string[];
+  customFields: Record<string, string>;
+  assignee: string | null;
+  assigneeGid: string | null;
 }>): void {
   const db = getDb();
   const sets: string[] = [];
@@ -134,6 +148,11 @@ export function updateTaskFields(id: string, data: Partial<{
   if (data.status !== undefined) { sets.push('status = ?'); values.push(data.status); }
   if (data.preferredModel !== undefined) { sets.push('preferred_model = ?'); values.push(data.preferredModel); }
   if (data.parentName !== undefined) { sets.push('parent_name = ?'); values.push(data.parentName); }
+  if (data.section !== undefined) { sets.push('section = ?'); values.push(data.section); }
+  if (data.tags !== undefined) { sets.push('tags = ?'); values.push(JSON.stringify(data.tags)); }
+  if (data.customFields !== undefined) { sets.push('custom_fields = ?'); values.push(JSON.stringify(data.customFields)); }
+  if (data.assignee !== undefined) { sets.push('assignee = ?'); values.push(data.assignee); }
+  if (data.assigneeGid !== undefined) { sets.push('assignee_gid = ?'); values.push(data.assigneeGid); }
 
   if (sets.length === 0) return;
   sets.push("updated_at = datetime('now')");
@@ -188,7 +207,18 @@ function mapTask(row: Record<string, unknown>): Task {
     specUrl: (row['spec_url'] as string | null) ?? null,
     preferredModel: (row['preferred_model'] as string | null) ?? null,
     parentName: (row['parent_name'] as string | null) ?? null,
+    section: (row['section'] as string | null) ?? null,
+    tags: parseJsonColumn<string[]>(row['tags'], []),
+    customFields: parseJsonColumn<Record<string, string>>(row['custom_fields'], {}),
+    assignee: (row['assignee'] as string | null) ?? null,
+    assigneeGid: (row['assignee_gid'] as string | null) ?? null,
     createdAt: row['created_at'] as string,
     updatedAt: row['updated_at'] as string,
   };
+}
+
+/** Parse a JSON-string column; returns fallback on null/invalid (back-compat for pre-migration rows). */
+function parseJsonColumn<T>(value: unknown, fallback: T): T {
+  if (typeof value !== 'string' || value === '') return fallback;
+  try { return JSON.parse(value) as T; } catch { return fallback; }
 }
