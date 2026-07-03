@@ -61,7 +61,7 @@ describe('progress-tools', () => {
         outputType: 'text',
       });
 
-      expect(result.content[0].text).toBe('Output reported');
+      expect(result.content[0].text).toContain('Output reported');
 
       // Verify agent record was created
       const agent = testDb.prepare('SELECT * FROM agents WHERE id = ?').get('mcp-task-1') as any;

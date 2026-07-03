@@ -128,6 +128,8 @@ describe('task-tools', () => {
       seedProject(testDb);
       seedTask(testDb);
 
+      // pending → completed is not a valid transition; go through in_progress first
+      await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'in_progress' });
       await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed', summary: 'All done' });
 
       const row = testDb.prepare('SELECT status, result_summary FROM tasks WHERE id = ?').get('task-1') as { status: string; result_summary: string };

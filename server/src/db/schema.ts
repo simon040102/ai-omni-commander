@@ -451,4 +451,17 @@ export function runMigrations(db: Database.Database): void {
     if (!names.includes('assignee')) db.exec("ALTER TABLE tasks ADD COLUMN assignee TEXT");
     if (!names.includes('assignee_gid')) db.exec("ALTER TABLE tasks ADD COLUMN assignee_gid TEXT");
   }
+
+  // =============================================
+  // v7 Migration: Flow-Gated Development state on tasks
+  // flow_required — set by get_execution_plan; flow_state — FlowGateState JSON.
+  // MUST stay after the fullstack table-rebuild above (its INSERT SELECT has a
+  // hard-coded column list and would silently drop these columns).
+  // =============================================
+  {
+    const tcols = db.prepare("PRAGMA table_info(tasks)").all() as Array<{ name: string }>;
+    const names = tcols.map(c => c.name);
+    if (!names.includes('flow_required')) db.exec("ALTER TABLE tasks ADD COLUMN flow_required INTEGER DEFAULT 0");
+    if (!names.includes('flow_state')) db.exec("ALTER TABLE tasks ADD COLUMN flow_state TEXT"); // JSON FlowGateState
+  }
 }

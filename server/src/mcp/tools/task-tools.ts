@@ -6,6 +6,11 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { getMcpDb } from '../db.js';
 import { notifyWebServer } from '../notify.js';
+import {
+  GATE_B_MAX_FAILURES, FLOW_NODE_LEVEL_SPEC,
+  resolveRole, mutateFlowState, getFlowState, getRoleState,
+  detectSpecDocuments, getCompletionBlockers, logTaskOutput,
+} from '../flow-gate.js';
 import type { TaskStatus, TaskLabel, TaskType, TaskSource } from '@omni/shared';
 
 interface TaskRow {
@@ -237,15 +242,37 @@ export function registerTaskTools(server: McpServer): void {
 
           const effectiveRole = role || task.label;
 
-          // Check if prompt contains SA documents (frontend tasks)
-          const hasSaDoc = effectiveRole === 'frontend' && data.prompt.includes('[SA]');
-          const saFlowSection = hasSaDoc ? `
-## SA 操作流程圖產生
+          // ── Flow-Gated Development: initialize state machine ──
+          // flow_required is set only AFTER the plan is successfully fetched (review M6).
+          // flow_state is merged, never overwritten (review C2): existing flows/gates/
+          // failure counters survive repeated get_execution_plan calls.
+          const flowRole = resolveRole(role || (task.label === 'frontend' || task.label === 'backend' ? task.label : undefined));
+          const specExpected = detectSpecDocuments(db, task.id, task.project_id);
+          db.prepare("UPDATE tasks SET flow_required = 1, updated_at = datetime('now') WHERE id = ?").run(task.id);
+          const flowState = mutateFlowState(db, task.id, (s) => {
+            // upgrade-only: adding docs later upgrades to three-flow mode; never downgrade (review I-1)
+            s.specExpected = s.specExpected || specExpected;
+            getRoleState(s, flowRole).required = true;
+          });
 
-本任務有 SA 規格文件。讀完 SA 文件後，請產生前端操作流程的 Mermaid flowchart（flowchart TD 格式），涵蓋所有主要操作路徑（查詢、新增、編輯、刪除等）和條件分支。
-產生後呼叫 \`save_sa_flow\`，傳入 projectId 為 \`${task.project_id}\`、taskId 為 \`${task.id}\`、filename 為 SA 文件檔名、mermaidContent 為流程圖內容。
-這會讓 Web UI 的 SA Flow 面板可以顯示流程圖。
-` : '';
+          const rolePart = role ? `, role="${role}"` : '';
+          const flowGateSection = `
+## Flow-Gated Development（強制工作流 — 依序執行，不可跳步）
+
+本任務已啟用流程圖閘門。**閘門 B 未通過前，update_task_status(completed) 會被拒絕。**
+
+${FLOW_NODE_LEVEL_SPEC}
+
+**步驟：**
+1. **檢查既有圖**：呼叫 get_task_flows(taskId="${task.id}"${rolePart}) 看已有哪些圖（雙角色任務 spec-flow 共用，已存在就沿用不重畫）
+${flowState.specExpected ? `2. **spec-flow**：完整讀取 SA/SD 規格文件後，畫出**規格要求的業務流程圖**，呼叫 save_task_flow(taskId="${task.id}", flowType="spec", mermaidContent=..., filename=規格檔名)` : `2. 此任務無 SA/SD 規格文件 → **兩圖模式**（跳過 spec-flow，閘門改為與任務描述自洽比對）`}
+3. **plan-flow**：畫出「我打算怎麼實作」的業務步驟流程圖，save_task_flow(taskId="${task.id}", flowType="plan"${rolePart})
+4. **閘門 A**：依工具回應的指示做涵蓋比對，report_flow_check(taskId="${task.id}", gate="A", passed=..., diffs=...${rolePart})。**通過前不可寫 code**
+5. **實作**：嚴格照 plan-flow 進行（複雜任務建議先產 mindmap 細節覆蓋清單：save_task_flow flowType="mindmap"）
+6. **code-flow**：實作完成後，從**實際程式碼**反推業務流程圖，save_task_flow(taskId="${task.id}", flowType="code"${rolePart})
+7. **閘門 B**：依工具回應的比對準則做語意比對（建議由主 session 執行，不要由寫 code 的 subagent 自評），report_flow_check(gate="B", ...)。不符 → 修正後重存 code-flow（失敗上限 ${GATE_B_MAX_FAILURES} 次，達上限標 [NEEDS_HUMAN] 回報使用者）
+8. **閘門 B 通過後才跑測試**；測試通過才 update_task_status(taskId="${task.id}", status="completed")
+`;
 
           const header = `**Task ID:** ${task.id}
 **Role:** ${effectiveRole}
@@ -267,7 +294,7 @@ export function registerTaskTools(server: McpServer): void {
 **⚠ 重要：任務結束前必須呼叫 update_task_status，否則任務會一直卡在 in_progress 狀態。不論成功或失敗，都必須回報。**
 
 這些呼叫會讓 Web UI 即時顯示你的 agent 狀態和輸出。
-${saFlowSection}
+${flowGateSection}
 ---
 
 `;
@@ -287,16 +314,18 @@ ${saFlowSection}
   // ── update_task_status ────────────────────────────────────
   server.tool(
     'update_task_status',
-    'Update the status of a task. Use this to mark tasks as in_progress, completed, or failed.',
+    'Update the status of a task. Use this to mark tasks as in_progress, completed, or failed. For flow-gated tasks, "completed" is rejected until gate B has passed for every required role — skipFlowGate=true (with skipReason, only with explicit user approval) overrides.',
     {
       taskId: z.string().describe('The task ID'),
       status: z.enum(['in_progress', 'completed', 'failed']).describe('New task status'),
       summary: z.string().optional().describe('Optional result summary (recommended for completed/failed)'),
+      skipFlowGate: z.boolean().optional().describe('Skip the flow-gate completion check. ONLY with explicit user approval; requires skipReason and is logged as [SKIP].'),
+      skipReason: z.string().optional().describe('Reason for skipping the flow gate (required when skipFlowGate=true)'),
     },
-    async ({ taskId, status, summary }) => {
+    async ({ taskId, status, summary, skipFlowGate, skipReason }) => {
       const db = getMcpDb();
 
-      const task = db.prepare('SELECT id, project_id, status FROM tasks WHERE id = ?').get(taskId) as { id: string; project_id: string; status: string } | undefined;
+      const task = db.prepare('SELECT id, project_id, status, flow_required FROM tasks WHERE id = ?').get(taskId) as { id: string; project_id: string; status: string; flow_required: number | null } | undefined;
       if (!task) {
         return { content: [{ type: 'text' as const, text: `Error: Task "${taskId}" not found` }], isError: true };
       }
@@ -314,6 +343,37 @@ ${saFlowSection}
           content: [{ type: 'text' as const, text: `Error: Invalid state transition "${task.status}" → "${status}". Allowed transitions from "${task.status}": ${allowed ? allowed.join(', ') : 'none (terminal state)'}` }],
           isError: true,
         };
+      }
+
+      // ── Flow-Gated Development: exit gate ──
+      // Only 'completed' on flow_required tasks is gated; in_progress/failed pass through.
+      if (status === 'completed' && task.flow_required === 1) {
+        const flowState = getFlowState(db, taskId);
+        const blockers = getCompletionBlockers(flowState);
+        if (blockers.length > 0) {
+          if (skipFlowGate) {
+            if (!skipReason || !skipReason.trim()) {
+              return { content: [{ type: 'text' as const, text: 'Error: skipFlowGate=true 需要 skipReason（使用者同意跳過閘門的原因）。' }], isError: true };
+            }
+            mutateFlowState(db, taskId, (s) => {
+              s.skipped = { reason: skipReason.trim(), at: new Date().toISOString() };
+            });
+            logTaskOutput(db, taskId, task.project_id, `[SKIP] 使用者跳過 Flow-Gated 閘門檢查：${skipReason.trim()}`);
+          } else {
+            const lines = blockers.map(b => `- role=${b.role}: ${b.missing}`).join('\n');
+            return {
+              content: [{
+                type: 'text' as const,
+                text: `Error: 任務尚未通過 Flow-Gated 閘門，不可標記 completed。缺少的步驟：
+${lines}
+
+請依序補完（save_task_flow → report_flow_check），閘門 B 通過並跑完測試後再結案。
+若使用者明確同意跳過閘門，改用 skipFlowGate=true + skipReason 重新呼叫。`,
+              }],
+              isError: true,
+            };
+          }
+        }
       }
 
       const sets = [`status = ?`, `updated_at = datetime('now')`];
