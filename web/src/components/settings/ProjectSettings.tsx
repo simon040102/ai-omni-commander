@@ -141,10 +141,12 @@ export function ProjectSettings() {
     const command = `請透過 OmniCommander MCP 為 ${workspaceType} workspace 產生 Skills。
 
 步驟：
-1. 呼叫 get_skill_gen_plan("${project.id}", "${workspaceType}") 取得完整的分析 prompt
-2. 使用 Agent tool 派出一個 subagent，將分析 prompt 作為任務傳入，工作目錄設為 \`${p.trim()}\`
-3. Subagent 會深度分析 codebase，產生 CLAUDE.md 和 .claude/skills/ 文件
-4. 過程中用 report_output 回報進度到 Web UI`;
+1. 呼叫 create_task(projectId="${project.id}", title="Skill 產生：${workspaceType} workspace", label="${workspaceType}", taskType="other") 取得 taskId
+2. 呼叫 update_task_status(taskId, "in_progress")
+3. 呼叫 get_skill_gen_plan("${project.id}", "${workspaceType}") 取得完整的分析 prompt
+4. 使用 Agent tool 派出一個 subagent，將分析 prompt 作為任務傳入，工作目錄設為 \`${p.trim()}\`，並在 prompt 開頭附上步驟 1 的 taskId，讓 subagent 用 report_output / report_milestone 回報進度到 Web UI
+5. Subagent 會深度分析 codebase，產生 CLAUDE.md 和 .claude/skills/（每個 skill 一個資料夾 + SKILL.md）
+6. 完成後呼叫 update_task_status(taskId, "completed", summary="產出檔案清單")；失敗則標 "failed"`;
     setSkillGenMcpCommand(command);
   }, [project, frontendPath, backendPath]);
 

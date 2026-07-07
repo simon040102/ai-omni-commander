@@ -38,14 +38,25 @@ export function registerWorkspaceTools(server: McpServer): void {
         ? (project.frontend_path || project.working_dir)
         : (project.backend_path || project.working_dir);
 
-      // Detect mode
+      // Detect mode — recognize both official folder skills (<skill-name>/SKILL.md)
+      // and legacy flat .md skill files
       const hasClaudeMd = fs.existsSync(path.join(workspacePath, 'CLAUDE.md'));
       const skillsDir = path.join(workspacePath, '.claude', 'skills');
       const hasSkillsDir = fs.existsSync(skillsDir);
-      const hasSkills = hasSkillsDir && fs.readdirSync(skillsDir).some(f => f.endsWith('.md'));
+      const hasSkills = hasSkillsDir && fs.readdirSync(skillsDir, { withFileTypes: true }).some(entry =>
+        (entry.isFile() && entry.name.endsWith('.md')) ||
+        (entry.isDirectory() && fs.existsSync(path.join(skillsDir, entry.name, 'SKILL.md')))
+      );
       const mode: 'create' | 'enhance' = (hasClaudeMd || hasSkills) ? 'enhance' : 'create';
 
-      const prompt = buildSkillGenPrompt(workspaceType, mode, hasClaudeMd, hasSkills);
+      // Active project experience notes (前人踩坑教訓) — must be woven into the generated docs
+      const notes = db.prepare(`
+        SELECT category, content FROM project_notes
+        WHERE project_id = ? AND active = 1
+        ORDER BY created_at ASC
+      `).all(projectId) as Array<{ category: string | null; content: string }>;
+
+      const prompt = buildSkillGenPrompt(workspaceType, mode, hasClaudeMd, hasSkills, notes);
 
       const plan = `**Skill Generation Plan**
 **Project:** ${project.name}
@@ -53,9 +64,11 @@ export function registerWorkspaceTools(server: McpServer): void {
 **Type:** ${workspaceType}
 **Mode:** ${mode} (${mode === 'create' ? '從零建立' : '增強現有內容'})
 
-> 請使用 Agent tool 派出一個 subagent，將以下 prompt 作為任務傳入。
-> Subagent 的工作目錄設為 \`${workspacePath}\`。
-> 執行過程中用 report_output 和 report_milestone 回報進度到 Web UI。
+> **執行流程（orchestrator 依序執行，讓 subagent 的進度回報有 taskId 可用）：**
+> 1. 呼叫 \`create_task(projectId="${project.id}", title="Skill 產生：${workspaceType} workspace", label="${workspaceType}", taskType="other")\` 取得 taskId
+> 2. 呼叫 \`update_task_status(taskId, "in_progress")\`
+> 3. 使用 Agent tool 派出 subagent，工作目錄設為 \`${workspacePath}\`，將以下 prompt 作為任務傳入，**並在 prompt 開頭附上步驟 1 取得的實際 taskId**，指示 subagent 用 \`report_output(taskId="<實際taskId>", content="...")\` 與 \`report_milestone(taskId="<實際taskId>", milestone="...")\` 回報進度到 Web UI
+> 4. subagent 完成後呼叫 \`update_task_status(taskId, "completed", summary="產出檔案清單")\`；失敗則呼叫 \`update_task_status(taskId, "failed", summary="失敗原因")\`
 
 ---
 
@@ -104,12 +117,27 @@ ${prompt}`;
 /**
  * Build the skill generation prompt.
  */
-function buildSkillGenPrompt(workspaceType: 'frontend' | 'backend', mode: 'create' | 'enhance', hasClaudeMd: boolean, hasSkills: boolean): string {
+function buildSkillGenPrompt(
+  workspaceType: 'frontend' | 'backend',
+  mode: 'create' | 'enhance',
+  hasClaudeMd: boolean,
+  hasSkills: boolean,
+  notes: Array<{ category: string | null; content: string }> = [],
+): string {
   const lang = workspaceType === 'frontend' ? '前端' : '後端';
 
   const modeInstruction = mode === 'create'
     ? `此工作目錄**尚無** CLAUDE.md 或 .claude/skills/，從零開始建立。`
-    : `此工作目錄**已有**${hasClaudeMd ? ' CLAUDE.md' : ''}${hasSkills ? ' .claude/skills/' : ''}，先讀取現有內容，找出缺漏或過時的部分補強。現有正確的內容不要刪除，只新增或修正。${hasClaudeMd && !hasSkills ? '\n注意：有 CLAUDE.md 但尚無 .claude/skills/，需要建立 skills 目錄和檔案。' : ''}`;
+    : `此工作目錄**已有**${hasClaudeMd ? ' CLAUDE.md' : ''}${hasSkills ? ' .claude/skills/' : ''}，先讀取現有內容，找出缺漏或過時的部分補強。現有正確的內容不要刪除，只新增或修正。${hasClaudeMd && !hasSkills ? '\n注意：有 CLAUDE.md 但尚無 .claude/skills/，需要建立 skills 目錄和檔案。' : ''}${hasSkills ? '\n若 .claude/skills/ 下發現既有的**平面 .md skill 檔**（如 .claude/skills/foo.md），遷移成官方資料夾格式 .claude/skills/foo/SKILL.md：內容保留，frontmatter 只留 name/description，遷移完成後移除舊的平面檔。' : ''}`;
+
+  const notesSection = notes.length === 0 ? '' : `
+---
+
+## 專案經驗筆記（使用者與先前任務累積的踩坑教訓，必須融入文件）
+${notes.map(n => `- ${n.category ? `[${n.category}] ` : ''}${n.content}`).join('\n')}
+
+要求：這些教訓必須反映在 CLAUDE.md 的禁止清單/潛規則章節或對應的 skill 中（用你的話語重寫、補充程式碼佐證，不要照抄）。enhance 模式時，比對現有文件是否已涵蓋這些教訓，缺的補上。
+`;
 
   return `你是一位深度理解真實工程現場的資深${lang}架構師。
 你的任務是：**深度閱讀這個專案的程式碼，把它的「開發方式、習慣、潛規則」全部文件化**，讓未來的 AI agent 讀了之後，能像一個熟悉這個專案三個月的工程師一樣開發——不踩雷、不重複造輪子、風格一致。
@@ -168,12 +196,14 @@ ${workspaceType === 'frontend' ? `
 4. **版本或環境限制** — 某些新 API 因版本鎖定無法使用
 5. **隱性的業務規則** — 某些看似技術的決定其實是業務要求（例如：特定欄位不能為空、某操作必須寫 audit log）
 6. **開發順序 / 依賴關係** — 做某功能之前必須先做什麼（例如：改 DB 前要先跑 migration）
-
+${notesSection}
 ---
 
 ## 輸出原則
 
 **目標只有一個：讓未來的 AI agent 讀完這些文件，立刻知道「在這個專案要怎麼開發」。**
+
+**硬性要求：每一條慣例、禁止事項、潛規則，都必須附上 1–2 個實際檔案路徑（相對路徑）作為證據**，例如：\`- 禁止直接 fetch，一律走 src/api/client.ts 的 apiClient（見 src/pages/Order/List.tsx:42 的用法）\`。找不到程式碼佐證的規則不要寫。
 
 不要套固定模板。根據你在這個專案實際發現的東西，自己判斷：
 - CLAUDE.md 要寫哪些章節、寫多深
@@ -186,10 +216,19 @@ ${workspaceType === 'frontend' ? `
 - 規範類的內容要具體，配程式碼範例，不要只說「遵循 XXX 風格」
 - 禁止事項和 workaround 要獨立、醒目，是最容易救命的部分
 - 寧可寫少但準確，不要寫多但模糊
-- **必須包含「可用 Skills」章節**：列出所有建立的 .claude/skills/ 檔案名稱、描述、什麼情況下應該使用
+- **必須包含「可用 Skills」章節**：列出所有建立的 skill 名稱、描述、什麼情況下應該使用
+- **必須包含「開發前必讀 / 開工檢查清單」章節**（硬性要求）：內容是接到任務後、寫 code 之前，依序要看哪些東西——例如：
+  1. 相關模組的現有實作範例（指出去哪個資料夾找同類功能，如「做查詢頁先看 src/pages/Order/ 的既有寫法」）
+  2. 共用元件 / utility 清單（先確認有沒有現成的，不要重複造輪子）
+  3. 對應要先讀的 .claude/skills/ 是哪幾個 skill
+  4. 有沒有 mock / 測試資料 / 環境設定要先建
+  讓 agent 開工前照這份清單走一遍，再開始寫 code。
 
 ### .claude/skills/ 撰寫方向
 每個 skill 聚焦一個明確的主題，讓 agent 在需要的時候能精確叫出來。
+
+**格式（強制，Claude Code 官方 skill 格式）：每個 skill 一個資料夾，內含 \`SKILL.md\`** — 即 \`.claude/skills/<skill-name>/SKILL.md\`。不要建立平面的 \`.claude/skills/<name>.md\` 檔案。
+
 自己決定要建哪些，以下是**可能的方向**（不是必填清單）：
 - 程式碼慣例 / 命名規則
 - 反模式 / 禁止清單
@@ -199,12 +238,11 @@ ${workspaceType === 'frontend' ? `
 - 測試策略
 - 任何你覺得「新人最需要知道」的主題
 
-每個 skill 檔案必須有 frontmatter：
+每個 SKILL.md 必須有 frontmatter（只放 name 和 description 兩個欄位）：
 \`\`\`markdown
 ---
 name: skill-name
-description: 一句話說明：什麼情況下應該叫這個 skill
-type: reference
+description: 什麼情況下應該使用這個 skill（觸發時機寫具體，agent 靠這一行決定要不要載入）
 ---
 \`\`\`
 
@@ -217,6 +255,9 @@ type: reference
 - **不得執行任何 DB 操作**（SELECT、INSERT、UPDATE、DELETE、DROP、ALTER 等一律禁止）
 - **不得修改任何現有程式碼**，只能讀取
 - 唯一允許寫入的目標：CLAUDE.md 和 .claude/skills/ 下的 markdown 檔案
+
+### 進度回報
+orchestrator 會在任務指示中提供本次任務的 taskId。每完成一個 Phase 用 \`report_output(taskId="<taskId>", content="...")\` 回報；全部完成後用 report_output 回報產出檔案清單。
 
 完成所有檔案後，輸出 [TASK_COMPLETE]`;
 }
