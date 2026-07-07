@@ -7,18 +7,16 @@ import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
 import { runMigrations } from '../db/schema.js';
+import { getDbPath } from './helpers.js';
 
 let instance: Database.Database | null = null;
 
 export function getMcpDb(): Database.Database {
   if (instance) return instance;
 
-  const dbPath = process.env['DB_PATH'];
-  if (!dbPath) {
-    throw new Error('DB_PATH environment variable is required for MCP Server');
-  }
-
-  const resolvedPath = path.isAbsolute(dbPath) ? dbPath : path.resolve(process.cwd(), dbPath);
+  // Resolved against the OmniCommander repo root — the MCP process may be
+  // spawned from any project folder, so cwd must never influence which DB opens.
+  const resolvedPath = getDbPath();
 
   // Ensure data directory exists
   const dir = path.dirname(resolvedPath);

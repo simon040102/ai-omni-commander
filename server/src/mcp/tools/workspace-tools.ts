@@ -7,9 +7,9 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import fs from 'node:fs';
 import path from 'node:path';
-import crypto from 'node:crypto';
 import { getMcpDb } from '../db.js';
 import { notifyWebServer } from '../notify.js';
+import { saveFlowFile } from '../flow-gate.js';
 
 export function registerWorkspaceTools(server: McpServer): void {
 
@@ -21,6 +21,7 @@ export function registerWorkspaceTools(server: McpServer): void {
       projectId: z.string().describe('The project ID'),
       workspaceType: z.enum(['frontend', 'backend']).describe('Which workspace to generate skills for'),
     },
+    { title: 'Get Skill Generation Plan', readOnlyHint: true, openWorldHint: false },
     async ({ projectId, workspaceType }) => {
       const db = getMcpDb();
 
@@ -74,47 +75,28 @@ ${prompt}`;
       filename: z.string().describe('Source SA document filename (e.g., "SPEC_WA05_經手表單查詢_v0.1.docx")'),
       mermaidContent: z.string().describe('The Mermaid flowchart content (flowchart TD format)'),
     },
+    { title: 'Save SA Flow', readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     async ({ projectId, taskId, filename, mermaidContent }) => {
       if (!mermaidContent.trim()) {
         return { content: [{ type: 'text' as const, text: 'Error: mermaidContent is empty' }], isError: true };
       }
 
-      // Determine flows directory from DB_PATH
-      const dbPath = process.env['DB_PATH'] || './data/omni.db';
-      const dataDir = path.dirname(path.isAbsolute(dbPath) ? dbPath : path.resolve(process.cwd(), dbPath));
-      const flowsDir = path.join(dataDir, 'sa-flows');
-      fs.mkdirSync(flowsDir, { recursive: true });
-
-      // Use content hash as cache key
-      const hash = crypto.createHash('sha256').update(mermaidContent).digest('hex').slice(0, 16);
-      const flowPath = path.join(flowsDir, `${projectId}-${hash}-flow.mmd`);
-      const metaPath = path.join(flowsDir, `${projectId}-${hash}-meta.json`);
-
-      // Save flow file
-      fs.writeFileSync(flowPath, mermaidContent, 'utf-8');
-
-      // Save or update meta
-      let meta: Record<string, unknown> = {};
-      if (fs.existsSync(metaPath)) {
-        try { meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8')); } catch { /* ignore */ }
-      }
-      meta.hash = hash;
-      meta.generatedAt = new Date().toISOString();
-      meta.filename = filename;
-      meta.projectId = projectId;
-      if (!Array.isArray(meta.taskIds)) meta.taskIds = [];
-      if (taskId && !(meta.taskIds as string[]).includes(taskId)) {
-        (meta.taskIds as string[]).push(taskId);
-      }
-      fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+      const saved = saveFlowFile({
+        projectId,
+        taskId,
+        flowType: 'spec',
+        role: 'default',
+        mermaidContent,
+        filename,
+      });
 
       // Notify Web Server
       await notifyWebServer({
         event: 'sa-flow.saved',
-        data: { projectId, taskId: taskId || null, filename, flowPath },
+        data: { projectId, taskId: taskId || null, filename, flowPath: saved.flowPath },
       });
 
-      return { content: [{ type: 'text' as const, text: `SA Flow saved: ${flowPath}\nUse the Web UI's SA Flow button to view it.` }] };
+      return { content: [{ type: 'text' as const, text: `SA Flow saved: ${saved.flowPath}\nUse the Web UI's SA Flow button to view it.` }] };
     },
   );
 }

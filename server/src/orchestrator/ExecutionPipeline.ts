@@ -15,10 +15,37 @@ import { getProject, updateProject } from '../db/queries/projects.js';
 import { getTask, updateTask } from '../db/queries/tasks.js';
 import { getConfig } from '../config.js';
 import { getDocumentsForTask } from '../db/queries/taskDocuments.js';
+import { getActiveProjectNotes, type ProjectNote } from '../db/queries/projectNotes.js';
 import { loadSuperpowersPrompt } from '../skills/superpowers/index.js';
 import { createChildLogger } from '../utils/logger.js';
 
 const logger = createChildLogger('ExecutionPipeline');
+
+/**
+ * 效能分析（後端限定，強制）— 逐字取自專案 CLAUDE.md「#### 2b. 後端 subagent 必須先做效能分析」。
+ */
+const BACKEND_PERFORMANCE_SECTION = `## 效能分析（強制 — 寫 code 之前必須完成，用 report_output 記錄）
+
+寫任何 Service 方法前，先完成以下分析：
+
+1. 列出涉及的所有資料表 + 估計資料量（不知道就問使用者）
+2. 對每個 DB 查詢寫出 WHERE 條件（對應 SD 的哪條規則）+ 預期回傳筆數
+3. 寫完後檢查每個迴圈裡有沒有 DB 查詢（N+1 問題）
+4. 從 Controller 到 DB 走一遍完整資料流：總共打幾次 DB？最大查詢回幾筆？
+
+⚠ 禁止 findAll() + Java 記憶體過濾。Legacy 表（NaNa）可能有幾十萬筆。`;
+
+/**
+ * 安全弱點檢查（後端限定）— 逐字取自專案 CLAUDE.md「#### 2c. 安全弱點檢查」。
+ */
+const BACKEND_SECURITY_SECTION = `## 安全檢查（完成實作後逐項確認）
+
+- SQL 參數用 @Param 綁定，禁止字串拼接
+- API 驗證當前使用者只能操作自己的資料
+- Controller 參數有長度限制和格式驗證
+- response 不回傳密碼、token、內部 ID
+- 批次操作有上限（如一次最多 100 筆）
+- log 不印密碼、token、個資`;
 
 /**
  * Unified execution pipeline that replaces mode-specific handlers.
@@ -97,15 +124,19 @@ export class ExecutionPipeline {
     // Priority 1: use parentName (from Asana parent task, e.g. "OV0101")
     // Priority 2: extract function code from task title (e.g. "IC01 修改發票查詢" → "IC01")
     let svnDocIds: string[] = [];
+    let svnFetchError: string | null = null;
+    let svnFetchAttempted = false;
     const functionCode = task.parentName || extractFunctionCode(task.title);
     if (task.taskType !== 'testing' && functionCode && projectConfig?.svnConfig && this.svnSpecService) {
+      svnFetchAttempted = true;
       try {
         svnDocIds = await this.svnSpecService.fetchSpecsForTask(
           task.projectId, taskId, functionCode, projectConfig.svnConfig, task.label,
         );
         logger.info({ taskId, functionCode, source: task.parentName ? 'parentName' : 'title', docCount: svnDocIds.length }, 'Fetched SVN specs');
       } catch (err) {
-        logger.warn({ err, taskId, functionCode }, 'Failed to fetch SVN spec documents');
+        svnFetchError = err instanceof Error ? err.message : String(err);
+        logger.error({ err, taskId, functionCode }, 'SVN spec fetch failed — prompt will carry [SPEC_FETCH_ERROR] block（規格不齊全不執行）');
       }
     }
 
@@ -180,6 +211,7 @@ export class ExecutionPipeline {
       testOptions,
       extraPrompt,
       saFlowResult: saFlowResult ?? undefined,
+      svnSpecFetch: { attempted: svnFetchAttempted, functionCode: functionCode || undefined, error: svnFetchError },
     });
 
     // Resolve working directory
@@ -237,13 +269,20 @@ export class ExecutionPipeline {
     }
 
     let svnDocIds: string[] = [];
+    let svnFetchError: string | null = null;
+    let svnFetchAttempted = false;
     const functionCode = task.parentName || extractFunctionCode(task.title);
     if (task.taskType !== 'testing' && functionCode && projectConfig?.svnConfig && this.svnSpecService) {
+      svnFetchAttempted = true;
       try {
         svnDocIds = await this.svnSpecService.fetchSpecsForTask(
           task.projectId, taskId, functionCode, projectConfig.svnConfig, task.label,
         );
-      } catch { /* ignore */ }
+      } catch (err) {
+        // 規格不齊全不執行：do NOT swallow — surface the error prominently in the plan
+        svnFetchError = err instanceof Error ? err.message : String(err);
+        logger.error({ err, taskId, functionCode }, 'SVN spec fetch failed — execution plan will carry [SPEC_FETCH_ERROR] block（規格不齊全不執行）');
+      }
     }
 
     const taskAttachments = this.getTaskAttachments(task.projectId, taskId, executionRunId);
@@ -306,6 +345,7 @@ export class ExecutionPipeline {
       testOptions,
       extraPrompt,
       saFlowResult: saFlowResult ?? undefined,
+      svnSpecFetch: { attempted: svnFetchAttempted, functionCode: functionCode || undefined, error: svnFetchError },
     });
 
     const workingDir = this.resolveWorkingDir(project, task.label);
@@ -352,13 +392,20 @@ export class ExecutionPipeline {
     }
 
     let svnDocIds: string[] = [];
+    let svnFetchError: string | null = null;
+    let svnFetchAttempted = false;
     const functionCode = task.parentName || extractFunctionCode(task.title);
     if (task.taskType !== 'testing' && functionCode && projectConfig?.svnConfig && this.svnSpecService) {
+      svnFetchAttempted = true;
       try {
         svnDocIds = await this.svnSpecService.fetchSpecsForTask(
           task.projectId, taskId, functionCode, projectConfig.svnConfig, forRole,
         );
-      } catch { /* ignore */ }
+      } catch (err) {
+        // 規格不齊全不執行：do NOT swallow — surface the error prominently in the prompt
+        svnFetchError = err instanceof Error ? err.message : String(err);
+        logger.error({ err, taskId, functionCode, forRole }, 'SVN spec fetch failed — prompt will carry [SPEC_FETCH_ERROR] block（規格不齊全不執行）');
+      }
     }
 
     const taskAttachments = this.getTaskAttachments(task.projectId, taskId, opts?.executionRunId);
@@ -421,6 +468,7 @@ export class ExecutionPipeline {
       testOptions: opts?.testOptions,
       extraPrompt,
       saFlowResult: saFlowResult ?? undefined,
+      svnSpecFetch: { attempted: svnFetchAttempted, functionCode: functionCode || undefined, error: svnFetchError },
     });
 
     const workingDir = this.resolveWorkingDir(project, forRole);
@@ -540,8 +588,16 @@ export class ExecutionPipeline {
     testOptions?: TestOptions;
     extraPrompt?: string;
     saFlowResult?: { fullFlow: string; relevantFlow: string; flowPath: string } | null;
+    /** SVN spec fetch outcome — attempted=true means SVN was configured and a fetch was tried; error is set when the fetch threw */
+    svnSpecFetch?: { attempted: boolean; functionCode?: string; error?: string | null };
   }): string {
     const parts: string[] = [];
+
+    // Layer 0: SVN spec fetch error banner — MUST be first so the orchestrator cannot miss it
+    // （專案規範：「規格不齊全不執行」）
+    if (opts.svnSpecFetch?.error) {
+      parts.push(this.buildSpecFetchErrorBanner(opts.svnSpecFetch.error));
+    }
 
     // Layer 1: Superpowers methodology
     if (opts.superpowers.length > 0) {
@@ -561,8 +617,35 @@ export class ExecutionPipeline {
     }
 
     // Layer 2.6: SVN specification documents (auto-fetched)
-    if (opts.svnDocuments && opts.svnDocuments.length > 0) {
+    if (opts.svnSpecFetch?.error) {
+      // Fetch threw — show the error honestly instead of pretending "no documents"
+      parts.push([
+        '## SVN 規格文件（自動取得）',
+        '',
+        `⚠ 撈取失敗：${opts.svnSpecFetch.error}`,
+        '',
+        '未取得任何 SVN 規格文件——這不代表規格不存在，而是 SVN 撈取發生錯誤。',
+        '處理方式見本 prompt 最前面的 [SPEC_FETCH_ERROR] 區塊。',
+      ].join('\n'));
+    } else if (opts.svnDocuments && opts.svnDocuments.length > 0) {
       parts.push(this.buildSvnDocsSection(opts.svnDocuments));
+    } else if (opts.svnSpecFetch?.attempted) {
+      // SVN configured and fetch succeeded, but zero documents found for this task/role
+      parts.push([
+        '## SVN 規格文件（自動取得）',
+        '',
+        `⚠ 警告：未找到規格文件。SVN 已設定且撈取成功，但功能代碼「${opts.svnSpecFetch.functionCode ?? '(未知)'}」沒有找到本任務適用的 SA/SD 規格文件。`,
+        '依專案規範「規格不齊全不執行」，開工前請先告知使用者並取得指示（提供文件路徑，或明確說「跳過」）。',
+        '若使用者選擇跳過，必須先用 report_output 記錄 [SKIP] 使用者跳過規格檢查。',
+      ].join('\n'));
+    }
+
+    // Layer 2.7: Project experience notes（前人踩坑教訓）— placed next to the
+    // spec-document layers so agents read them before coding. Omitted entirely
+    // when the project has no active notes.
+    const projectNotes = getActiveProjectNotes(opts.projectId);
+    if (projectNotes.length > 0) {
+      parts.push(this.buildProjectNotesSection(projectNotes));
     }
 
     // Layer 2.7b: DB schema files (for backend agents to query when needed)
@@ -595,7 +678,13 @@ export class ExecutionPipeline {
     }
 
     // Layer 3: Task prompt (use reportTaskId for verification report path if provided)
-    const taskPrompt = this.buildTaskPrompt(opts.taskTitle, opts.taskDescription, opts.taskType, opts.role, opts.testOptions, opts.reportTaskId ?? opts.taskId);
+    const taskPrompt = this.buildTaskPrompt(opts.taskTitle, opts.taskDescription, opts.taskType, {
+      role: opts.role,
+      testOptions: opts.testOptions,
+      reportTaskId: opts.reportTaskId ?? opts.taskId,
+      realTaskId: opts.taskId,
+      projectId: opts.projectId,
+    });
     parts.push(taskPrompt);
 
     return parts.join('\n\n---\n\n');
@@ -694,6 +783,18 @@ export class ExecutionPipeline {
       }
     }
 
+    return lines.join('\n');
+  }
+
+  /**
+   * Build the project experience notes section（前人踩坑教訓）injected near the
+   * spec-document layers. One bullet per active note: `- [category] content`.
+   */
+  private buildProjectNotesSection(notes: ProjectNote[]): string {
+    const lines: string[] = ['## 專案經驗筆記（前人踩坑教訓，開發前必讀）'];
+    for (const n of notes) {
+      lines.push(n.category ? `- [${n.category}] ${n.content}` : `- ${n.content}`);
+    }
     return lines.join('\n');
   }
 
@@ -835,6 +936,20 @@ ${flowDiagram}
   }
 
   /**
+   * Build the prominent error banner placed at the VERY TOP of the plan when
+   * SVN spec fetch fails (auth failure, network down, etc.).
+   * The plan still returns successfully, but the orchestrator must see this
+   * and stop for user instruction before starting development.
+   */
+  private buildSpecFetchErrorBanner(errorMessage: string): string {
+    return [
+      `⚠ [SPEC_FETCH_ERROR] SVN 規格撈取失敗：${errorMessage}`,
+      '依專案規範「規格不齊全不執行」，請先告知使用者此錯誤並取得指示（重試 / 提供文件路徑 / 明確說「跳過」）後才能開始開發。',
+      '若使用者選擇跳過，必須先用 report_output 記錄 [SKIP] 使用者跳過規格檢查。',
+    ].join('\n');
+  }
+
+  /**
    * Build prompt section for SVN-fetched specification documents.
    * Only provides file paths — agent must use Read tool to access content.
    * This prevents spec content from being lost when conversation is compressed.
@@ -931,7 +1046,16 @@ ${flowDiagram}
   /**
    * Build the task-specific prompt section.
    */
-  buildTaskPrompt(title: string, description: string, taskType: TaskType, role?: string, testOptions?: TestOptions, taskId?: string): string {
+  // reportTaskId：驗證報告檔名用（fullstack 會帶 -frontend/-backend 後綴）；
+  // realTaskId：MCP 工具呼叫範例用（必須是真實的 task ID，工具才查得到任務）。
+  buildTaskPrompt(
+    title: string,
+    description: string,
+    taskType: TaskType,
+    promptOpts: { role?: string; testOptions?: TestOptions; reportTaskId?: string; realTaskId?: string; projectId?: string } = {},
+  ): string {
+    const { role, testOptions, reportTaskId, realTaskId, projectId } = promptOpts;
+    const taskId = realTaskId ?? reportTaskId;
     const typeLabels: Record<TaskType, string> = {
       bug: 'Bug Fix',
       feature: 'New Feature',
@@ -940,16 +1064,100 @@ ${flowDiagram}
       other: 'Task',
     };
 
-    const strategies: Record<TaskType, string> = {
-      bug: `## 修復策略
+    // Backend-only mandatory sections（來自專案規範：效能分析 + 安全檢查）
+    const backendSections = role === 'backend'
+      ? `${BACKEND_PERFORMANCE_SECTION}\n\n${BACKEND_SECURITY_SECTION}\n\n`
+      : '';
 
+    return `# ${typeLabels[taskType]}: ${title}
+
+## 任務描述
+
+${description}
+
+## 第一步：讀取專案設定
+
+請先檢查工作目錄中是否有 CLAUDE.md 或 .claude/ 設定，如果有請讀取並遵循其中的指示和技能定義。
+
+${this.buildSpecComplianceSection(taskId)}
+
+${this.buildSpecReadingSection(taskId)}
+
+${this.buildStrategy(taskType, taskId, projectId)}
+
+${backendSections}## 完成標準
+
+${this.buildCompletionCriteria(role, testOptions, reportTaskId ?? realTaskId, taskId)}
+- 如果遇到需要人工決策的問題，請加上 [NEEDS_HUMAN] 並說明原因`;
+  }
+
+  /**
+   * 規格遵循（最高原則）— 逐字取自專案 CLAUDE.md「#### 2a. 嚴禁自行編造（最高原則）」，
+   * 「規格不清楚」的處理改為使用 report_spec_gap MCP 工具。所有 role 都注入。
+   */
+  private buildSpecComplianceSection(taskId?: string): string {
+    const tidComma = taskId ? `taskId="${taskId}", ` : '';
+    return `## 規格遵循（最高原則 — 違反此規則等同任務失敗）
+
+**所有實作都必須有規格依據。規格沒寫的東西，不做。規格寫的東西，照做。**
+
+具體規則：
+1. 欄位名稱、按鈕文字、訊息文字 → 必須從 SA/SD 文件逐字抄，不可以自己翻譯或改寫
+2. API 路徑、參數名、型別 → 必須從 SD 文件抄，不可以自己命名
+3. SQL 欄位名 → 必須從 DB schema 或 Entity @Column 確認，不可以猜
+4. UI 元件選擇（checkbox/radio/select）→ 必須從 SA 或 Axure 確認，不可以自己決定
+5. 查詢邏輯（WHERE 條件、JOIN、排序）→ 必須照 SD 規格的 SQL/規則實作，不可以簡化或替代
+6. DDL 欄位 → 必須讀 Entity 的 @Column name + MetaData.java 確認，不可以猜
+
+如果規格不清楚、未定義或有矛盾：
+- 呼叫 mcp__omni-commander__report_spec_gap(${tidComma}category=..., description=...) 記錄缺口（category: sa_missing/sd_missing/field_undefined/api_undefined/logic_unclear/other）
+- 標記 [NEEDS_CLARIFICATION] 繼續做其他有規格依據的部分
+- 寧可不做也不要做錯，不要自己編值`;
+  }
+
+  /**
+   * 規格文件閱讀協議 — 逐字取自專案 CLAUDE.md「#### 2. 確實閱讀規格文件」。所有 role 都注入。
+   * 有 taskId 時第 4 條寫成具體的 report_output MCP 呼叫格式。
+   */
+  private buildSpecReadingSection(taskId?: string): string {
+    const reportLine = taskId
+      ? `4. 讀完後，用 mcp__omni-commander__report_output(taskId="${taskId}", content="...") 摘要你理解的重點（欄位清單、API 清單、特殊邏輯）`
+      : '4. 讀完後，在 report_output 摘要你理解的重點（欄位清單、API 清單、特殊邏輯）';
+    return `## 規格文件閱讀（強制，寫 code 之前必須完成）
+
+1. 用 Read tool 完整讀取 SA 文件 — 不是掃過去，是逐項讀每個欄位名稱、按鈕文字、訊息文字、操作流程
+2. 用 Read tool 完整讀取 SD 文件 — 逐個 API 讀清楚 path、method、每個參數名和型別、response 結構
+3. 如果有 Axure HTML — 用 Read tool 讀取，對照 SA 確認 UI 結構
+${reportLine}
+5. 開發過程中遇到任何文字、欄位名、API 路徑，回頭查規格確認，不要憑印象寫`;
+  }
+
+  /**
+   * Build the strategy section for a task type.
+   * Bug tasks get an extra step 0 that pulls BUG evidence via MCP tools (needs taskId).
+   */
+  private buildStrategy(taskType: TaskType, taskId?: string, projectId?: string): string {
+    if (taskType === 'bug') {
+      const attachArgs = [
+        projectId ? `projectId="${projectId}"` : '',
+        taskId ? `taskId="${taskId}"` : '',
+      ].filter(Boolean).join(', ');
+      const attachCall = `mcp__omni-commander__fetch_task_attachments(${attachArgs})`;
+      const commentsCall = taskId
+        ? `mcp__omni-commander__get_asana_task_comments(taskId="${taskId}")`
+        : 'mcp__omni-commander__get_asana_task_comments()';
+      return `## 修復策略
+
+0. **取得 BUG 現場**：先呼叫 ${attachCall} 取得 BUG 截圖、${commentsCall} 看回報討論串（若非 Asana 任務或無附件會回空，屬正常）
 1. **分析問題**：根據描述和錯誤訊息，定位問題的根本原因
 2. **找到相關程式碼**：使用 Grep/Glob 找到相關檔案
 3. **理解現有邏輯**：閱讀相關程式碼，理解其運作方式
 4. **制定修復方案**：確定最小改動的修復方式
 5. **實作修復**：修改程式碼
-6. **驗證修復**：如果有測試，執行測試確認修復成功`,
+6. **驗證修復**：如果有測試，執行測試確認修復成功`;
+    }
 
+    const strategies: Record<Exclude<TaskType, 'bug'>, string> = {
       feature: `## 開發策略
 
 1. **理解需求**：確認要做什麼功能
@@ -983,25 +1191,29 @@ ${flowDiagram}
 5. **驗證完成**：確認任務已正確完成`,
     };
 
-    return `# ${typeLabels[taskType]}: ${title}
-
-## 任務描述
-
-${description}
-
-## 第一步：讀取專案設定
-
-請先檢查工作目錄中是否有 CLAUDE.md 或 .claude/ 設定，如果有請讀取並遵循其中的指示和技能定義。
-
-${strategies[taskType]}
-
-## 完成標準
-
-${this.buildCompletionCriteria(role, testOptions, taskId)}
-- 如果遇到需要人工決策的問題，請加上 [NEEDS_HUMAN] 並說明原因`;
+    return strategies[taskType];
   }
 
-  private buildCompletionCriteria(role?: string, testOptions?: TestOptions, taskId?: string): string {
+  /**
+   * MCP 驗收工具接線 — 完成標準共用的 get_verification_plan / report_verification_result /
+   * report_verification_evidence 呼叫指引。taskId undefined 時省略 taskId 參數值。
+   */
+  private buildVerificationToolLines(taskId?: string, includeEvidence = true): string[] {
+    const tid = taskId ? `taskId="${taskId}"` : '';
+    const tidComma = taskId ? `taskId="${taskId}", ` : '';
+    const lines = [
+      `- 開發完成後呼叫 mcp__omni-commander__get_verification_plan(${tid}) 取得驗收清單，逐項執行`,
+      `- 逐項結果用 mcp__omni-commander__report_verification_result(${tidComma}results=[...]) 回報`,
+    ];
+    if (includeEvidence) {
+      lines.push(`- 截圖等驗收證據用 mcp__omni-commander__report_verification_evidence(${tidComma}filePath=...) 上傳`);
+    }
+    return lines;
+  }
+
+  private buildCompletionCriteria(role?: string, testOptions?: TestOptions, reportTaskId?: string, realTaskId?: string): string {
+    const taskId = realTaskId ?? reportTaskId;
+    const reportName = reportTaskId ?? realTaskId ?? 'adhoc';
     if (role === 'frontend') {
       const opts = testOptions?.frontend;
       const lines: string[] = [
@@ -1049,8 +1261,9 @@ ${this.buildCompletionCriteria(role, testOptions, taskId)}
           `最後 \`console.table(results)\` 輸出 pass/fail 摘要。腳本必須可直接貼到瀏覽器 Console 執行，無需任何 npm 套件。`,
         );
       }
+      lines.push(...this.buildVerificationToolLines(taskId));
       lines.push(
-        `- 所有驗證步驟完成後，將完整驗證結果（規格逐項確認、build 結果、測試結果、截圖路徑）以 Markdown 格式寫入 \`docs/verification-reports/${taskId}.md\`（目錄不存在則建立）`,
+        `- 所有驗證步驟完成後，將完整驗證結果（規格逐項確認、build 結果、測試結果、截圖路徑）以 Markdown 格式寫入 \`docs/verification-reports/${reportName}.md\`（目錄不存在則建立）`,
         '- 所有步驟完成後，在回應末尾加上 [TASK_COMPLETE]',
       );
       return lines.join('\n');
@@ -1080,8 +1293,9 @@ ${this.buildCompletionCriteria(role, testOptions, taskId)}
           '- 將本次開發的端點合約寫入 `.ai_context/api-contracts/{module}.json`（如目錄不存在請建立）',
         );
       }
+      lines.push(...this.buildVerificationToolLines(taskId));
       lines.push(
-        `- 所有驗證步驟完成後，將完整驗證結果以 Markdown 格式寫入 \`docs/verification-reports/${taskId}.md\`（目錄不存在則建立），內容包含：\n` +
+        `- 所有驗證步驟完成後，將完整驗證結果以 Markdown 格式寫入 \`docs/verification-reports/${reportName}.md\`（目錄不存在則建立），內容包含：\n` +
         `  1. 規格逐項確認結果\n` +
         `  2. Build 結果\n` +
         `  3. 測試結果\n` +
@@ -1094,10 +1308,13 @@ ${this.buildCompletionCriteria(role, testOptions, taskId)}
     }
 
     // Default for other roles
-    return `- **回對規格**：開發完成後，重新閱讀原始規格文件，逐項確認每項需求是否都已正確實作。列出每項需求對應的程式碼位置及確認結果，若有缺漏立即修復
-- 完成任務後，如果專案有測試，請執行測試確保通過
-- 如果是前端專案，請執行 build 確保成功
-- 確認完成後，在回應末尾加上 [TASK_COMPLETE]`;
+    return [
+      '- **回對規格**：開發完成後，重新閱讀原始規格文件，逐項確認每項需求是否都已正確實作。列出每項需求對應的程式碼位置及確認結果，若有缺漏立即修復',
+      '- 完成任務後，如果專案有測試，請執行測試確保通過',
+      '- 如果是前端專案，請執行 build 確保成功',
+      ...this.buildVerificationToolLines(taskId, false),
+      '- 確認完成後，在回應末尾加上 [TASK_COMPLETE]',
+    ].join('\n');
   }
 
   /**

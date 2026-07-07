@@ -97,7 +97,7 @@ export function runMigrations(db: Database.Database): void {
       filename      TEXT NOT NULL,
       file_path     TEXT NOT NULL,
       file_type     TEXT,
-      doc_type      TEXT CHECK(doc_type IN ('SA', 'SD', 'other')) DEFAULT 'other',
+      doc_type      TEXT CHECK(doc_type IN ('SA', 'SD', 'other', 'verification')) DEFAULT 'other',
       parsed_text   TEXT,
       created_at    TEXT NOT NULL DEFAULT (datetime('now'))
     );
@@ -216,7 +216,9 @@ export function runMigrations(db: Database.Database): void {
       }
 
       db.exec('PRAGMA foreign_keys = ON');
-    } catch {
+    } catch (err) {
+      // stderr only — the MCP process's stdout is the JSON-RPC channel
+      process.stderr.write(`[schema] v2 projects table migration failed: ${err instanceof Error ? err.message : String(err)}\n`);
       db.exec('PRAGMA foreign_keys = ON');
     }
   }
@@ -259,7 +261,7 @@ export function runMigrations(db: Database.Database): void {
   // Migration: add doc_type column if missing
   const docCols = db.prepare("PRAGMA table_info(documents)").all() as Array<{ name: string }>;
   if (!docCols.some(c => c.name === 'doc_type')) {
-    db.exec("ALTER TABLE documents ADD COLUMN doc_type TEXT CHECK(doc_type IN ('SA', 'SD', 'other')) DEFAULT 'other'");
+    db.exec("ALTER TABLE documents ADD COLUMN doc_type TEXT CHECK(doc_type IN ('SA', 'SD', 'other', 'verification')) DEFAULT 'other'");
   }
 
   // Migration: add working_dir to agents
@@ -382,7 +384,8 @@ export function runMigrations(db: Database.Database): void {
 
         PRAGMA foreign_keys = ON;
       `);
-    } catch {
+    } catch (err) {
+      process.stderr.write(`[schema] agents role/status migration failed: ${err instanceof Error ? err.message : String(err)}\n`);
       db.exec('PRAGMA foreign_keys = ON');
     }
   }
@@ -432,7 +435,8 @@ export function runMigrations(db: Database.Database): void {
 
         PRAGMA foreign_keys = ON;
       `);
-    } catch {
+    } catch (err) {
+      process.stderr.write(`[schema] tasks fullstack/testing migration failed: ${err instanceof Error ? err.message : String(err)}\n`);
       db.exec('PRAGMA foreign_keys = ON');
     }
   }
@@ -463,5 +467,169 @@ export function runMigrations(db: Database.Database): void {
     const names = tcols.map(c => c.name);
     if (!names.includes('flow_required')) db.exec("ALTER TABLE tasks ADD COLUMN flow_required INTEGER DEFAULT 0");
     if (!names.includes('flow_state')) db.exec("ALTER TABLE tasks ADD COLUMN flow_state TEXT"); // JSON FlowGateState
+  }
+
+  // =============================================
+  // v8 Migration: unique index for Asana upsert identity (project_id, source_ref).
+  // If pre-existing data contains duplicates the index cannot be created —
+  // warn on stderr and skip; NEVER delete existing rows here.
+  // =============================================
+  try {
+    db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_project_sourceref ON tasks(project_id, source_ref) WHERE source_ref IS NOT NULL");
+  } catch (err) {
+    process.stderr.write(`[schema] skipped idx_tasks_project_sourceref (duplicate source_ref rows exist?): ${err instanceof Error ? err.message : String(err)}\n`);
+  }
+
+  // =============================================
+  // v9 Migration: spec_gaps table — structured "規格缺少/待補" records
+  // reported by MCP report_spec_gap (replaces free-text [NEEDS_CLARIFICATION]).
+  // Failure is non-fatal: warn on stderr and continue (v8 pattern).
+  // =============================================
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS spec_gaps (
+        id              TEXT PRIMARY KEY,
+        task_id         TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        category        TEXT NOT NULL CHECK(category IN ('sa_missing', 'sd_missing', 'field_undefined',
+                                                          'api_undefined', 'logic_unclear', 'other', 'spec_changed')),
+        description     TEXT NOT NULL,
+        status          TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'resolved')),
+        resolution_note TEXT,
+        created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+        resolved_at     TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_spec_gaps_project ON spec_gaps(project_id);
+      CREATE INDEX IF NOT EXISTS idx_spec_gaps_task ON spec_gaps(task_id);
+      CREATE INDEX IF NOT EXISTS idx_spec_gaps_status ON spec_gaps(status);
+    `);
+  } catch (err) {
+    process.stderr.write(`[schema] v9 spec_gaps migration failed: ${err instanceof Error ? err.message : String(err)}\n`);
+  }
+
+  // =============================================
+  // v10 Migration: project_notes table — 專案經驗筆記（前人踩坑教訓）
+  // saved by MCP save_project_note, injected into execution plans.
+  // Failure is non-fatal: warn on stderr and continue (v9 pattern).
+  // =============================================
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS project_notes (
+        id          TEXT PRIMARY KEY,
+        project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        category    TEXT,
+        content     TEXT NOT NULL,
+        active      INTEGER NOT NULL DEFAULT 1,
+        created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_project_notes_project ON project_notes(project_id);
+    `);
+  } catch (err) {
+    process.stderr.write(`[schema] v10 project_notes migration failed: ${err instanceof Error ? err.message : String(err)}\n`);
+  }
+
+  // =============================================
+  // v11 Migration: task_spec_versions — records the SVN last-modified date of
+  // each spec file successfully fetched for a task (MCP fetch_svn_specs and
+  // Web SvnSpecService both upsert). check_spec_changes compares against SVN.
+  // =============================================
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS task_spec_versions (
+        task_id       TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        file_ref      TEXT NOT NULL,
+        last_modified TEXT,
+        recorded_at   TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (task_id, file_ref)
+      );
+    `);
+  } catch (err) {
+    process.stderr.write(`[schema] v11 task_spec_versions migration failed: ${err instanceof Error ? err.message : String(err)}\n`);
+  }
+
+  // =============================================
+  // v12 Migration: spec_gaps category CHECK 擴充 'spec_changed'.
+  // Existing DBs have the 6-value CHECK — rebuild the table (CREATE new →
+  // INSERT SELECT explicit columns → DROP → RENAME) so no data is lost.
+  // Fresh DBs already get the 7-value CHECK from v9 above and skip this.
+  // =============================================
+  {
+    const specGapsInfo = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='spec_gaps'").get() as { sql: string } | undefined;
+    if (specGapsInfo?.sql && !specGapsInfo.sql.includes("'spec_changed'")) {
+      try {
+        db.exec(`
+          PRAGMA foreign_keys = OFF;
+
+          CREATE TABLE IF NOT EXISTS spec_gaps_new (
+            id              TEXT PRIMARY KEY,
+            task_id         TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            category        TEXT NOT NULL CHECK(category IN ('sa_missing', 'sd_missing', 'field_undefined',
+                                                              'api_undefined', 'logic_unclear', 'other', 'spec_changed')),
+            description     TEXT NOT NULL,
+            status          TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'resolved')),
+            resolution_note TEXT,
+            created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+            resolved_at     TEXT
+          );
+          INSERT OR IGNORE INTO spec_gaps_new (id, task_id, project_id, category, description, status, resolution_note, created_at, resolved_at)
+            SELECT id, task_id, project_id, category, description, status, resolution_note, created_at, resolved_at
+            FROM spec_gaps;
+          DROP TABLE spec_gaps;
+          ALTER TABLE spec_gaps_new RENAME TO spec_gaps;
+          CREATE INDEX IF NOT EXISTS idx_spec_gaps_project ON spec_gaps(project_id);
+          CREATE INDEX IF NOT EXISTS idx_spec_gaps_task ON spec_gaps(task_id);
+          CREATE INDEX IF NOT EXISTS idx_spec_gaps_status ON spec_gaps(status);
+
+          PRAGMA foreign_keys = ON;
+        `);
+      } catch (err) {
+        process.stderr.write(`[schema] v12 spec_gaps spec_changed migration failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        db.exec('PRAGMA foreign_keys = ON');
+      }
+    }
+  }
+
+  // =============================================
+  // v13 Migration: documents doc_type CHECK 擴充 'verification'
+  // (report_verification_evidence 寫入的驗收證據檔案).
+  // Existing DBs have the 3-value CHECK — rebuild the table; fresh DBs already
+  // get the 4-value CHECK from the initial CREATE above and skip this.
+  // =============================================
+  {
+    const documentsInfo = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='documents'").get() as { sql: string } | undefined;
+    if (documentsInfo?.sql && documentsInfo.sql.includes('doc_type') && documentsInfo.sql.includes('CHECK') && !documentsInfo.sql.includes("'verification'")) {
+      try {
+        db.exec(`
+          PRAGMA foreign_keys = OFF;
+
+          CREATE TABLE IF NOT EXISTS documents_new (
+            id                TEXT PRIMARY KEY,
+            project_id        TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            filename          TEXT NOT NULL,
+            file_path         TEXT NOT NULL,
+            file_type         TEXT,
+            doc_type          TEXT CHECK(doc_type IN ('SA', 'SD', 'other', 'verification')) DEFAULT 'other',
+            parsed_text       TEXT,
+            created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+            source            TEXT NOT NULL DEFAULT 'upload',
+            source_url        TEXT,
+            svn_last_modified TEXT,
+            content_hash      TEXT
+          );
+          INSERT OR IGNORE INTO documents_new (id, project_id, filename, file_path, file_type, doc_type, parsed_text, created_at, source, source_url, svn_last_modified, content_hash)
+            SELECT id, project_id, filename, file_path, file_type, doc_type, parsed_text, created_at, source, source_url, svn_last_modified, content_hash
+            FROM documents;
+          DROP TABLE documents;
+          ALTER TABLE documents_new RENAME TO documents;
+
+          PRAGMA foreign_keys = ON;
+        `);
+      } catch (err) {
+        process.stderr.write(`[schema] v13 documents verification doc_type migration failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        db.exec('PRAGMA foreign_keys = ON');
+      }
+    }
   }
 }

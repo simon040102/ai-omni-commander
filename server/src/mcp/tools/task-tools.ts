@@ -11,7 +11,8 @@ import {
   resolveRole, mutateFlowState, getFlowState, getRoleState,
   detectSpecDocuments, getCompletionBlockers, logTaskOutput,
 } from '../flow-gate.js';
-import type { TaskStatus, TaskLabel, TaskType, TaskSource } from '@omni/shared';
+import { parseJson, getAsanaPat, ASANA_API_BASE, ASANA_FETCH_TIMEOUT_MS } from '../helpers.js';
+import { runSpecChangeCheck, type SpecChangeTarget } from '../spec-change.js';
 
 interface TaskRow {
   id: string;
@@ -38,12 +39,6 @@ interface TaskRow {
   assignee_gid: string | null;
   created_at: string;
   updated_at: string;
-}
-
-/** Safely parse a JSON column; returns fallback on null/invalid. */
-function parseJson<T>(value: unknown, fallback: T): T {
-  if (typeof value !== 'string' || value === '') return fallback;
-  try { return JSON.parse(value) as T; } catch { return fallback; }
 }
 
 interface ProjectRow {
@@ -75,6 +70,7 @@ export function registerTaskTools(server: McpServer): void {
       taskId: z.string().describe('The task ID'),
       includeDocuments: z.boolean().optional().describe('Include associated documents (default: false). Use get_documents for document listing instead.'),
     },
+    { title: 'Get Task', readOnlyHint: true, openWorldHint: false },
     async ({ taskId, includeDocuments }) => {
       const db = getMcpDb();
       const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId) as TaskRow | undefined;
@@ -153,46 +149,54 @@ export function registerTaskTools(server: McpServer): void {
       section: z.string().optional().describe('Filter by Asana Section name (exact match, e.g. "UT")'),
       tag: z.string().optional().describe('Filter by Asana tag (matches if the task has this tag, exact tag name)'),
       statuses: z.array(z.string()).optional().describe('Override status filter (default: ["pending","queued","assigned"])'),
+      limit: z.number().int().positive().optional().describe('Max tasks to return (default: 100)'),
+      offset: z.number().int().min(0).optional().describe('Number of tasks to skip for pagination (default: 0)'),
     },
-    async ({ projectId, taskType, label, keyword, section, tag, statuses }) => {
+    { title: 'List Pending Tasks', readOnlyHint: true, openWorldHint: false },
+    async ({ projectId, taskType, label, keyword, section, tag, statuses, limit, offset }) => {
       const db = getMcpDb();
       const statusList = statuses && statuses.length > 0 ? statuses : ['pending', 'queued', 'assigned'];
       const placeholders = statusList.map(() => '?').join(',');
 
-      let sql = `
-        SELECT id, title, description, label, status, priority, task_type, preferred_model, parent_name, source_ref,
-               section, tags, custom_fields, assignee, assignee_gid
-        FROM tasks
-        WHERE project_id = ? AND status IN (${placeholders})
-      `;
+      let where = `WHERE project_id = ? AND status IN (${placeholders})`;
       const params: unknown[] = [projectId, ...statusList];
 
       if (taskType) {
-        sql += ' AND task_type = ?';
+        where += ' AND task_type = ?';
         params.push(taskType);
       }
       if (label) {
-        sql += ' AND label = ?';
+        where += ' AND label = ?';
         params.push(label);
       }
       if (keyword) {
-        sql += ' AND (title LIKE ? OR description LIKE ?)';
-        const like = `%${keyword}%`;
+        // Escape LIKE wildcards so %/_ in the keyword match literally
+        where += " AND (title LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\')";
+        const like = `%${keyword.replace(/[\\%_]/g, '\\$&')}%`;
         params.push(like, like);
       }
       if (section) {
-        sql += ' AND section = ?';
+        where += ' AND section = ?';
         params.push(section);
       }
       if (tag) {
         // tags stored as JSON array of names; match if any element equals the tag (exact)
-        sql += ' AND EXISTS (SELECT 1 FROM json_each(tasks.tags) WHERE json_each.value = ?)';
+        where += ' AND EXISTS (SELECT 1 FROM json_each(tasks.tags) WHERE json_each.value = ?)';
         params.push(tag);
       }
 
-      sql += ' ORDER BY priority DESC, created_at ASC';
+      const total = (db.prepare(`SELECT COUNT(*) as count FROM tasks ${where}`).get(...params) as { count: number }).count;
 
-      const rows = db.prepare(sql).all(...params) as Array<Record<string, unknown>>;
+      const effLimit = limit ?? 100;
+      const effOffset = offset ?? 0;
+      const rows = db.prepare(`
+        SELECT id, title, description, label, status, priority, task_type, preferred_model, parent_name, source_ref,
+               section, tags, custom_fields, assignee, assignee_gid
+        FROM tasks
+        ${where}
+        ORDER BY priority DESC, created_at ASC
+        LIMIT ? OFFSET ?
+      `).all(...params, effLimit, effOffset) as Array<Record<string, unknown>>;
 
       // Parse JSON dimensions for output; back-compat: old tasks → [] / {} / null
       const tasks = rows.map(r => ({
@@ -204,7 +208,14 @@ export function registerTaskTools(server: McpServer): void {
       return {
         content: [{
           type: 'text' as const,
-          text: JSON.stringify({ projectId, count: tasks.length, tasks }, null, 2),
+          text: JSON.stringify({
+            projectId,
+            total,
+            count: tasks.length,
+            offset: effOffset,
+            hasMore: effOffset + tasks.length < total,
+            tasks,
+          }, null, 2),
         }],
       };
     },
@@ -218,6 +229,7 @@ export function registerTaskTools(server: McpServer): void {
       taskId: z.string().describe('The task ID to generate an execution plan for'),
       role: z.enum(['frontend', 'backend']).optional().describe('Override role for plan generation. Omit to use task label.'),
     },
+    { title: 'Get Execution Plan', readOnlyHint: false, idempotentHint: true, openWorldHint: false },
     async ({ taskId, role }) => {
       const db = getMcpDb();
       const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId) as TaskRow | undefined;
@@ -225,7 +237,7 @@ export function registerTaskTools(server: McpServer): void {
         return { content: [{ type: 'text' as const, text: `Error: Task "${taskId}" not found` }], isError: true };
       }
 
-      const notifyUrl = process.env['NOTIFY_URL'] || 'http://localhost:3457/api/mcp-notify';
+      const notifyUrl = process.env['NOTIFY_URL'] || 'http://127.0.0.1:3457/api/mcp-notify';
       const baseUrl = notifyUrl.replace('/api/mcp-notify', '');
       const roleParam = role ? `?role=${role}` : '';
 
@@ -322,94 +334,107 @@ ${flowGateSection}
       skipFlowGate: z.boolean().optional().describe('Skip the flow-gate completion check. ONLY with explicit user approval; requires skipReason and is logged as [SKIP].'),
       skipReason: z.string().optional().describe('Reason for skipping the flow gate (required when skipFlowGate=true)'),
     },
+    { title: 'Update Task Status', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     async ({ taskId, status, summary, skipFlowGate, skipReason }) => {
       const db = getMcpDb();
 
-      const task = db.prepare('SELECT id, project_id, status, flow_required FROM tasks WHERE id = ?').get(taskId) as { id: string; project_id: string; status: string; flow_required: number | null } | undefined;
-      if (!task) {
-        return { content: [{ type: 'text' as const, text: `Error: Task "${taskId}" not found` }], isError: true };
-      }
+      // Read → validate → write runs inside an IMMEDIATE transaction so a
+      // concurrent process cannot interleave (TOCTOU). Notify HTTP calls stay outside.
+      type TxnResult =
+        | { kind: 'error'; message: string }
+        | { kind: 'ok'; projectId: string; stoppedAgent: boolean };
 
-      // [I2] State transition validation
-      const allowedTransitions: Record<string, string[]> = {
-        'pending': ['in_progress'],
-        'queued': ['in_progress'],
-        'assigned': ['in_progress'],
-        'in_progress': ['completed', 'failed'],
-      };
-      const allowed = allowedTransitions[task.status];
-      if (!allowed || !allowed.includes(status)) {
-        return {
-          content: [{ type: 'text' as const, text: `Error: Invalid state transition "${task.status}" → "${status}". Allowed transitions from "${task.status}": ${allowed ? allowed.join(', ') : 'none (terminal state)'}` }],
-          isError: true,
+      const txn = db.transaction((): TxnResult => {
+        const task = db.prepare('SELECT id, project_id, status, flow_required FROM tasks WHERE id = ?').get(taskId) as { id: string; project_id: string; status: string; flow_required: number | null } | undefined;
+        if (!task) {
+          return { kind: 'error', message: `Error: Task "${taskId}" not found` };
+        }
+
+        // [I2] State transition validation ([A11] failed → in_progress allows retry)
+        const allowedTransitions: Record<string, string[]> = {
+          'pending': ['in_progress'],
+          'queued': ['in_progress'],
+          'assigned': ['in_progress'],
+          'in_progress': ['completed', 'failed'],
+          'failed': ['in_progress'],
         };
-      }
+        const allowed = allowedTransitions[task.status];
+        if (!allowed || !allowed.includes(status)) {
+          return { kind: 'error', message: `Error: Invalid state transition "${task.status}" → "${status}". Allowed transitions from "${task.status}": ${allowed ? allowed.join(', ') : 'none (terminal state)'}` };
+        }
 
-      // ── Flow-Gated Development: exit gate ──
-      // Only 'completed' on flow_required tasks is gated; in_progress/failed pass through.
-      if (status === 'completed' && task.flow_required === 1) {
-        const flowState = getFlowState(db, taskId);
-        const blockers = getCompletionBlockers(flowState);
-        if (blockers.length > 0) {
-          if (skipFlowGate) {
-            if (!skipReason || !skipReason.trim()) {
-              return { content: [{ type: 'text' as const, text: 'Error: skipFlowGate=true 需要 skipReason（使用者同意跳過閘門的原因）。' }], isError: true };
-            }
-            mutateFlowState(db, taskId, (s) => {
-              s.skipped = { reason: skipReason.trim(), at: new Date().toISOString() };
-            });
-            logTaskOutput(db, taskId, task.project_id, `[SKIP] 使用者跳過 Flow-Gated 閘門檢查：${skipReason.trim()}`);
-          } else {
-            const lines = blockers.map(b => `- role=${b.role}: ${b.missing}`).join('\n');
-            return {
-              content: [{
-                type: 'text' as const,
-                text: `Error: 任務尚未通過 Flow-Gated 閘門，不可標記 completed。缺少的步驟：
+        // ── Flow-Gated Development: exit gate ──
+        // Only 'completed' on flow_required tasks is gated; in_progress/failed pass through.
+        if (status === 'completed' && task.flow_required === 1) {
+          const flowState = getFlowState(db, taskId);
+          const blockers = getCompletionBlockers(flowState);
+          if (blockers.length > 0) {
+            if (skipFlowGate) {
+              if (!skipReason || !skipReason.trim()) {
+                return { kind: 'error', message: 'Error: skipFlowGate=true 需要 skipReason（使用者同意跳過閘門的原因）。' };
+              }
+              mutateFlowState(db, taskId, (s) => {
+                s.skipped = { reason: skipReason.trim(), at: new Date().toISOString() };
+              });
+              logTaskOutput(db, taskId, task.project_id, `[SKIP] 使用者跳過 Flow-Gated 閘門檢查：${skipReason.trim()}`);
+            } else {
+              const lines = blockers.map(b => `- role=${b.role}: ${b.missing}`).join('\n');
+              return {
+                kind: 'error',
+                message: `Error: 任務尚未通過 Flow-Gated 閘門，不可標記 completed。缺少的步驟：
 ${lines}
 
 請依序補完（save_task_flow → report_flow_check），閘門 B 通過並跑完測試後再結案。
 若使用者明確同意跳過閘門，改用 skipFlowGate=true + skipReason 重新呼叫。`,
-              }],
-              isError: true,
-            };
+              };
+            }
           }
         }
+
+        const sets = [`status = ?`, `updated_at = datetime('now')`];
+        const values: unknown[] = [status];
+
+        if (summary) {
+          sets.push('result_summary = ?');
+          values.push(summary);
+        }
+
+        values.push(taskId);
+        db.prepare(`UPDATE tasks SET ${sets.join(', ')} WHERE id = ?`).run(...values);
+
+        // [C1] When task completes/fails, also stop THIS task's synthetic MCP agent only
+        let stoppedAgent = false;
+        if (status === 'completed' || status === 'failed') {
+          const agentResult = db.prepare(
+            `UPDATE agents SET status = 'stopped', updated_at = datetime('now') WHERE id = ? AND status = 'running'`
+          ).run(`mcp-${taskId}`);
+          stoppedAgent = agentResult.changes > 0;
+        }
+
+        return { kind: 'ok', projectId: task.project_id, stoppedAgent };
+      });
+
+      const result = txn.immediate();
+      if (result.kind === 'error') {
+        return { content: [{ type: 'text' as const, text: result.message }], isError: true };
       }
 
-      const sets = [`status = ?`, `updated_at = datetime('now')`];
-      const values: unknown[] = [status];
-
-      if (summary) {
-        sets.push('result_summary = ?');
-        values.push(summary);
-      }
-
-      values.push(taskId);
-      db.prepare(`UPDATE tasks SET ${sets.join(', ')} WHERE id = ?`).run(...values);
-
-      // [C1] When task completes/fails, also stop synthetic MCP agents
       let notifyWarning = '';
-      if (status === 'completed' || status === 'failed') {
-        const agentResult = db.prepare(
-          `UPDATE agents SET status = 'stopped', updated_at = datetime('now') WHERE id LIKE 'mcp-%' AND project_id = ? AND status = 'running'`
-        ).run(task.project_id);
-
-        if (agentResult.changes > 0) {
-          // Notify Web UI about agent completion
-          const ok = await notifyWebServer({
-            event: 'agent.completed',
-            data: { projectId: task.project_id, agentId: `mcp-${taskId}`, status: 'stopped' },
-          });
-          if (!ok) {
-            notifyWarning = ' (warning: agent.completed notification to Web UI failed)';
-          }
+      if (result.stoppedAgent) {
+        // Notify Web UI about agent completion
+        const ok = await notifyWebServer({
+          event: 'agent.completed',
+          data: { projectId: result.projectId, agentId: `mcp-${taskId}`, status: 'stopped' },
+        });
+        if (!ok) {
+          notifyWarning = ' (warning: agent.completed notification to Web UI failed)';
         }
       }
 
       // Notify Web Server about task status change
       const taskNotifyOk = await notifyWebServer({
         event: 'task.statusChange',
-        data: { taskId, projectId: task.project_id, status, summary: summary || null },
+        data: { taskId, projectId: result.projectId, status, newStatus: status, summary: summary || null },
       });
       if (!taskNotifyOk) {
         notifyWarning += ' (warning: task.statusChange notification to Web UI failed)';
@@ -424,14 +449,13 @@ ${lines}
     'list_asana_projects',
     '列出 Asana workspace 的所有專案。用於找到 project GID 來綁定本地專案。',
     {},
+    { title: 'List Asana Projects', readOnlyHint: true, openWorldHint: true },
     async () => {
       const db = getMcpDb();
-      const ASANA_API_BASE = 'https://app.asana.com/api/1.0';
 
       try {
         // Get Asana PAT
-        const patRow = db.prepare("SELECT value FROM global_config WHERE key = 'asana.pat'").get() as { value: string } | undefined;
-        const asanaPat = patRow?.value || process.env['ASANA_PAT'];
+        const asanaPat = getAsanaPat(db);
         if (!asanaPat) {
           return { content: [{ type: 'text' as const, text: 'Error: Asana PAT not configured. Use set_global_config to set asana.pat.' }], isError: true };
         }
@@ -439,6 +463,7 @@ ${lines}
         // Get current user's workspaces
         const userRes = await fetch(`${ASANA_API_BASE}/users/me`, {
           headers: { 'Authorization': `Bearer ${asanaPat}`, 'Accept': 'application/json' },
+          signal: AbortSignal.timeout(ASANA_FETCH_TIMEOUT_MS),
         });
         if (!userRes.ok) {
           return { content: [{ type: 'text' as const, text: `Asana API error: ${userRes.status} ${await userRes.text()}` }], isError: true };
@@ -455,6 +480,7 @@ ${lines}
         for (const ws of workspaces) {
           const res = await fetch(`${ASANA_API_BASE}/projects?workspace=${ws.gid}&limit=100&opt_fields=name,archived`, {
             headers: { 'Authorization': `Bearer ${asanaPat}`, 'Accept': 'application/json' },
+            signal: AbortSignal.timeout(ASANA_FETCH_TIMEOUT_MS),
           });
           if (!res.ok) continue;
           const data = await res.json() as { data?: Array<{ gid: string; name: string; archived: boolean }> };
@@ -483,9 +509,9 @@ ${lines}
       taskId: z.string().optional().describe('Omni task UUID — 會自動從 DB 查 sourceRef (Asana GID)'),
       taskGid: z.string().optional().describe('Asana 任務 GID（直接傳，跳過 DB 查詢）'),
     },
+    { title: 'Get Asana Task Comments', readOnlyHint: true, openWorldHint: true },
     async ({ taskId, taskGid }) => {
       const db = getMcpDb();
-      const ASANA_API_BASE = 'https://app.asana.com/api/1.0';
 
       // Resolve GID
       let resolvedGid = taskGid;
@@ -500,14 +526,14 @@ ${lines}
       }
 
       try {
-        const patRow = db.prepare("SELECT value FROM global_config WHERE key = 'asana.pat'").get() as { value: string } | undefined;
-        const asanaPat = patRow?.value || process.env['ASANA_PAT'];
+        const asanaPat = getAsanaPat(db);
         if (!asanaPat) {
           return { content: [{ type: 'text' as const, text: 'Error: Asana PAT not configured. Use set_global_config to set asana.pat.' }], isError: true };
         }
 
         const res = await fetch(`${ASANA_API_BASE}/tasks/${resolvedGid}/stories?opt_fields=type,text,created_by.gid,created_by.name,created_by.email,created_at`, {
           headers: { 'Authorization': `Bearer ${asanaPat}`, 'Accept': 'application/json' },
+          signal: AbortSignal.timeout(ASANA_FETCH_TIMEOUT_MS),
         });
         if (!res.ok) {
           return { content: [{ type: 'text' as const, text: `Asana API error: ${res.status} ${await res.text()}` }], isError: true };
@@ -540,6 +566,9 @@ ${lines}
   // ── sync_asana_tasks ──────────────────────────────────────
   // Track last sync per project (in-memory, resets on MCP server restart)
   const lastSyncAt = new Map<string, string>();
+  // In-process cooldown for the post-sync spec change check (per project)
+  const lastSpecCheckAt = new Map<string, number>();
+  const SPEC_CHECK_COOLDOWN_MS = 10 * 60 * 1000;
 
   server.tool(
     'sync_asana_tasks',
@@ -548,9 +577,9 @@ ${lines}
       projectId: z.string().describe('The project ID'),
       force: z.boolean().optional().describe('Force sync even if recently synced (default: false)'),
     },
+    { title: 'Sync Asana Tasks', readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     async ({ projectId, force }) => {
       const db = getMcpDb();
-      const ASANA_API_BASE = 'https://app.asana.com/api/1.0';
 
       try {
         // Check last sync time
@@ -570,13 +599,13 @@ ${lines}
         if (!project.asana_project_gid) return { content: [{ type: 'text' as const, text: `Error: Project "${projectId}" has no Asana project GID. Set it in project settings.` }], isError: true };
 
         // Get Asana PAT from global_config or env
-        const patRow = db.prepare("SELECT value FROM global_config WHERE key = 'asana.pat'").get() as { value: string } | undefined;
-        const asanaPat = patRow?.value || process.env['ASANA_PAT'];
+        const asanaPat = getAsanaPat(db);
         if (!asanaPat) return { content: [{ type: 'text' as const, text: 'Error: Asana PAT not configured. Set it in global settings or ASANA_PAT env var.' }], isError: true };
 
         // Get current user GID
         const userRes = await fetch(`${ASANA_API_BASE}/users/me`, {
           headers: { 'Authorization': `Bearer ${asanaPat}`, 'Accept': 'application/json' },
+          signal: AbortSignal.timeout(ASANA_FETCH_TIMEOUT_MS),
         });
         if (!userRes.ok) return { content: [{ type: 'text' as const, text: `Asana API error: ${userRes.status} ${await userRes.text()}` }], isError: true };
         const userData = await userRes.json() as { data?: { gid?: string } };
@@ -586,12 +615,13 @@ ${lines}
         // memberships.section.name → 分區(Section)；memberships.project.gid 用來挑出本專案對應的 membership
         // tags.name → 標籤；custom_fields.* → 自訂欄位（用 display_value 落地最穩，enum 另取 enum_value.name 備援）
         const optFields = 'name,notes,due_on,completed,permalink_url,memberships.section.name,memberships.project.gid,tags.name,assignee.name,assignee.gid,custom_fields.name,custom_fields.display_value,custom_fields.enum_value.name,parent.gid,parent.name,parent.notes';
-        let allTasks: Array<Record<string, unknown>> = [];
+        const allTasks: Array<Record<string, unknown>> = [];
         let nextUrl: string | null = `${ASANA_API_BASE}/tasks?project=${project.asana_project_gid}&limit=100&completed_since=now&opt_fields=${optFields}`;
 
         while (nextUrl) {
           const res = await fetch(nextUrl, {
             headers: { 'Authorization': `Bearer ${asanaPat}`, 'Accept': 'application/json' },
+            signal: AbortSignal.timeout(ASANA_FETCH_TIMEOUT_MS),
           });
           if (!res.ok) return { content: [{ type: 'text' as const, text: `Asana API error fetching tasks: ${res.status}` }], isError: true };
           const data = await res.json() as { data?: Record<string, unknown>[]; next_page?: { uri?: string } };
@@ -652,48 +682,50 @@ ${lines}
           return 'other';
         };
 
-        // Upsert: create new tasks, update existing if changed
-        for (const asanaTask of myTasks) {
-          const gid = String(asanaTask['gid'] || '');
-          const name = String(asanaTask['name'] || '');
-          const notes = String(asanaTask['notes'] || '');
-          const description = notes.length > 2000 ? notes.substring(0, 2000) + '...' : notes;
-          const parentRaw = asanaTask['parent'] as { name?: string } | null | undefined;
-          const parentName = parentRaw?.name || null;
+        // Upsert: create new tasks, update existing if changed.
+        // Runs in a single transaction — no half-synced state on failure, and much faster.
+        // Label is decided only at INSERT time; updates never overwrite it (preserves manual corrections).
+        db.transaction(() => {
+          for (const asanaTask of myTasks) {
+            const gid = String(asanaTask['gid'] || '');
+            const name = String(asanaTask['name'] || '');
+            const notes = String(asanaTask['notes'] || '');
+            const description = notes.length > 2000 ? notes.substring(0, 2000) + '...' : notes;
+            const parentRaw = asanaTask['parent'] as { name?: string } | null | undefined;
+            const parentName = parentRaw?.name || null;
 
-          // Asana 分類維度
-          const section = extractSection(asanaTask);
-          const tagsJson = JSON.stringify(extractTags(asanaTask));
-          const customFieldsJson = JSON.stringify(extractCustomFields(asanaTask));
-          const assigneeRaw = asanaTask['assignee'] as { name?: string; gid?: string } | null | undefined;
-          const assigneeName = assigneeRaw?.name || null;
-          const assigneeGid = assigneeRaw?.gid || null;
+            // Asana 分類維度
+            const section = extractSection(asanaTask);
+            const tagsJson = JSON.stringify(extractTags(asanaTask));
+            const customFieldsJson = JSON.stringify(extractCustomFields(asanaTask));
+            const assigneeRaw = asanaTask['assignee'] as { name?: string; gid?: string } | null | undefined;
+            const assigneeName = assigneeRaw?.name || null;
+            const assigneeGid = assigneeRaw?.gid || null;
 
-          const existing = existingByGid.get(gid);
+            const existing = existingByGid.get(gid);
 
-          if (existing) {
-            const titleChanged = existing.title !== name;
-            const descChanged = (existing.description || '') !== description;
-            const parentChanged = (existing.parent_name || '') !== (parentName || '');
-            const newLabel = detectLabel(name);
-            const labelChanged = newLabel !== existing.label;
-            const sectionChanged = (existing.section || null) !== (section || null);
-            const tagsChanged = (existing.tags || '[]') !== tagsJson;
-            const cfChanged = (existing.custom_fields || '{}') !== customFieldsJson;
+            if (existing) {
+              const titleChanged = existing.title !== name;
+              const descChanged = (existing.description || '') !== description;
+              const parentChanged = (existing.parent_name || '') !== (parentName || '');
+              const sectionChanged = (existing.section || null) !== (section || null);
+              const tagsChanged = (existing.tags || '[]') !== tagsJson;
+              const cfChanged = (existing.custom_fields || '{}') !== customFieldsJson;
 
-            if (titleChanged || descChanged || parentChanged || labelChanged || sectionChanged || tagsChanged || cfChanged) {
-              db.prepare("UPDATE tasks SET title = ?, description = ?, parent_name = ?, label = ?, section = ?, tags = ?, custom_fields = ?, assignee = ?, assignee_gid = ?, updated_at = datetime('now') WHERE id = ?")
-                .run(name, description || null, parentName, newLabel, section, tagsJson, customFieldsJson, assigneeName, assigneeGid, existing.id);
-              updatedCount++;
+              if (titleChanged || descChanged || parentChanged || sectionChanged || tagsChanged || cfChanged) {
+                db.prepare("UPDATE tasks SET title = ?, description = ?, parent_name = ?, section = ?, tags = ?, custom_fields = ?, assignee = ?, assignee_gid = ?, updated_at = datetime('now') WHERE id = ?")
+                  .run(name, description || null, parentName, section, tagsJson, customFieldsJson, assigneeName, assigneeGid, existing.id);
+                updatedCount++;
+              }
+            } else {
+              const taskId = crypto.randomUUID();
+              db.prepare(`INSERT INTO tasks (id, project_id, title, description, label, status, priority, task_type, source, source_ref, parent_name, section, tags, custom_fields, assignee, assignee_gid, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, 'asana', ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`)
+                .run(taskId, projectId, name, description || null, detectLabel(name), detectTaskType(name, notes), gid, parentName, section, tagsJson, customFieldsJson, assigneeName, assigneeGid);
+              newCount++;
             }
-          } else {
-            const taskId = crypto.randomUUID();
-            db.prepare(`INSERT INTO tasks (id, project_id, title, description, label, status, priority, task_type, source, source_ref, parent_name, section, tags, custom_fields, assignee, assignee_gid, created_at, updated_at)
-              VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, 'asana', ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`)
-              .run(taskId, projectId, name, description || null, detectLabel(name), detectTaskType(name, notes), gid, parentName, section, tagsJson, customFieldsJson, assigneeName, assigneeGid);
-            newCount++;
           }
-        }
+        })();
 
         const syncTime = new Date().toISOString();
         lastSyncAt.set(projectId, syncTime);
@@ -701,7 +733,51 @@ ${lines}
         // Notify Web Server if available (best-effort, non-blocking)
         notifyWebServer({ event: 'asana.syncResult', data: { projectId, newTasks: newCount, updatedTasks: updatedCount, removedTasks: 0, lastSyncAt: syncTime } }).catch(() => {});
 
-        return { content: [{ type: 'text' as const, text: `Asana sync completed: +${newCount} new, ~${updatedCount} updated. Total fetched: ${myTasks.length}. Last sync: ${syncTime}` }] };
+        // ── Auto spec change check (best-effort — never fails the sync) ──
+        // Only in_progress tasks that have recorded spec versions; zero cost
+        // (no SVN touched) when there are none. Per-project 10-min cooldown.
+        let specChangeCheck: Record<string, unknown>;
+        const specTargets = db.prepare(`
+          SELECT t.id, t.project_id, t.title FROM tasks t
+          WHERE t.project_id = ? AND t.status = 'in_progress'
+            AND EXISTS (SELECT 1 FROM task_spec_versions v WHERE v.task_id = t.id)
+        `).all(projectId) as SpecChangeTarget[];
+
+        if (specTargets.length === 0) {
+          specChangeCheck = { checked: 0, changed: 0, skipped: 'no_tasks_with_spec_versions' };
+        } else {
+          const prevCheck = lastSpecCheckAt.get(projectId);
+          if (prevCheck !== undefined && Date.now() - prevCheck < SPEC_CHECK_COOLDOWN_MS) {
+            specChangeCheck = { checked: 0, changed: 0, skipped: 'cooldown' };
+          } else {
+            try {
+              const check = await runSpecChangeCheck(db, specTargets);
+              lastSpecCheckAt.set(projectId, Date.now());
+              specChangeCheck = { checked: check.tasksChecked, changed: check.changedTotal };
+              if (check.changedTotal > 0) {
+                specChangeCheck['warning'] = `發現 ${check.changedTotal} 個規格檔案有新版，已建立 spec gap（category=spec_changed）。請重新 fetch_svn_specs 並確認實作影響。`;
+              }
+            } catch (specErr: unknown) {
+              // best-effort: SVN failure must not fail the sync
+              const specMsg = specErr instanceof Error ? specErr.message : String(specErr);
+              specChangeCheck = { checked: 0, changed: 0, error: `規格異動檢查失敗（不影響同步結果）：${specMsg}` };
+            }
+          }
+        }
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              message: `Asana sync completed: +${newCount} new, ~${updatedCount} updated. Total fetched: ${myTasks.length}. Last sync: ${syncTime}`,
+              newTasks: newCount,
+              updatedTasks: updatedCount,
+              totalFetched: myTasks.length,
+              lastSyncAt: syncTime,
+              specChangeCheck,
+            }, null, 2),
+          }],
+        };
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         return { content: [{ type: 'text' as const, text: `Asana sync error: ${msg}` }], isError: true };

@@ -10,7 +10,7 @@
       "cwd": ".",
       "env": {
         "DB_PATH": "./data/omni.db",
-        "NOTIFY_URL": "http://localhost:3457/api/mcp-notify"
+        "NOTIFY_URL": "http://127.0.0.1:3457/api/mcp-notify"
       }
     }
   }

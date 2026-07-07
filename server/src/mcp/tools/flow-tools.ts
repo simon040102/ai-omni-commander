@@ -57,6 +57,7 @@ export function registerFlowTools(server: McpServer): void {
       filename: z.string().optional().describe('Optional source document filename for display (e.g. SA spec filename)'),
       resetFailures: z.boolean().optional().describe('Reset the gate-B failure counter. ONLY with explicit user approval after [NEEDS_HUMAN]; the reset is logged.'),
     },
+    { title: 'Save Task Flow', readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     async ({ taskId, flowType, mermaidContent, role, filename, resetFailures }) => {
       const db = getMcpDb();
       const task = getTaskLite(db, taskId);
@@ -209,6 +210,7 @@ ${specContent}
       diffs: z.string().optional().describe('Difference list (each item marked 必修/警告). Required in spirit when passed=false.'),
       role: z.enum(['frontend', 'backend']).optional().describe('Role slot for dual-role tasks. Omit for single-role tasks.'),
     },
+    { title: 'Report Flow Check', readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     async ({ taskId, gate, passed, diffs, role }) => {
       const db = getMcpDb();
       const task = getTaskLite(db, taskId);
@@ -323,6 +325,7 @@ ${specContent}
       taskId: z.string().describe('The task ID'),
       role: z.enum(['frontend', 'backend']).optional().describe('Role slot to read plan/code from. Omit for single-role tasks.'),
     },
+    { title: 'Get Task Flows', readOnlyHint: true, openWorldHint: false },
     async ({ taskId, role }) => {
       const db = getMcpDb();
       const task = getTaskLite(db, taskId);

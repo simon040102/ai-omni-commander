@@ -273,9 +273,15 @@ export class AgentProcess extends EventEmitter {
 
     // Wait for consumeStream to finish (abort triggers AbortError in the for-await loop)
     await new Promise<void>((resolve) => {
-      const timeout = setTimeout(resolve, 3000);
+      let settled = false;
+      const timeout = setTimeout(() => {
+        settled = true;
+        resolve();
+      }, 3000);
       const check = () => {
+        if (settled) return;
         if (!this._query) {
+          settled = true;
           clearTimeout(timeout);
           resolve();
         } else {

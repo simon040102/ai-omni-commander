@@ -6,6 +6,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { getMcpDb } from '../db.js';
 import { notifyWebServer } from '../notify.js';
+import { parseJson, maskProjectConfig } from '../helpers.js';
 
 function genId(): string {
   return crypto.randomUUID();
@@ -30,6 +31,7 @@ export function registerProjectTools(server: McpServer): void {
     'list_projects',
     'List all projects',
     {},
+    { title: 'List Projects', readOnlyHint: true, openWorldHint: false },
     async () => {
       const db = getMcpDb();
       const projects = db.prepare('SELECT * FROM projects ORDER BY created_at DESC').all() as ProjectRow[];
@@ -56,13 +58,28 @@ export function registerProjectTools(server: McpServer): void {
   // ── get_project ───────────────────────────────────────────
   server.tool(
     'get_project',
-    'Get detailed information about a project including task counts',
+    'Get detailed information about a project including task counts. Credentials inside configJson (DB passwords / connection strings) are masked.',
     { projectId: z.string().describe('The project ID') },
+    { title: 'Get Project', readOnlyHint: true, openWorldHint: false },
     async ({ projectId }) => {
       const db = getMcpDb();
       const project = db.prepare('SELECT * FROM projects WHERE id = ?').get(projectId) as ProjectRow | undefined;
       if (!project) {
         return { content: [{ type: 'text' as const, text: `Error: Project "${projectId}" not found` }], isError: true };
+      }
+
+      let configJson: unknown = null;
+      if (project.config_json) {
+        try {
+          configJson = JSON.parse(project.config_json);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return {
+            content: [{ type: 'text' as const, text: `Error: Project "${projectId}" has a corrupted config_json (invalid JSON): ${msg}. Fix it via update_project(configJson=...).` }],
+            isError: true,
+          };
+        }
+        configJson = maskProjectConfig(configJson);
       }
 
       // Task stats
@@ -82,7 +99,7 @@ export function registerProjectTools(server: McpServer): void {
             workingDir: project.working_dir,
             frontendPath: project.frontend_path,
             backendPath: project.backend_path,
-            configJson: project.config_json ? JSON.parse(project.config_json) : null,
+            configJson,
             taskStats: Object.fromEntries(taskStats.map(s => [s.status, s.count])),
             documentCount: docCount,
             createdAt: project.created_at,
@@ -103,6 +120,7 @@ export function registerProjectTools(server: McpServer): void {
       backendPath: z.string().optional().describe('Optional: absolute path to backend workspace'),
       asanaProjectGid: z.string().optional().describe('Optional: Asana project GID for task sync'),
     },
+    { title: 'Create Project', readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     async ({ name, workingDir, frontendPath, backendPath, asanaProjectGid }) => {
       const db = getMcpDb();
       const id = genId();
@@ -140,6 +158,7 @@ export function registerProjectTools(server: McpServer): void {
       dbConnectionString: z.string().optional().describe('Database connection string'),
       configJson: z.string().optional().describe('Project config as JSON string'),
     },
+    { title: 'Update Project', readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     async ({ projectId, name, frontendPath, backendPath, workingDir, asanaProjectGid, dbConnectionString, configJson }) => {
       const db = getMcpDb();
       const project = db.prepare('SELECT * FROM projects WHERE id = ?').get(projectId) as ProjectRow | undefined;
@@ -199,6 +218,7 @@ export function registerProjectTools(server: McpServer): void {
       label: z.enum(['frontend', 'backend']).describe('Which extra prompt to set'),
       prompt: z.string().describe('The extra prompt content (set empty string to clear)'),
     },
+    { title: 'Set Extra Prompt', readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     async ({ projectId, label, prompt }) => {
       const db = getMcpDb();
       const project = db.prepare('SELECT id, config_json FROM projects WHERE id = ?').get(projectId) as { id: string; config_json: string | null } | undefined;
@@ -206,7 +226,8 @@ export function registerProjectTools(server: McpServer): void {
         return { content: [{ type: 'text' as const, text: `Error: Project "${projectId}" not found` }], isError: true };
       }
 
-      const config = project.config_json ? JSON.parse(project.config_json) : {};
+      // Corrupted config_json → start from {} so the user can repair it via this tool
+      const config = parseJson<Record<string, unknown>>(project.config_json, {});
       const key = label === 'frontend' ? 'frontendExtraPrompt' : 'backendExtraPrompt';
       config[key] = prompt || undefined;
 
@@ -234,6 +255,7 @@ export function registerProjectTools(server: McpServer): void {
       key: z.enum(['svn.username', 'svn.password', 'asana.pat']).describe('設定項'),
       value: z.string().describe('設定值'),
     },
+    { title: 'Set Global Config', readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     async ({ key, value }) => {
       const db = getMcpDb();
       db.prepare('INSERT OR REPLACE INTO global_config (key, value) VALUES (?, ?)').run(key, value);
@@ -266,6 +288,7 @@ export function registerProjectTools(server: McpServer): void {
       prompt: z.string().optional().describe('Custom execution prompt'),
       preferredModel: z.string().optional().describe('Preferred Claude model'),
     },
+    { title: 'Create Task', readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     async ({ projectId, title, description, label, taskType, priority, prompt, preferredModel }) => {
       const db = getMcpDb();
 
@@ -281,9 +304,35 @@ export function registerProjectTools(server: McpServer): void {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(id, projectId, title, description || null, label, taskType || 'other', priority || 0, prompt || null, preferredModel || null);
 
+      const now = new Date().toISOString();
       await notifyWebServer({
         event: 'task.created',
-        data: { taskId: id, projectId, title, label },
+        data: {
+          taskId: id,
+          projectId,
+          title,
+          label,
+          task: {
+            id,
+            projectId,
+            title,
+            description: description || null,
+            label,
+            status: 'pending',
+            assignedAgentId: null,
+            priority: priority || 0,
+            retryCount: 0,
+            taskType: taskType || 'other',
+            source: 'manual',
+            sourceRef: null,
+            branchName: null,
+            specUrl: null,
+            preferredModel: preferredModel || null,
+            parentName: null,
+            createdAt: now,
+            updatedAt: now,
+          },
+        },
       });
 
       return {

@@ -15,6 +15,7 @@ vi.mock('../notify.js', () => ({
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { registerProgressTools } from '../tools/progress-tools.js';
 import { notifyWebServer } from '../notify.js';
+import { callTool } from './test-helpers.js';
 
 function freshDb(): Database.Database {
   const db = new Database(':memory:');
@@ -31,13 +32,6 @@ function seedTask(db: Database.Database) {
   db.prepare(`INSERT INTO tasks (id, project_id, title, label, task_type) VALUES (?, ?, ?, ?, ?)`).run(
     'task-1', 'proj-1', 'Test Task', 'backend', 'feature',
   );
-}
-
-async function callTool(server: McpServer, name: string, args: Record<string, unknown>) {
-  const tools = (server as any)._registeredTools as Record<string, any>;
-  const tool = tools[name];
-  if (!tool) throw new Error(`Tool "${name}" not found`);
-  return tool.handler(args, {} as any);
 }
 
 describe('progress-tools', () => {

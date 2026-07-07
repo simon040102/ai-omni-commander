@@ -5,6 +5,8 @@ import { createChildLogger } from '../utils/logger.js';
 const logger = createChildLogger('AsanaMcpClient');
 
 const ASANA_API_BASE = 'https://app.asana.com/api/1.0';
+const FETCH_TIMEOUT_MS = 15_000;
+const MAX_RATE_LIMIT_RETRIES = 3;
 
 /**
  * Client for communicating with the Asana API.
@@ -23,6 +25,37 @@ export class AsanaMcpClient {
     return !!this.config.asanaPat;
   }
 
+  /**
+   * Authenticated fetch against the Asana API with timeout,
+   * 429 Retry-After backoff (max 3 retries), and a clear 401 error.
+   */
+  private async apiFetch(url: string): Promise<Response> {
+    for (let attempt = 0; ; attempt++) {
+      const response = await fetch(url, {
+        headers: {
+          'Authorization': `Bearer ${this.config.asanaPat}`,
+          'Accept': 'application/json',
+        },
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      });
+
+      if (response.status === 401) {
+        throw new Error('Asana PAT 無效或過期，請至全域設定更新');
+      }
+
+      if (response.status === 429 && attempt < MAX_RATE_LIMIT_RETRIES) {
+        const retryAfterRaw = response.headers.get('Retry-After');
+        const retryAfterSec = Number.parseInt(retryAfterRaw || '1', 10);
+        const waitMs = Math.min((Number.isFinite(retryAfterSec) && retryAfterSec > 0 ? retryAfterSec : 1) * 1000, 60_000);
+        logger.warn({ url, attempt: attempt + 1, waitMs }, 'Asana rate limited (429) — backing off');
+        await new Promise(resolve => setTimeout(resolve, waitMs));
+        continue;
+      }
+
+      return response;
+    }
+  }
+
   /** Check if client is connected to Asana API */
   isConnected(): boolean {
     return this._connected;
@@ -38,12 +71,7 @@ export class AsanaMcpClient {
 
     try {
       // Test by fetching user info
-      const response = await fetch(`${ASANA_API_BASE}/users/me`, {
-        headers: {
-          'Authorization': `Bearer ${this.config.asanaPat}`,
-          'Accept': 'application/json',
-        },
-      });
+      const response = await this.apiFetch(`${ASANA_API_BASE}/users/me`);
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
@@ -101,12 +129,7 @@ export class AsanaMcpClient {
 
     try {
       // First get user info to get workspace
-      const userResponse = await fetch(`${ASANA_API_BASE}/users/me`, {
-        headers: {
-          'Authorization': `Bearer ${this.config.asanaPat}`,
-          'Accept': 'application/json',
-        },
-      });
+      const userResponse = await this.apiFetch(`${ASANA_API_BASE}/users/me`);
 
       if (!userResponse.ok) {
         throw new Error(`Failed to get user info: ${userResponse.status}`);
@@ -133,12 +156,7 @@ export class AsanaMcpClient {
 
       const tasksUrl = `${ASANA_API_BASE}/tasks?assignee=${userGid}&workspace=${workspaceGid}&limit=${limit}${completedSince}&opt_fields=name,notes,due_on,completed,permalink_url,projects.name,projects.gid,tags.name,parent.gid,parent.name,parent.notes`;
 
-      const tasksResponse = await fetch(tasksUrl, {
-        headers: {
-          'Authorization': `Bearer ${this.config.asanaPat}`,
-          'Accept': 'application/json',
-        },
-      });
+      const tasksResponse = await this.apiFetch(tasksUrl);
 
       if (!tasksResponse.ok) {
         const errorText = await tasksResponse.text();
@@ -167,12 +185,7 @@ export class AsanaMcpClient {
 
     try {
       // Get workspace GID
-      const userResponse = await fetch(`${ASANA_API_BASE}/users/me`, {
-        headers: {
-          'Authorization': `Bearer ${this.config.asanaPat}`,
-          'Accept': 'application/json',
-        },
-      });
+      const userResponse = await this.apiFetch(`${ASANA_API_BASE}/users/me`);
 
       if (!userResponse.ok) {
         throw new Error(`Failed to get user info: ${userResponse.status}`);
@@ -190,12 +203,7 @@ export class AsanaMcpClient {
       for (const ws of workspaces) {
         let nextUrl: string | null = `${ASANA_API_BASE}/projects?workspace=${ws.gid}&limit=100&opt_fields=name,archived`;
         while (nextUrl) {
-          const response: Response = await fetch(nextUrl, {
-            headers: {
-              'Authorization': `Bearer ${this.config.asanaPat}`,
-              'Accept': 'application/json',
-            },
-          });
+          const response: Response = await this.apiFetch(nextUrl);
 
           if (!response.ok) {
             const errorText = await response.text();
@@ -210,7 +218,8 @@ export class AsanaMcpClient {
               name: String(p['name'] || ''),
             }));
           allProjects.push(...page);
-          nextUrl = data.next_page?.uri ? `${ASANA_API_BASE.replace('/api/1.0', '')}${data.next_page.uri}` : null;
+          // next_page.uri is already a full URL — use it as-is
+          nextUrl = data.next_page?.uri ?? null;
         }
       }
 
@@ -237,12 +246,7 @@ export class AsanaMcpClient {
 
       const url = `${ASANA_API_BASE}/tasks?project=${projectGid}&limit=${limit}${completedSince}&opt_fields=name,notes,due_on,completed,permalink_url,projects.name,projects.gid,tags.name,parent.gid,parent.name,parent.notes`;
 
-      const response = await fetch(url, {
-        headers: {
-          'Authorization': `Bearer ${this.config.asanaPat}`,
-          'Accept': 'application/json',
-        },
-      });
+      const response = await this.apiFetch(url);
 
       if (!response.ok) {
         const errorText = await response.text();
@@ -271,12 +275,7 @@ export class AsanaMcpClient {
 
     try {
       // Get current user GID for client-side assignee filtering
-      const userResponse = await fetch(`${ASANA_API_BASE}/users/me`, {
-        headers: {
-          'Authorization': `Bearer ${this.config.asanaPat}`,
-          'Accept': 'application/json',
-        },
-      });
+      const userResponse = await this.apiFetch(`${ASANA_API_BASE}/users/me`);
 
       if (!userResponse.ok) {
         throw new Error(`Failed to get user info: ${userResponse.status}`);
@@ -295,12 +294,7 @@ export class AsanaMcpClient {
       let nextPageUrl: string | null = `${ASANA_API_BASE}/tasks?project=${projectGid}&limit=${limit}${completedSince}&opt_fields=${optFields}`;
 
       while (nextPageUrl) {
-        const response: Response = await fetch(nextPageUrl, {
-          headers: {
-            'Authorization': `Bearer ${this.config.asanaPat}`,
-            'Accept': 'application/json',
-          },
-        });
+        const response: Response = await this.apiFetch(nextPageUrl);
 
         if (!response.ok) {
           const errorText = await response.text();
@@ -336,12 +330,7 @@ export class AsanaMcpClient {
 
     try {
       const url = `${ASANA_API_BASE}/tasks/${taskGid}/stories?opt_fields=type,text,created_by.name,created_at`;
-      const response = await fetch(url, {
-        headers: {
-          'Authorization': `Bearer ${this.config.asanaPat}`,
-          'Accept': 'application/json',
-        },
-      });
+      const response = await this.apiFetch(url);
 
       if (!response.ok) {
         const errorText = await response.text();

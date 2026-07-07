@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import path from 'node:path';
 import fs from 'node:fs';
 import iconv from 'iconv-lite';
@@ -6,12 +6,112 @@ import mammoth from 'mammoth';
 import type { SvnConfig, SvnCredentials, DocType } from '@omni/shared';
 import type { DocumentParser } from '../documents/DocumentParser.js';
 import { bindDocumentToTask, getDocumentsForTask } from '../db/queries/taskDocuments.js';
+import { recordTaskSpecVersion } from '../db/queries/taskSpecVersions.js';
 import { getSvnCredentials } from '../db/queries/globalConfig.js';
 import { createChildLogger } from '../utils/logger.js';
 
 const logger = createChildLogger('SvnSpecService');
 
 const SPEC_EXTENSIONS = new Set(['.docx', '.doc', '.pdf', '.md', '.txt']);
+
+export interface RunCommandResult {
+  status: number | null;
+  stdout: Buffer;
+  stderr: Buffer;
+  error?: Error;
+}
+
+/**
+ * Async replacement for spawnSync — runs a command without blocking the event loop.
+ * Supports timeout, maxBuffer, and writing secrets to stdin (so they never appear on argv).
+ */
+export function runCommand(
+  cmd: string,
+  args: string[],
+  opts: { timeout: number; maxBuffer: number; stdin?: string },
+): Promise<RunCommandResult> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    let stdoutTotal = 0;
+    let runError: Error | undefined;
+
+    const child = spawn(cmd, args, { windowsHide: true });
+
+    const finish = (status: number | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({
+        status,
+        stdout: Buffer.concat(stdoutChunks),
+        stderr: Buffer.concat(stderrChunks),
+        ...(runError && { error: runError }),
+      });
+    };
+
+    const timer = setTimeout(() => {
+      runError = new Error(`Command timed out after ${opts.timeout}ms: ${cmd}`);
+      child.kill();
+    }, opts.timeout);
+
+    child.stdout?.on('data', (d: Buffer) => {
+      stdoutTotal += d.length;
+      if (stdoutTotal > opts.maxBuffer) {
+        runError = new Error(`maxBuffer exceeded (${opts.maxBuffer} bytes): ${cmd}`);
+        child.kill();
+        return;
+      }
+      stdoutChunks.push(d);
+    });
+    child.stderr?.on('data', (d: Buffer) => stderrChunks.push(d));
+
+    child.on('error', (err) => {
+      runError = err;
+      finish(null);
+    });
+    child.on('close', (code) => finish(code));
+
+    if (child.stdin) {
+      child.stdin.on('error', () => { /* EPIPE if process exits early — ignore */ });
+      if (opts.stdin !== undefined) child.stdin.write(opts.stdin);
+      child.stdin.end();
+    }
+  });
+}
+
+function firstLine(text: string | undefined | null): string {
+  return (text || '').split('\n')[0]!.trim();
+}
+
+/** Build curl auth via stdin config (`--config -`) so credentials never appear on argv. */
+export function buildCurlAuth(username: string, password: string): { args: string[]; stdin?: string } {
+  const args = ['--ntlm', '--silent', '--insecure', '--fail-with-body'];
+  if (username || password) {
+    const escaped = `${username || ''}:${password || ''}`.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    args.push('--config', '-');
+    return { args, stdin: `user = "${escaped}"\n` };
+  }
+  return { args };
+}
+
+/** Build svn auth args with `--password-from-stdin` so the password never appears on argv. */
+export function buildSvnAuth(creds?: SvnCredentials): { args: string[]; stdin?: string } {
+  const { username, password } = creds || getSvnCredentials();
+  const args = [
+    '--non-interactive',
+    '--trust-server-cert',
+    '--trust-server-cert-failures=unknown-ca,cn-mismatch,expired,not-yet-valid,other',
+    '--no-auth-cache',
+  ];
+  if (username) args.push('--username', username);
+  if (password) {
+    args.push('--password-from-stdin');
+    return { args, stdin: password };
+  }
+  return { args };
+}
 
 /**
  * Service for fetching specification documents from SVN repositories.
@@ -64,13 +164,14 @@ export class SvnSpecService {
     // Collect matched files from all SVN roots, tracking which root each came from
     const allMatchedFiles: Array<{ fileUrl: string; isFrontendRoot: boolean }> = [];
     const frontendRoot = svnConfig.frontendSpecPath ? normalizeSvnUrl(svnConfig.frontendSpecPath) : null;
+    const errors: string[] = [];
 
     for (const svnRoot of svnRoots) {
       logger.info({ projectId, taskId, parentName, functionCode, rootCode, svnRoot, taskLabel }, 'Searching SVN root for specs');
 
       try {
         // Step 1: Find the matching top-level folder
-        const topItems = this.svnList(svnRoot, svnConfig, false);
+        const topItems = await this.svnList(svnRoot, svnConfig, false);
         const matchedFolder = this.findMatchingFolder(topItems, rootCode);
 
         let searchUrl: string;
@@ -80,7 +181,7 @@ export class SvnSpecService {
           // Has subfolder structure (e.g., "OV.銷項發票管理/")
           searchUrl = `${svnRoot}/${matchedFolder}`;
           logger.info({ matchedFolder, searchUrl }, 'Found matching SVN folder');
-          allFiles = this.svnList(searchUrl, svnConfig, true);
+          allFiles = await this.svnList(searchUrl, svnConfig, true);
         } else {
           // Flat structure — all files in root directory (common for backend specs)
           searchUrl = svnRoot;
@@ -111,10 +212,14 @@ export class SvnSpecService {
         }
       } catch (err) {
         logger.warn({ err, svnRoot }, 'Failed to search SVN root');
+        errors.push(`${svnRoot}: ${firstLine((err as Error).message)}`);
       }
     }
 
     if (allMatchedFiles.length === 0) {
+      if (errors.length > 0) {
+        throw new Error(`SVN 規格搜尋失敗（非「無規格文件」，請檢查 SVN 連線/帳密）: ${errors.join('; ')}`);
+      }
       logger.info({ parentName, svnRoots }, 'No spec files found in any SVN root');
       return [];
     }
@@ -140,7 +245,15 @@ export class SvnSpecService {
         }
       } catch (err) {
         logger.error({ err, fileUrl }, 'Failed to fetch SVN file');
+        errors.push(`${decodeURIComponent(fileUrl.split('/').pop() || fileUrl)}: ${firstLine((err as Error).message)}`);
       }
+    }
+
+    if (docIds.length === 0 && errors.length > 0) {
+      throw new Error(`SVN 規格下載失敗: ${errors.join('; ')}`);
+    }
+    if (errors.length > 0) {
+      logger.warn({ errors }, 'Some SVN spec files failed to download');
     }
 
     return docIds;
@@ -150,27 +263,28 @@ export class SvnSpecService {
    * Preview which SVN spec files would be fetched for a given function code.
    * Does NOT download anything — just lists matching files.
    */
-  previewSpecsForCode(
+  async previewSpecsForCode(
     rawFunctionCode: string,
     svnConfig: SvnConfig,
     taskLabel: string,
-  ): Array<{ filename: string; svnUrl: string; svnRoot: 'frontend' | 'backend' }> {
+  ): Promise<{ files: Array<{ filename: string; svnUrl: string; svnRoot: 'frontend' | 'backend' }>; errors: string[] }> {
     // Extract clean function code from full parent name (e.g., "OV02.需檢核..." → "OV02")
     const functionCode = extractFunctionCode(rawFunctionCode) || rawFunctionCode;
     const rootCode = extractRootCode(functionCode);
-    if (!rootCode) return [];
+    if (!rootCode) return { files: [], errors: [] };
 
     logger.info({ rawFunctionCode, functionCode, rootCode }, 'Preview: extracted codes');
 
     const svnRoots = this.resolveSvnRoots(svnConfig, taskLabel);
     const results: Array<{ filename: string; svnUrl: string; svnRoot: 'frontend' | 'backend' }> = [];
+    const errors: string[] = [];
 
     for (const svnRoot of svnRoots) {
       const isFrontend = svnConfig.frontendSpecPath && normalizeSvnUrl(svnConfig.frontendSpecPath) === svnRoot;
       const rootType: 'frontend' | 'backend' = isFrontend ? 'frontend' : 'backend';
 
       try {
-        const topItems = this.svnList(svnRoot, svnConfig, false);
+        const topItems = await this.svnList(svnRoot, svnConfig, false);
         const matchedFolder = this.findMatchingFolder(topItems, rootCode);
 
         let searchUrl: string;
@@ -178,7 +292,7 @@ export class SvnSpecService {
 
         if (matchedFolder) {
           searchUrl = `${svnRoot}/${matchedFolder}`;
-          allFiles = this.svnList(searchUrl, svnConfig, true);
+          allFiles = await this.svnList(searchUrl, svnConfig, true);
         } else {
           // Flat structure — search root directly
           searchUrl = svnRoot;
@@ -203,10 +317,11 @@ export class SvnSpecService {
         }
       } catch (err) {
         logger.warn({ err, svnRoot }, 'Preview: failed to search SVN root');
+        errors.push(`${svnRoot}: ${firstLine((err as Error).message)}`);
       }
     }
 
-    return results;
+    return { files: results, errors };
   }
 
   /**
@@ -230,7 +345,7 @@ export class SvnSpecService {
     // Get SVN last modified date
     let svnLastModified: string | null = null;
     try {
-      svnLastModified = this.svnInfoLastModified(fileUrl, svnConfig);
+      svnLastModified = await this.svnInfoLastModified(fileUrl, svnConfig);
     } catch (err) {
       logger.warn({ err, fileUrl }, 'Failed to get SVN info');
     }
@@ -240,6 +355,7 @@ export class SvnSpecService {
       if (fs.existsSync(cached.filePath)) {
         logger.info({ fileUrl, docId: cached.id }, 'Using cached SVN document');
         bindDocumentToTask(taskId, cached.id);
+        if (svnLastModified) recordTaskSpecVersion(taskId, fileUrl, svnLastModified);
         return cached.id;
       }
       // File missing on disk — treat as cache miss, fall through to re-download
@@ -248,7 +364,7 @@ export class SvnSpecService {
 
     // Download the file via svn export
     const localPath = path.join(projectCacheDir, `${Date.now()}-${filename}`);
-    this.svnExport(fileUrl, localPath, svnConfig);
+    await this.svnExport(fileUrl, localPath, svnConfig);
 
     if (!fs.existsSync(localPath)) {
       logger.warn({ fileUrl, localPath }, 'SVN export did not create file');
@@ -261,6 +377,7 @@ export class SvnSpecService {
       const parsedText = await this.extractText(localPath, filename);
       await this.documentParser.updateSvnDocument(cached.id, buffer, svnLastModified || '', parsedText || undefined);
       bindDocumentToTask(taskId, cached.id);
+      if (svnLastModified) recordTaskSpecVersion(taskId, fileUrl, svnLastModified);
       // Clean up temp file
       try { fs.unlinkSync(localPath); } catch { /* ignore */ }
       return cached.id;
@@ -279,6 +396,7 @@ export class SvnSpecService {
     );
 
     bindDocumentToTask(taskId, doc.id);
+    if (svnLastModified) recordTaskSpecVersion(taskId, fileUrl, svnLastModified);
 
     // Clean up temp file
     try { fs.unlinkSync(localPath); } catch { /* ignore */ }
@@ -350,45 +468,47 @@ export class SvnSpecService {
   // SVN command helpers
   // =============================================
 
-  private svnList(url: string, _config: SvnConfig, recursive: boolean): string[] {
+  private async svnList(url: string, _config: SvnConfig, recursive: boolean): Promise<string[]> {
     if (!this.ntlmMode) {
-      const args = ['list', ...(recursive ? ['-R'] : []), url, ...this.buildAuthArgs()];
-      const result = spawnSync(this.svnPath, args, {
-        encoding: 'buffer', timeout: 60000, maxBuffer: 10 * 1024 * 1024,
+      const auth = buildSvnAuth();
+      const args = ['list', ...(recursive ? ['-R'] : []), url, ...auth.args];
+      const result = await runCommand(this.svnPath, args, {
+        timeout: 60000, maxBuffer: 10 * 1024 * 1024, ...(auth.stdin !== undefined && { stdin: auth.stdin }),
       });
       if (!result.error && result.status === 0) {
         return this.decodeSvnOutput(result.stdout).split('\n').map(l => l.trim()).filter(Boolean);
       }
-      const stderr = result.stderr ? this.decodeSvnOutput(result.stderr) : '';
+      const stderr = result.stderr.length > 0 ? this.decodeSvnOutput(result.stderr) : (result.error?.message ?? '');
       if (isNtlmError(stderr)) {
         logger.info({ url }, 'svn NTLM error detected, switching to curl fallback');
         this.ntlmMode = true;
       } else {
         logger.error({ stderr, url }, 'svn list failed');
-        return [];
+        throw new Error(`svn list failed: ${firstLine(stderr) || `exit ${result.status}`}`);
       }
     }
     // curl NTLM fallback
     try {
-      return this.curlList(url, recursive);
+      return await this.curlList(url, recursive);
     } catch (err) {
       logger.error({ err, url }, 'curl list failed');
-      return [];
+      throw new Error(`curl list failed: ${firstLine((err as Error).message)}`);
     }
   }
 
-  private svnInfoLastModified(url: string, _config: SvnConfig): string | null {
+  private async svnInfoLastModified(url: string, _config: SvnConfig): Promise<string | null> {
     if (!this.ntlmMode) {
-      const args = ['info', url, ...this.buildAuthArgs()];
-      const result = spawnSync(this.svnPath, args, {
-        encoding: 'buffer', timeout: 30000, maxBuffer: 1024 * 1024,
+      const auth = buildSvnAuth();
+      const args = ['info', url, ...auth.args];
+      const result = await runCommand(this.svnPath, args, {
+        timeout: 30000, maxBuffer: 1024 * 1024, ...(auth.stdin !== undefined && { stdin: auth.stdin }),
       });
       if (!result.error && result.status === 0) {
         const text = this.decodeSvnOutput(result.stdout);
         const match = text.match(/Last Changed Date:\s*(.+)/i);
         return match ? match[1].trim() : null;
       }
-      const stderr = result.stderr ? this.decodeSvnOutput(result.stderr) : '';
+      const stderr = result.stderr.length > 0 ? this.decodeSvnOutput(result.stderr) : (result.error?.message ?? '');
       if (isNtlmError(stderr)) {
         this.ntlmMode = true;
       } else {
@@ -397,48 +517,48 @@ export class SvnSpecService {
       }
     }
     try {
-      return this.curlInfoLastModified(url);
+      return await this.curlInfoLastModified(url);
     } catch (err) {
       logger.warn({ err, url }, 'curl info failed');
       return null;
     }
   }
 
-  private svnExport(url: string, localPath: string, _config: SvnConfig): void {
+  private async svnExport(url: string, localPath: string, _config: SvnConfig): Promise<void> {
     if (!this.ntlmMode) {
-      const args = ['export', '--force', url, localPath, ...this.buildAuthArgs()];
-      const result = spawnSync(this.svnPath, args, {
-        encoding: 'buffer', timeout: 120000, maxBuffer: 50 * 1024 * 1024,
+      const auth = buildSvnAuth();
+      const args = ['export', '--force', url, localPath, ...auth.args];
+      const result = await runCommand(this.svnPath, args, {
+        timeout: 120000, maxBuffer: 50 * 1024 * 1024, ...(auth.stdin !== undefined && { stdin: auth.stdin }),
       });
       if (!result.error && result.status === 0) return;
-      const stderr = result.stderr ? this.decodeSvnOutput(result.stderr) : '';
+      const stderr = result.stderr.length > 0 ? this.decodeSvnOutput(result.stderr) : (result.error?.message ?? '');
       if (isNtlmError(stderr)) {
         this.ntlmMode = true;
       } else {
-        throw new Error(stderr || `exit ${result.status}`);
+        throw new Error(firstLine(stderr) || `exit ${result.status}`);
       }
     }
-    this.curlExport(url, localPath);
+    await this.curlExport(url, localPath);
   }
 
   // =============================================
   // curl NTLM fallback (for servers that require NTLM/Negotiate auth)
   // =============================================
 
-  private curlAuthArgs(): string[] {
+  private curlAuthArgs(): { args: string[]; stdin?: string } {
     const { username, password } = getSvnCredentials();
-    const args = ['--ntlm', '--silent', '--insecure', '--fail-with-body'];
-    if (username || password) args.push('-u', `${username || ''}:${password || ''}`);
-    return args;
+    return buildCurlAuth(username, password);
   }
 
-  private curlList(url: string, recursive: boolean, prefix = ''): string[] {
+  private async curlList(url: string, recursive: boolean, prefix = ''): Promise<string[]> {
     const listUrl = url.endsWith('/') ? url : url + '/';
-    const result = spawnSync('curl', [...this.curlAuthArgs(), listUrl], {
-      encoding: 'buffer', timeout: 60000, maxBuffer: 10 * 1024 * 1024,
+    const auth = this.curlAuthArgs();
+    const result = await runCommand('curl', [...auth.args, listUrl], {
+      timeout: 60000, maxBuffer: 10 * 1024 * 1024, ...(auth.stdin !== undefined && { stdin: auth.stdin }),
     });
     if (result.error) throw result.error;
-    if (result.status !== 0) throw new Error(result.stderr?.toString('utf-8') ?? `curl exit ${result.status}`);
+    if (result.status !== 0) throw new Error(firstLine(result.stderr.toString('utf-8')) || `curl exit ${result.status}`);
 
     const text = result.stdout.toString('utf-8');
     const items: string[] = [];
@@ -458,7 +578,7 @@ export class SvnSpecService {
       items.push(prefix + dirName + '/');
       if (recursive) {
         const subUrl = listUrl + dirHref;
-        const subItems = this.curlList(subUrl, true, prefix + dirName + '/');
+        const subItems = await this.curlList(subUrl, true, prefix + dirName + '/');
         items.push(...subItems);
       }
     }
@@ -466,17 +586,18 @@ export class SvnSpecService {
     return items;
   }
 
-  private curlInfoLastModified(url: string): string | null {
+  private async curlInfoLastModified(url: string): Promise<string | null> {
     // Use PROPFIND to get DAV last-modified date
     const body = '<?xml version="1.0" encoding="utf-8"?><D:propfind xmlns:D="DAV:"><D:prop><D:getlastmodified/></D:prop></D:propfind>';
-    const result = spawnSync('curl', [
-      ...this.curlAuthArgs(),
+    const auth = this.curlAuthArgs();
+    const result = await runCommand('curl', [
+      ...auth.args,
       '-X', 'PROPFIND',
       '-H', 'Depth: 0',
       '-H', 'Content-Type: text/xml; charset=utf-8',
       '-d', body,
       url,
-    ], { encoding: 'buffer', timeout: 30000, maxBuffer: 1024 * 1024 });
+    ], { timeout: 30000, maxBuffer: 1024 * 1024, ...(auth.stdin !== undefined && { stdin: auth.stdin }) });
 
     if (result.error || result.status !== 0) return null;
     const text = result.stdout.toString('utf-8');
@@ -484,25 +605,13 @@ export class SvnSpecService {
     return match ? match[1].trim() : null;
   }
 
-  private curlExport(url: string, localPath: string): void {
-    const result = spawnSync('curl', [...this.curlAuthArgs(), '-o', localPath, '-L', url], {
-      encoding: 'buffer', timeout: 120000, maxBuffer: 50 * 1024 * 1024,
+  private async curlExport(url: string, localPath: string): Promise<void> {
+    const auth = this.curlAuthArgs();
+    const result = await runCommand('curl', [...auth.args, '-o', localPath, '-L', url], {
+      timeout: 120000, maxBuffer: 50 * 1024 * 1024, ...(auth.stdin !== undefined && { stdin: auth.stdin }),
     });
     if (result.error) throw result.error;
-    if (result.status !== 0) throw new Error(result.stderr?.toString('utf-8') ?? `curl exit ${result.status}`);
-  }
-
-  private buildAuthArgs(creds?: SvnCredentials): string[] {
-    const { username, password } = creds || getSvnCredentials();
-    const parts = [
-      '--non-interactive',
-      '--trust-server-cert',
-      '--trust-server-cert-failures=unknown-ca,cn-mismatch,expired,not-yet-valid,other',
-      '--no-auth-cache',
-    ];
-    if (username) parts.push('--username', username);
-    if (password) parts.push('--password', password);
-    return parts;
+    if (result.status !== 0) throw new Error(firstLine(result.stderr.toString('utf-8')) || `curl exit ${result.status}`);
   }
 
   /**

@@ -5,6 +5,8 @@ import { useToastStore } from '../../stores/toastStore';
 import { TaskList } from './TaskList';
 import { AsanaSyncSettings } from './AsanaSyncSettings';
 import { PlanPanel } from './PlanPanel';
+import { SpecGapsPanel } from './SpecGapsPanel';
+import { ProjectNotesPanel } from './ProjectNotesPanel';
 import { IconPlay, IconGrid, IconRefresh, IconLightning } from '../ui/Icons';
 import type { View } from '../layout/AppShell';
 
@@ -180,6 +182,12 @@ export function Dashboard({ onViewChange }: DashboardProps) {
           )}
         </button>
       )}
+
+      {/* ─── Spec gaps (待補規格) ─── */}
+      <SpecGapsPanel />
+
+      {/* ─── Project notes (專案筆記) ─── */}
+      <ProjectNotesPanel />
 
       {/* ─── Task list ─── */}
       <TaskList selectedModel={selectedModel} onViewChange={onViewChange} />

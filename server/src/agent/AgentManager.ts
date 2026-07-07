@@ -43,6 +43,8 @@ export class AgentManager {
   private inputDebounceResolvers = new Map<string, Array<(v: boolean) => void>>();
   /** Agents that should NEVER update task status (fullstack subagents — persists across resumes) */
   private readonly skipTaskStatusAgents = new Set<string>();
+  /** Watchdog timers: auto-stop agents that exceed AGENT_MAX_RUNTIME_MS */
+  private watchdogTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(
     private eventBus: EventBus,
@@ -70,7 +72,20 @@ export class AgentManager {
 
     for (const agent of runningAgents) {
       const agentId = agent.id;
-      logger.warn({ agentId }, 'Marking orphaned agent as error');
+      // Synthetic MCP agents (mcp-{taskId}) have no local process — the task is
+      // being executed by an external Claude Code session that may still be alive.
+      // Resetting them here would knock the task back to pending mid-execution.
+      if (agentId.startsWith('mcp-')) {
+        logger.info({ agentId }, 'Skipping recovery for MCP synthetic agent (external session may still be running)');
+        continue;
+      }
+      logger.warn({ agentId, pid: agent.pid }, 'Marking orphaned agent as error');
+      if (agent.pid) {
+        try {
+          process.kill(agent.pid, 'SIGTERM');
+          logger.info({ agentId, pid: agent.pid }, 'Killed orphaned agent process from previous session');
+        } catch { /* PID already gone */ }
+      }
       updateAgent(agentId, { status: 'error', pid: null });
       if (agent.currentTaskId) {
         const task = getTask(agent.currentTaskId);
@@ -199,6 +214,8 @@ export class AgentManager {
       throw err;
     }
 
+    this.startWatchdog(agent.id, config.projectId, config.taskId || null);
+
     // Emit initial prompt event so frontend can display it
     await this.eventBus.emit({
       type: EventTypes.AGENT_INITIAL_PROMPT,
@@ -221,6 +238,40 @@ export class AgentManager {
     this.skipTaskStatusAgents.delete(agentId);
     this.initialPrompts.delete(agentId);
     this.progressDetector.clear(agentId);
+    this.clearWatchdog(agentId);
+  }
+
+  /** Start the max-runtime watchdog for an agent process */
+  private startWatchdog(agentId: string, projectId: string, taskId: string | null): void {
+    this.clearWatchdog(agentId);
+    const maxRuntimeMs = getConfig().agentMaxRuntimeMs || 2 * 60 * 60 * 1000;
+    const timer = setTimeout(() => {
+      this.watchdogTimers.delete(agentId);
+      logger.warn({ agentId, taskId, maxRuntimeMs }, 'Agent exceeded max runtime — watchdog stopping it');
+      const shouldSkipTaskStatus = this.skipTaskStatusAgents.has(agentId);
+      if (taskId && !shouldSkipTaskStatus) {
+        const task = getTask(taskId);
+        if (task && (task.status === 'in_progress' || task.status === 'assigned')) {
+          updateTask(taskId, { status: 'failed', resultSummary: `Agent 執行超過上限 ${Math.round(maxRuntimeMs / 60000)} 分鐘，由 watchdog 強制停止` });
+          this.eventBus.emit({
+            type: EventTypes.TASK_STATUS_CHANGED,
+            source: agentId,
+            payload: { taskId, projectId, newStatus: 'failed', assignedAgentId: agentId },
+            timestamp: new Date().toISOString(),
+          }).catch(err => logger.error({ err, agentId }, 'Watchdog event emit failed'));
+        }
+      }
+      this.stopAgent(agentId).catch(err => logger.error({ err, agentId }, 'Watchdog stopAgent failed'));
+    }, maxRuntimeMs);
+    this.watchdogTimers.set(agentId, timer);
+  }
+
+  private clearWatchdog(agentId: string): void {
+    const timer = this.watchdogTimers.get(agentId);
+    if (timer) {
+      clearTimeout(timer);
+      this.watchdogTimers.delete(agentId);
+    }
   }
 
   /** Stop a specific agent.
@@ -403,6 +454,7 @@ export class AgentManager {
       updateAgent(agentId, { status: 'error', pid: null });
       throw err;
     }
+    this.startWatchdog(agentId, agent.projectId, null);
     logger.info({ agentId, role: agent.role }, 'Agent rerun with new prompt');
   }
 
@@ -422,6 +474,10 @@ export class AgentManager {
         }
       }
       await proc.resume(enrichedPrompt);
+      const agentForWatchdog = getAgent(agentId);
+      if (agentForWatchdog) {
+        this.startWatchdog(agentId, agentForWatchdog.projectId, agentForWatchdog.currentTaskId);
+      }
     } else {
       const agent = getAgent(agentId);
       logger.info({ agentId, agentSessionId: agent?.sessionId, agentStatus: agent?.status }, 'Resuming from DB agent');
@@ -490,6 +546,7 @@ export class AgentManager {
         throw err;
       }
 
+      this.startWatchdog(agentId, agent.projectId, agent.currentTaskId);
       logger.info({ agentId, sessionId: agent.sessionId }, 'Agent session resumed');
     }
   }
@@ -698,7 +755,8 @@ export class AgentManager {
     });
 
     proc.on('result', (result: ClaudeStreamResult) => {
-      this.handleAgentComplete(agentId, projectId, taskId, result);
+      this.handleAgentComplete(agentId, projectId, taskId, result)
+        .catch(err => logger.error({ err, agentId }, 'handleAgentComplete failed'));
     });
 
     proc.on('statusChange', ({ previous, current }: { previous: string; current: string }) => {
@@ -713,7 +771,8 @@ export class AgentManager {
 
     proc.on('error', (err: Error) => {
       logger.error({ agentId, err }, 'Agent process error');
-      this.handleAgentError(agentId, projectId, taskId, err);
+      this.handleAgentError(agentId, projectId, taskId, err)
+        .catch(handlerErr => logger.error({ err: handlerErr, agentId }, 'handleAgentError failed'));
     });
   }
 
@@ -968,7 +1027,8 @@ export class AgentManager {
     // not when it's embedded in instructional text (e.g. "請加上 [NEEDS_HUMAN]")
     // Match: line starts with it, or it's preceded by whitespace/newline only
     if (/(?:^|\n)\s*\[NEEDS_HUMAN\]/.test(content)) {
-      this.requestIntervention(agentId, projectId, taskId, 'Agent explicitly requested human assistance');
+      this.requestIntervention(agentId, projectId, taskId, 'Agent explicitly requested human assistance')
+        .catch(err => logger.error({ err, agentId }, 'requestIntervention failed'));
     }
 
     if (content.includes('[ENTITY_CHANGED:')) {
@@ -985,12 +1045,14 @@ export class AgentManager {
 
     // Check for [PLAN_READY] marker — extract plan content from recent outputs
     if (/(?:^|\n)\s*\[PLAN_READY\]/.test(content)) {
-      this.extractAndSavePlan(agentId, projectId);
+      this.extractAndSavePlan(agentId, projectId)
+        .catch(err => logger.error({ err, agentId }, 'extractAndSavePlan failed'));
     }
 
     // Check for [REVIEW_COMPLETE] marker — extract structured review JSON
     if (/(?:^|\n)\s*\[REVIEW_COMPLETE\]/.test(content)) {
-      this.extractAndSaveReview(agentId, projectId, taskId);
+      this.extractAndSaveReview(agentId, projectId, taskId)
+        .catch(err => logger.error({ err, agentId }, 'extractAndSaveReview failed'));
     }
   }
 

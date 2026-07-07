@@ -10,6 +10,7 @@ vi.mock('../db.js', () => ({
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { registerDocumentTools } from '../tools/document-tools.js';
+import { callTool } from './test-helpers.js';
 
 function freshDb(): Database.Database {
   const db = new Database(':memory:');
@@ -30,13 +31,6 @@ function seedDocument(db: Database.Database, id: string, projectId: string, opts
     opts.docType || 'SD',
     opts.parsedText || 'Document content here',
   );
-}
-
-async function callTool(server: McpServer, name: string, args: Record<string, unknown>) {
-  const tools = (server as any)._registeredTools as Record<string, any>;
-  const tool = tools[name];
-  if (!tool) throw new Error(`Tool "${name}" not found`);
-  return tool.handler(args, {} as any);
 }
 
 describe('document-tools', () => {

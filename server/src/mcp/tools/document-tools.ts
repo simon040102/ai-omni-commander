@@ -12,6 +12,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import mammoth from 'mammoth';
 import iconv from 'iconv-lite';
 import { getMcpDb } from '../db.js';
+import { getDataDir, getAsanaPat, ASANA_API_BASE, ASANA_FETCH_TIMEOUT_MS, truncateResponse } from '../helpers.js';
 
 interface DocumentRow {
   id: string;
@@ -35,8 +36,9 @@ export function registerDocumentTools(server: McpServer): void {
     {
       projectId: z.string().describe('The project ID'),
       taskId: z.string().optional().describe('Optional: filter to documents bound to this task'),
-      docType: z.enum(['SA', 'SD', 'other']).optional().describe('Optional: filter by document type'),
+      docType: z.enum(['SA', 'SD', 'other', 'verification']).optional().describe('Optional: filter by document type (verification = 驗收證據)'),
     },
+    { title: 'Get Documents', readOnlyHint: true, openWorldHint: false },
     async ({ projectId, taskId, docType }) => {
       const db = getMcpDb();
 
@@ -81,8 +83,9 @@ export function registerDocumentTools(server: McpServer): void {
   // ── read_document ─────────────────────────────────────────
   server.tool(
     'read_document',
-    'Read the content of a document. Returns markdown text for DOCX (already converted), text content for text files, or the file path for PDFs (use Read tool to read PDFs).',
+    'Read the content of a document. Returns markdown text for DOCX (already converted), text content for text files, or the file path for PDFs (use Read tool to read PDFs). Oversized documents are truncated — use the Read tool with the returned file path to read them in chunks.',
     { documentId: z.string().describe('The document ID') },
+    { title: 'Read Document', readOnlyHint: true, openWorldHint: false },
     async ({ documentId }) => {
       const db = getMcpDb();
       const doc = db.prepare('SELECT * FROM documents WHERE id = ?').get(documentId) as DocumentRow | undefined;
@@ -97,7 +100,7 @@ export function registerDocumentTools(server: McpServer): void {
 
         if (mdPath && fs.existsSync(mdPath)) {
           const content = fs.readFileSync(mdPath, 'utf-8');
-          return { content: [{ type: 'text' as const, text: `# ${doc.filename}\n\n${content}` }] };
+          return { content: [{ type: 'text' as const, text: truncateResponse(`# ${doc.filename}\n\n${content}`, `文件過大，請改用 Read tool 分段讀取：${mdPath}`) }] };
         }
         // Fallback: return the pointer instruction
         return { content: [{ type: 'text' as const, text: `Document converted to markdown. Use Read tool to read: ${mdPath || doc.file_path}` }] };
@@ -110,14 +113,14 @@ export function registerDocumentTools(server: McpServer): void {
 
       // Text content available
       if (doc.parsed_text) {
-        return { content: [{ type: 'text' as const, text: `# ${doc.filename}\n\n${doc.parsed_text}` }] };
+        return { content: [{ type: 'text' as const, text: truncateResponse(`# ${doc.filename}\n\n${doc.parsed_text}`, `文件過大，請改用 Read tool 分段讀取：${doc.file_path}`) }] };
       }
 
       // Fallback: try to read the file directly
       if (fs.existsSync(doc.file_path)) {
         try {
           const content = fs.readFileSync(doc.file_path, 'utf-8');
-          return { content: [{ type: 'text' as const, text: `# ${doc.filename}\n\n${content}` }] };
+          return { content: [{ type: 'text' as const, text: truncateResponse(`# ${doc.filename}\n\n${content}`, `文件過大，請改用 Read tool 分段讀取：${doc.file_path}`) }] };
         } catch {
           return { content: [{ type: 'text' as const, text: `Could not read file. Path: ${doc.file_path}` }], isError: true };
         }
@@ -135,6 +138,7 @@ export function registerDocumentTools(server: McpServer): void {
       projectId: z.string().describe('專案 ID'),
       taskId: z.string().describe('任務 ID'),
     },
+    { title: 'Fetch Task Attachments', readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     async ({ projectId, taskId }) => {
       const db = getMcpDb();
 
@@ -145,8 +149,7 @@ export function registerDocumentTools(server: McpServer): void {
       if (!task) return { content: [{ type: 'text' as const, text: `Error: Task "${taskId}" not found` }], isError: true };
 
       // Get Asana PAT
-      const patRow = db.prepare("SELECT value FROM global_config WHERE key = 'asana.pat'").get() as { value: string } | undefined;
-      const asanaPat = patRow?.value || process.env['ASANA_PAT'];
+      const asanaPat = getAsanaPat(db);
       if (!asanaPat) return { content: [{ type: 'text' as const, text: 'Error: Asana PAT not configured.' }], isError: true };
 
       // Extract asset IDs from description
@@ -156,8 +159,9 @@ export function registerDocumentTools(server: McpServer): void {
       // Also try fetching attachments via Asana API if we have source_ref (task GID)
       if (task.source_ref) {
         try {
-          const attRes = await fetch(`https://app.asana.com/api/1.0/tasks/${task.source_ref}/attachments?opt_fields=gid,name,download_url`, {
+          const attRes = await fetch(`${ASANA_API_BASE}/tasks/${task.source_ref}/attachments?opt_fields=gid,name,download_url`, {
             headers: { 'Authorization': `Bearer ${asanaPat}`, 'Accept': 'application/json' },
+            signal: AbortSignal.timeout(ASANA_FETCH_TIMEOUT_MS),
           });
           if (attRes.ok) {
             const attData = await attRes.json() as { data?: Array<{ gid: string; name: string; download_url: string }> };
@@ -173,9 +177,7 @@ export function registerDocumentTools(server: McpServer): void {
       }
 
       // Setup download directory
-      const dbPath = process.env['DB_PATH'] || './data/omni.db';
-      const dataDir = path.dirname(path.isAbsolute(dbPath) ? dbPath : path.resolve(process.cwd(), dbPath));
-      const uploadsDir = path.join(dataDir, 'uploads', projectId);
+      const uploadsDir = path.join(getDataDir(), 'uploads', projectId);
       const attachDir = path.join(uploadsDir, `attachments_${taskId.slice(0, 8)}`);
       fs.mkdirSync(attachDir, { recursive: true });
 
@@ -185,17 +187,19 @@ export function registerDocumentTools(server: McpServer): void {
         const assetId = assetIds[i]!;
         try {
           // Get attachment info
-          const res = await fetch(`https://app.asana.com/api/1.0/attachments/${assetId}`, {
+          const res = await fetch(`${ASANA_API_BASE}/attachments/${assetId}`, {
             headers: { 'Authorization': `Bearer ${asanaPat}`, 'Accept': 'application/json' },
+            signal: AbortSignal.timeout(ASANA_FETCH_TIMEOUT_MS),
           });
           if (!res.ok) continue;
 
           const data = await res.json() as { data?: { name: string; download_url: string } };
           if (!data.data?.download_url) continue;
 
+          // Sanitize the Asana-provided filename (path traversal / invalid chars)
           const filename = data.data.name || `attachment-${i + 1}.png`;
-          const ext = path.extname(filename) || '.png';
-          const localFilename = `${i + 1}-${filename}`;
+          const safeFilename = path.basename(filename).replace(/[<>:"|?*\\/]/g, '_');
+          const localFilename = `${i + 1}-${safeFilename}`;
           const localPath = path.join(attachDir, localFilename);
 
           // Skip if already downloaded
@@ -205,7 +209,7 @@ export function registerDocumentTools(server: McpServer): void {
           }
 
           // Download
-          const imgRes = await fetch(data.data.download_url);
+          const imgRes = await fetch(data.data.download_url, { signal: AbortSignal.timeout(ASANA_FETCH_TIMEOUT_MS) });
           if (!imgRes.ok) continue;
           const buf = Buffer.from(await imgRes.arrayBuffer());
           fs.writeFileSync(localPath, buf);
@@ -238,6 +242,7 @@ export function registerDocumentTools(server: McpServer): void {
       projectId: z.string().describe('專案 ID'),
       taskId: z.string().describe('任務 ID'),
     },
+    { title: 'Fetch SVN Specs', readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     async ({ projectId, taskId }) => {
       const db = getMcpDb();
 
@@ -380,9 +385,7 @@ export function registerDocumentTools(server: McpServer): void {
       }
 
       // 7. Download files and save to DB
-      const dbPath = process.env['DB_PATH'] || './data/omni.db';
-      const dataDir = path.dirname(path.isAbsolute(dbPath) ? dbPath : path.resolve(process.cwd(), dbPath));
-      const uploadsDir = path.join(dataDir, 'uploads', projectId);
+      const uploadsDir = path.join(getDataDir(), 'uploads', projectId);
       fs.mkdirSync(uploadsDir, { recursive: true });
 
       const subFolder = `${functionCode}_${taskId.slice(0, 8)}`;
@@ -407,18 +410,28 @@ export function registerDocumentTools(server: McpServer): void {
             svnLastModified = svnInfoLastModified(svnPath, fileUrl, credentials, ntlmMode);
           } catch { /* ignore */ }
 
+          // E3: record the spec version this task received, for later change detection (check_spec_changes)
+          const recordSpecVersion = () => {
+            if (!svnLastModified) return;
+            db.prepare(`
+              INSERT OR REPLACE INTO task_spec_versions (task_id, file_ref, last_modified, recorded_at)
+              VALUES (?, ?, ?, datetime('now'))
+            `).run(taskId, fileUrl, svnLastModified);
+          };
+
           // If cached, date unchanged, and file exists → skip (no download)
           if (existing && svnLastModified && existing.svn_last_modified === svnLastModified && fs.existsSync(existing.file_path)) {
             db.prepare(
               'INSERT OR IGNORE INTO task_documents (task_id, document_id) VALUES (?, ?)'
             ).run(taskId, existing.id);
+            recordSpecVersion();
             results.push({ docType, filename });
             continue;
           }
 
           // Step 2: Date changed or no cache → download
           const tempExt = path.extname(filename);
-          const tempPath = path.join(os.tmpdir(), `omni-svn-${Date.now()}${tempExt}`);
+          const tempPath = path.join(os.tmpdir(), `omni-svn-${Date.now()}-${randomUUID().slice(0, 8)}${tempExt}`);
           svnExport(svnPath, fileUrl, tempPath, credentials, ntlmMode);
 
           if (!fs.existsSync(tempPath)) {
@@ -436,6 +449,7 @@ export function registerDocumentTools(server: McpServer): void {
             db.prepare(
               'INSERT OR IGNORE INTO task_documents (task_id, document_id) VALUES (?, ?)'
             ).run(taskId, existing.id);
+            recordSpecVersion();
             try { fs.unlinkSync(tempPath); } catch { /* ignore */ }
             results.push({ docType, filename });
             continue;
@@ -470,6 +484,7 @@ export function registerDocumentTools(server: McpServer): void {
             db.prepare(
               'INSERT OR IGNORE INTO task_documents (task_id, document_id) VALUES (?, ?)'
             ).run(taskId, existing.id);
+            recordSpecVersion();
 
             try { fs.unlinkSync(tempPath); } catch { /* ignore */ }
             continue;
@@ -510,6 +525,7 @@ export function registerDocumentTools(server: McpServer): void {
           db.prepare(
             'INSERT OR IGNORE INTO task_documents (task_id, document_id) VALUES (?, ?)'
           ).run(taskId, docId);
+          recordSpecVersion();
 
           try { fs.unlinkSync(tempPath); } catch { /* ignore */ }
         } catch {
@@ -601,7 +617,7 @@ function resolveSvnRoots(
   return roots;
 }
 
-function detectSvnBinary(): string {
+export function detectSvnBinary(): string {
   // PATH 的 svn 優先（正確輸出 CP950），TortoiseSVN 在 pipe 模式下會把中文變成 ?
   try {
     const result = spawnSync(
@@ -643,20 +659,32 @@ function buildAuthArgs(creds: { username: string; password: string }): string[] 
   const parts = ['--non-interactive', '--trust-server-cert',
     '--trust-server-cert-failures=unknown-ca,cn-mismatch,expired,not-yet-valid,other', '--no-auth-cache'];
   if (creds.username) parts.push('--username', creds.username);
-  if (creds.password) parts.push('--password', creds.password);
+  // Password goes via stdin (svn 1.10+) so it never appears in the process list
+  if (creds.password) parts.push('--password-from-stdin');
   return parts;
+}
+
+function svnStdin(creds: { username: string; password: string }): string | undefined {
+  return creds.password || undefined;
 }
 
 function curlAuthArgs(creds: { username: string; password: string }): string[] {
   const args = ['--ntlm', '--silent', '--insecure', '--fail-with-body'];
-  if (creds.username || creds.password) args.push('-u', `${creds.username || ''}:${creds.password || ''}`);
+  // Credentials go via a stdin config file (--config -) so they never appear in the process list
+  if (creds.username || creds.password) args.push('--config', '-');
   return args;
+}
+
+function curlStdin(creds: { username: string; password: string }): string | undefined {
+  if (!creds.username && !creds.password) return undefined;
+  const escape = (s: string) => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  return `user = "${escape(creds.username || '')}:${escape(creds.password || '')}"\n`;
 }
 
 function curlList(url: string, creds: { username: string; password: string }, recursive: boolean, prefix = ''): string[] {
   const listUrl = url.endsWith('/') ? url : url + '/';
   const result = spawnSync('curl', [...curlAuthArgs(creds), listUrl], {
-    encoding: 'buffer', timeout: 60000, maxBuffer: 10 * 1024 * 1024,
+    encoding: 'buffer', timeout: 60000, maxBuffer: 10 * 1024 * 1024, input: curlStdin(creds),
   });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(result.stderr?.toString('utf-8') ?? `curl exit ${result.status}`);
@@ -684,7 +712,7 @@ function svnList(
   if (!ntlmMode) {
     // Use --xml for proper UTF-8 output (TortoiseSVN's plain text replaces CJK with ?)
     const args = ['list', ...(recursive ? ['-R'] : []), '--xml', url, ...buildAuthArgs(creds)];
-    const result = spawnSync(svnPath, args, { encoding: 'utf-8', timeout: 60000, maxBuffer: 10 * 1024 * 1024 });
+    const result = spawnSync(svnPath, args, { encoding: 'utf-8', timeout: 60000, maxBuffer: 10 * 1024 * 1024, input: svnStdin(creds) });
     if (!result.error && result.status === 0) {
       const items = parseSvnListXml(result.stdout, recursive);
       return { items, ntlmMode: false };
@@ -724,12 +752,12 @@ function parseSvnListXml(xml: string, recursive: boolean): string[] {
   return items;
 }
 
-function svnInfoLastModified(
+export function svnInfoLastModified(
   svnPath: string, url: string, creds: { username: string; password: string }, ntlmMode: boolean,
 ): string | null {
   if (!ntlmMode) {
     const args = ['info', url, ...buildAuthArgs(creds)];
-    const result = spawnSync(svnPath, args, { encoding: 'buffer', timeout: 30000, maxBuffer: 1024 * 1024 });
+    const result = spawnSync(svnPath, args, { encoding: 'buffer', timeout: 30000, maxBuffer: 1024 * 1024, input: svnStdin(creds) });
     if (!result.error && result.status === 0) {
       const text = decodeSvnOutput(result.stdout);
       const m = text.match(/Last Changed Date:\s*(.+)/i);
@@ -743,7 +771,7 @@ function svnInfoLastModified(
   const result = spawnSync('curl', [
     ...curlAuthArgs(creds), '-X', 'PROPFIND', '-H', 'Depth: 0',
     '-H', 'Content-Type: text/xml; charset=utf-8', '-d', body, url,
-  ], { encoding: 'buffer', timeout: 30000, maxBuffer: 1024 * 1024 });
+  ], { encoding: 'buffer', timeout: 30000, maxBuffer: 1024 * 1024, input: curlStdin(creds) });
   if (result.error || result.status !== 0) return null;
   const text = result.stdout.toString('utf-8');
   const m = text.match(/<[Dd]:getlastmodified[^>]*>([^<]+)<\/[Dd]:getlastmodified>/);
@@ -756,14 +784,14 @@ function svnExport(
 ): void {
   if (!ntlmMode) {
     const args = ['export', '--force', url, localPath, ...buildAuthArgs(creds)];
-    const result = spawnSync(svnPath, args, { encoding: 'buffer', timeout: 120000, maxBuffer: 50 * 1024 * 1024 });
+    const result = spawnSync(svnPath, args, { encoding: 'buffer', timeout: 120000, maxBuffer: 50 * 1024 * 1024, input: svnStdin(creds) });
     if (!result.error && result.status === 0) return;
     const stderr = result.stderr ? decodeSvnOutput(result.stderr) : '';
     if (!isNtlmError(stderr)) throw new Error(stderr || `exit ${result.status}`);
   }
   // curl fallback
   const result = spawnSync('curl', [...curlAuthArgs(creds), '-o', localPath, '-L', url], {
-    encoding: 'buffer', timeout: 120000, maxBuffer: 50 * 1024 * 1024,
+    encoding: 'buffer', timeout: 120000, maxBuffer: 50 * 1024 * 1024, input: curlStdin(creds),
   });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(result.stderr?.toString('utf-8') ?? `curl exit ${result.status}`);

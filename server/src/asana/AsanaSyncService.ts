@@ -7,9 +7,11 @@ import type { SvnSpecService } from '../svn/SvnSpecService.js';
 import type { DocumentParser } from '../documents/DocumentParser.js';
 import { getProject, updateProject } from '../db/queries/projects.js';
 import { createTask, getTasksByProject, updateTaskFields, deleteTask } from '../db/queries/tasks.js';
+import { getDb } from '../db/connection.js';
+import { getGlobalConfig, setGlobalConfig } from '../db/queries/globalConfig.js';
 import { genId } from '../utils/uuid.js';
 import { createChildLogger } from '../utils/logger.js';
-import type { WsMessage } from '@omni/shared';
+import type { Task, WsMessage } from '@omni/shared';
 
 const logger = createChildLogger('AsanaSyncService');
 
@@ -28,6 +30,8 @@ export interface SyncResult {
 export class AsanaSyncService {
   private timers = new Map<string, ReturnType<typeof setInterval>>();
   private lastSyncAt = new Map<string, string>();
+  /** Per-project in-flight sync — concurrent callers await the same promise */
+  private inFlightSyncs = new Map<string, Promise<SyncResult>>();
 
   private svnSpecService: SvnSpecService | null = null;
   private documentParser: DocumentParser | null = null;
@@ -97,8 +101,22 @@ export class AsanaSyncService {
 
   /**
    * Sync once: fetch Asana tasks, create new ones, optionally auto-execute.
+   * Concurrent calls for the same project share a single in-flight sync.
    */
   async syncOnce(projectId: string): Promise<SyncResult> {
+    const inFlight = this.inFlightSyncs.get(projectId);
+    if (inFlight) {
+      logger.info({ projectId }, 'Sync already in flight — awaiting existing sync');
+      return inFlight;
+    }
+    const promise = this.doSyncOnce(projectId).finally(() => {
+      this.inFlightSyncs.delete(projectId);
+    });
+    this.inFlightSyncs.set(projectId, promise);
+    return promise;
+  }
+
+  private async doSyncOnce(projectId: string): Promise<SyncResult> {
     const project = getProject(projectId);
     if (!project) throw new Error(`Project ${projectId} not found`);
     if (!project.asanaProjectGid) throw new Error(`Project ${projectId} has no Asana project GID`);
@@ -115,7 +133,18 @@ export class AsanaSyncService {
     const remoteGids = new Set(asanaTasks.map(t => t.gid));
 
     // Parse project config for auto-execute rules
-    const config = project.configJson ? JSON.parse(project.configJson) as ProjectConfig : null;
+    let config: ProjectConfig | null = null;
+    if (project.configJson) {
+      try {
+        config = JSON.parse(project.configJson) as ProjectConfig;
+      } catch (err) {
+        logger.error({ err, projectId }, 'Project config_json is corrupted — aborting sync');
+        return {
+          projectId, newTasks: 0, updatedTasks: 0, removedTasks: 0, autoExecuted: 0,
+          lastSyncAt: this.getLastSyncAt(projectId) || '',
+        };
+      }
+    }
     const syncConfig = config?.asanaSyncConfig;
     const autoExecuteRules = syncConfig?.autoExecuteRules || { bug: false, feature: false, refactor: false, testing: false, other: false };
     const maxConcurrent = syncConfig?.maxConcurrentAgents || 2;
@@ -125,7 +154,10 @@ export class AsanaSyncService {
     let removedTasks = 0;
     let autoExecuted = 0;
 
-    // --- 1. Create new + Update existing ---
+    // --- 1. Compute mutations (async classification happens here, DB writes deferred) ---
+    const pendingUpdates: Array<{ taskId: string; fields: Parameters<typeof updateTaskFields>[1] }> = [];
+    const pendingCreates: Array<Parameters<typeof createTask>[0]> = [];
+
     for (const asanaTask of asanaTasks) {
       // specUrl is no longer auto-extracted from notes — SVN auto-fetch handles specs via parentName
       const description = asanaTask.notes.length > 2000
@@ -169,28 +201,20 @@ export class AsanaSyncService {
           } else if (forcedLabel && forcedLabel !== existing.label) {
             logger.info({ taskId: existing.id, oldLabel: existing.label, newLabel: forcedLabel, title: asanaTask.name }, 'Overriding label based on explicit Chinese role marker');
           }
-          updateTaskFields(existing.id, {
-            title: asanaTask.name,
-            description: description || null,
-            parentName: asanaTask.parent?.name || null,
-            label: newLabel,
-            section: newSection,
-            tags: newTags,
-            customFields: newCustomFields,
-            assignee: newAssignee,
-            assigneeGid: newAssigneeGid,
+          pendingUpdates.push({
+            taskId: existing.id,
+            fields: {
+              title: asanaTask.name,
+              description: description || null,
+              parentName: asanaTask.parent?.name || null,
+              label: newLabel,
+              section: newSection,
+              tags: newTags,
+              customFields: newCustomFields,
+              assignee: newAssignee,
+              assigneeGid: newAssigneeGid,
+            },
           });
-          updatedTasks++;
-          logger.info({ taskId: existing.id, asanaGid: asanaTask.gid }, 'Updated Asana task');
-
-          // Broadcast updated task list
-          const updatedTaskList = getTasksByProject(projectId);
-          this.wsServer.broadcast({
-            type: 'task.list',
-            id: genId(),
-            timestamp: new Date().toISOString(),
-            payload: { projectId, tasks: updatedTaskList },
-          } as WsMessage);
         }
       } else {
         // New task — classify and create
@@ -202,7 +226,7 @@ export class AsanaSyncService {
 
         logger.info({ title: asanaTask.name, markerLabel, label: classification.label }, 'Task label resolved');
 
-        const task = createTask({
+        pendingCreates.push({
           projectId,
           title: asanaTask.name,
           description,
@@ -217,37 +241,11 @@ export class AsanaSyncService {
           assignee: newAssignee,
           assigneeGid: newAssigneeGid,
         });
-
-        newTasks++;
-        logger.info({
-          taskId: task.id,
-          asanaGid: asanaTask.gid,
-          taskType: classification.taskType,
-          label: classification.label,
-        }, 'Imported Asana task');
-
-        this.wsServer.broadcast({
-          type: 'task.created',
-          id: genId(),
-          timestamp: new Date().toISOString(),
-          payload: { task },
-        } as WsMessage);
-
-        // Auto-execute if rules allow
-        const shouldAutoExecute = (autoExecuteRules as Record<string, boolean>)[classification.taskType] || false;
-        if (shouldAutoExecute && autoExecuted < maxConcurrent) {
-          try {
-            await this.pipeline.executeTask(task.id);
-            autoExecuted++;
-            logger.info({ taskId: task.id }, 'Auto-executed Asana task');
-          } catch (err) {
-            logger.error({ err, taskId: task.id }, 'Failed to auto-execute task');
-          }
-        }
       }
     }
 
-    // --- 2. Remove tasks no longer assigned to me ---
+    // --- 2. Determine removals (tasks no longer assigned to me) ---
+    const pendingRemovals: Task[] = [];
     for (const [gid, localTask] of existingByGid) {
       if (!remoteGids.has(gid)) {
         // Skip running tasks — don't kill in-progress work
@@ -255,13 +253,48 @@ export class AsanaSyncService {
           logger.info({ taskId: localTask.id, asanaGid: gid }, 'Skipped removing running Asana task');
           continue;
         }
-        if (this.documentParser) {
-          await this.documentParser.deleteTaskFolder(localTask.projectId, localTask.parentName, localTask.id);
-        }
-        deleteTask(localTask.id);
-        removedTasks++;
-        logger.info({ taskId: localTask.id, asanaGid: gid }, 'Removed Asana task (no longer assigned to me)');
+        pendingRemovals.push(localTask);
       }
+    }
+
+    // Clean up task folders BEFORE deleting task rows (folder lookup depends on task_documents)
+    if (this.documentParser) {
+      for (const localTask of pendingRemovals) {
+        await this.documentParser.deleteTaskFolder(localTask.projectId, localTask.parentName, localTask.id);
+      }
+    }
+
+    // --- 3. Apply all DB writes in a single transaction ---
+    const createdTasks: Task[] = [];
+    const db = getDb();
+    db.transaction(() => {
+      for (const update of pendingUpdates) {
+        updateTaskFields(update.taskId, update.fields);
+        logger.info({ taskId: update.taskId }, 'Updated Asana task');
+      }
+      for (const params of pendingCreates) {
+        const task = createTask(params);
+        createdTasks.push(task);
+        logger.info({ taskId: task.id, asanaGid: params.sourceRef, taskType: params.taskType, label: params.label }, 'Imported Asana task');
+      }
+      for (const localTask of pendingRemovals) {
+        deleteTask(localTask.id);
+        logger.info({ taskId: localTask.id, asanaGid: localTask.sourceRef }, 'Removed Asana task (no longer assigned to me)');
+      }
+    })();
+
+    updatedTasks = pendingUpdates.length;
+    newTasks = createdTasks.length;
+    removedTasks = pendingRemovals.length;
+
+    // --- 4. Broadcasts (after transaction) ---
+    for (const task of createdTasks) {
+      this.wsServer.broadcast({
+        type: 'task.created',
+        id: genId(),
+        timestamp: new Date().toISOString(),
+        payload: { task },
+      } as WsMessage);
     }
 
     // Always broadcast final task list so frontend stays in sync
@@ -273,8 +306,27 @@ export class AsanaSyncService {
       payload: { projectId, tasks: finalTasks },
     } as WsMessage);
 
+    // --- 5. Auto-execute (after all sync writes committed) ---
+    for (const task of createdTasks) {
+      const shouldAutoExecute = (autoExecuteRules as Record<string, boolean>)[task.taskType] || false;
+      if (shouldAutoExecute && autoExecuted < maxConcurrent) {
+        try {
+          await this.pipeline.executeTask(task.id);
+          autoExecuted++;
+          logger.info({ taskId: task.id }, 'Auto-executed Asana task');
+        } catch (err) {
+          logger.error({ err, taskId: task.id }, 'Failed to auto-execute task');
+        }
+      }
+    }
+
     const lastSyncAt = new Date().toISOString();
     this.lastSyncAt.set(projectId, lastSyncAt);
+    try {
+      setGlobalConfig(`asana.lastSyncAt.${projectId}`, lastSyncAt);
+    } catch (err) {
+      logger.warn({ err, projectId }, 'Failed to persist lastSyncAt');
+    }
 
     const result: SyncResult = { projectId, newTasks, updatedTasks, removedTasks, autoExecuted, lastSyncAt };
     logger.info(result, 'Asana sync completed');
@@ -282,10 +334,14 @@ export class AsanaSyncService {
   }
 
   /**
-   * Get last sync timestamp for a project.
+   * Get last sync timestamp for a project (memory first, falls back to persisted value).
    */
   getLastSyncAt(projectId: string): string | null {
-    return this.lastSyncAt.get(projectId) || null;
+    const inMemory = this.lastSyncAt.get(projectId);
+    if (inMemory) return inMemory;
+    const persisted = getGlobalConfig(`asana.lastSyncAt.${projectId}`);
+    if (persisted) this.lastSyncAt.set(projectId, persisted);
+    return persisted;
   }
 
   /**

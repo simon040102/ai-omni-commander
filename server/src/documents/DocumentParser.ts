@@ -304,17 +304,17 @@ export class DocumentParser {
       await fs.rm(agentDir, { recursive: true, force: true });
     } catch { /* ignore */ }
 
-    // Remove DB rows whose file_path starts with the agent dir
+    // Remove DB rows whose file_path starts with the agent dir (single pass, no per-row queries)
     const db = getDb();
-    const rows = db.prepare('SELECT id FROM documents WHERE project_id = ?').all(projectId) as Array<{ id: string }>;
     const prefix = agentDir.replace(/\\/g, '/');
-    for (const row of rows) {
-      const docRow = db.prepare('SELECT file_path FROM documents WHERE id = ?').get(row.id) as { file_path: string } | undefined;
-      if (docRow && docRow.file_path.replace(/\\/g, '/').startsWith(prefix)) {
-        db.prepare('DELETE FROM documents WHERE id = ?').run(row.id);
-      }
+    const rows = db.prepare('SELECT id, file_path FROM documents WHERE project_id = ?').all(projectId) as Array<{ id: string; file_path: string }>;
+    const idsToDelete = rows
+      .filter(r => r.file_path.replace(/\\/g, '/').startsWith(prefix))
+      .map(r => r.id);
+    if (idsToDelete.length > 0) {
+      db.prepare(`DELETE FROM documents WHERE id IN (${idsToDelete.map(() => '?').join(',')})`).run(...idsToDelete);
     }
-    logger.info({ agentId, projectId }, 'Per-agent documents cleaned up');
+    logger.info({ agentId, projectId, count: idsToDelete.length }, 'Per-agent documents cleaned up');
   }
 
   /**
@@ -466,11 +466,14 @@ export class DocumentParser {
     // For each subdirectory, check if ANY file in it is bound to a task
     let deletedCount = 0;
     for (const subdir of subdirs) {
-      // Get all documents in this subtree
+      // Get all documents in this subtree.
+      // Exact prefix match via substr (LIKE would treat %/_ in paths as wildcards);
+      // normalize separators so Windows backslash paths match too.
+      const dirPrefix = `${subdir}/`;
       const docRows = db.prepare(`
         SELECT id FROM documents
-        WHERE project_id = ? AND file_path LIKE ?
-      `).all(projectId, `${subdir}%`) as Array<{ id: string }>;
+        WHERE project_id = ? AND substr(replace(file_path, '\\', '/'), 1, ?) = ?
+      `).all(projectId, dirPrefix.length, dirPrefix) as Array<{ id: string }>;
 
       if (docRows.length === 0) {
         // No documents at all in this folder — skip (folder is empty)

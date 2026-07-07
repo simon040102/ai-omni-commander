@@ -14,19 +14,13 @@ vi.mock('../notify.js', () => ({
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { registerProjectTools } from '../tools/project-tools.js';
+import { callTool } from './test-helpers.js';
 
 function freshDb(): Database.Database {
   const db = new Database(':memory:');
   db.pragma('foreign_keys = ON');
   runMigrations(db);
   return db;
-}
-
-async function callTool(server: McpServer, name: string, args: Record<string, unknown>) {
-  const tools = (server as any)._registeredTools as Record<string, any>;
-  const tool = tools[name];
-  if (!tool) throw new Error(`Tool "${name}" not found`);
-  return tool.handler(args, {} as any);
 }
 
 describe('project-tools', () => {
@@ -73,6 +67,44 @@ describe('project-tools', () => {
     it('returns error for non-existent project', async () => {
       const result = await callTool(server, 'get_project', { projectId: 'nope' });
       expect(result.isError).toBe(true);
+    });
+
+    it('masks DB credentials in configJson (A6)', async () => {
+      const config = JSON.stringify({
+        dbConnections: [
+          { label: 'TYL_DOC', server: 'db1', user: 'sa', password: 'super-secret' },
+          { label: 'NaNa', connectionString: 'Server=db2;Database=x;User Id=sa;Password=hunter2;' },
+        ],
+      });
+      testDb.prepare(`INSERT INTO projects (id, name, working_dir, config_json) VALUES (?, ?, ?, ?)`).run('p1', 'Test', '/tmp', config);
+
+      const result = await callTool(server, 'get_project', { projectId: 'p1' });
+      const text = result.content[0].text;
+      expect(text).not.toContain('super-secret');
+      expect(text).not.toContain('hunter2');
+      const data = JSON.parse(text);
+      expect(data.configJson.dbConnections[0].password).toBe('***');
+      expect(data.configJson.dbConnections[1].connectionString).toContain('Password=***');
+    });
+
+    it('returns a clear error for corrupted config_json instead of throwing (A6)', async () => {
+      testDb.prepare(`INSERT INTO projects (id, name, working_dir, config_json) VALUES (?, ?, ?, ?)`).run('p1', 'Test', '/tmp', '{broken json');
+      const result = await callTool(server, 'get_project', { projectId: 'p1' });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('config_json');
+    });
+  });
+
+  describe('set_extra_prompt', () => {
+    it('recovers from corrupted config_json by starting from {} (A6)', async () => {
+      testDb.prepare(`INSERT INTO projects (id, name, working_dir, config_json) VALUES (?, ?, ?, ?)`).run('p1', 'Test', '/tmp', '{broken json');
+
+      const result = await callTool(server, 'set_extra_prompt', { projectId: 'p1', label: 'frontend', prompt: '請遵守表單規範' });
+      expect(result.isError).toBeUndefined();
+
+      const row = testDb.prepare('SELECT config_json FROM projects WHERE id = ?').get('p1') as { config_json: string };
+      const config = JSON.parse(row.config_json);
+      expect(config.frontendExtraPrompt).toBe('請遵守表單規範');
     });
   });
 

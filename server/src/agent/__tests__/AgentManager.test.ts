@@ -53,6 +53,7 @@ vi.mock('../../config.js', () => ({
     dbPath: ':memory:',
     aiContextDir: '/tmp',
     port: 3457,
+    agentMaxRuntimeMs: 2 * 60 * 60 * 1000,
   }),
 }));
 
@@ -199,8 +200,8 @@ describe('AgentManager', () => {
     });
   });
 
-  describe('taskDoneAgents — no auto-resume after user input', () => {
-    it('clears taskDoneAgents but exhausts autoResumeCount when sending input', async () => {
+  describe('taskDoneAgents — completion handling (auto-resume removed)', () => {
+    it('clears taskDoneAgents when sending input so resumed agent is not immediately stopped', async () => {
       mockGetAgent.mockReturnValue({
         id: 'agent-1', role: 'frontend', projectId: 'proj-1',
         sessionId: 'sess-1', status: 'stopped', taskId: 'task-1',
@@ -212,18 +213,20 @@ describe('AgentManager', () => {
 
       const p = manager.sendInputToAgent('agent-1', 'hello chat');
       await vi.advanceTimersByTimeAsync(1600);
-      await p;
+      const result = await p;
+
+      // Input was delivered by resuming the session
+      expect(result).toBe(true);
 
       // taskDoneAgents is cleared (PTY mode needs this so old [TASK_COMPLETE] in JSONL
       // doesn't re-trigger stop after resume)
       expect((manager as any).taskDoneAgents.has('agent-1')).toBe(false);
 
-      // autoResumeCount is exhausted so the agent won't loop after answering user's question
-      const maxResumes = 3; // MAX_AUTO_RESUMES
-      expect((manager as any).autoResumeCount.get('agent-1')).toBe(maxResumes);
+      // Auto-resume was removed from AgentManager — no counter state should exist
+      expect((manager as any).autoResumeCount).toBeUndefined();
     });
 
-    it('handleAgentComplete skips auto-resume for taskDone agents', async () => {
+    it('handleAgentComplete marks task completed for taskDone agents without resuming', async () => {
       // Access private method for testing
       const handleComplete = (manager as any).handleAgentComplete.bind(manager);
 
@@ -235,7 +238,7 @@ describe('AgentManager', () => {
         sessionId: 'sess-1', status: 'running', taskId: 'task-1',
       });
 
-      // Spy on resumeAgent to ensure it's NOT called
+      // Spy on resumeAgent to ensure it's NOT called (auto-resume was removed)
       const resumeSpy = vi.spyOn(manager as any, 'resumeAgent').mockResolvedValue(undefined);
 
       await handleComplete('agent-1', 'proj-1', 'task-1', {
@@ -246,17 +249,21 @@ describe('AgentManager', () => {
         duration_ms: 5000,
       });
 
-      // Should NOT have auto-resumed
+      // Should NOT have resumed
       expect(resumeSpy).not.toHaveBeenCalled();
+
+      // Task should be marked completed since [TASK_COMPLETE] was signaled
+      const { updateTask } = await import('../../db/queries/tasks.js');
+      expect(vi.mocked(updateTask)).toHaveBeenCalledWith(
+        'task-1',
+        expect.objectContaining({ status: 'completed' }),
+      );
     });
 
-    it('handleAgentComplete DOES auto-resume for non-taskDone agents', async () => {
-      // Use real timers for this test — handleAgentComplete has internal setTimeout(1000)
-      vi.useRealTimers();
-
+    it('handleAgentComplete marks task failed (not resumed) when agent exits without [TASK_COMPLETE]', async () => {
       const handleComplete = (manager as any).handleAgentComplete.bind(manager);
 
-      // Agent is NOT in taskDoneAgents
+      // Agent is NOT in taskDoneAgents (never signaled [TASK_COMPLETE])
       expect((manager as any).taskDoneAgents.has('agent-1')).toBe(false);
 
       mockGetAgent.mockReturnValue({
@@ -274,11 +281,15 @@ describe('AgentManager', () => {
         duration_ms: 5000,
       });
 
-      // Should have auto-resumed (first attempt)
-      expect(resumeSpy).toHaveBeenCalled();
+      // Auto-resume was removed — completion never triggers a resume
+      expect(resumeSpy).not.toHaveBeenCalled();
 
-      // Restore fake timers for other tests
-      vi.useFakeTimers();
+      // Exiting without [TASK_COMPLETE] marks the task failed (even with exit success)
+      const { updateTask } = await import('../../db/queries/tasks.js');
+      expect(vi.mocked(updateTask)).toHaveBeenCalledWith(
+        'task-1',
+        expect.objectContaining({ status: 'failed' }),
+      );
     });
   });
 });

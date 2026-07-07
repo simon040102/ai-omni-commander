@@ -1,6 +1,6 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
-import path from 'path';
+import * as path from 'path';
 
 export default defineConfig({
   plugins: [react()],
@@ -13,12 +13,12 @@ export default defineConfig({
     port: 5174,
     proxy: {
       '/omni-ws': {
-        target: 'http://localhost:3457',
+        target: 'http://127.0.0.1:3457',
         ws: true,
         changeOrigin: true,
       },
       '/api': {
-        target: 'http://localhost:3457',
+        target: 'http://127.0.0.1:3457',
         changeOrigin: true,
       },
     },

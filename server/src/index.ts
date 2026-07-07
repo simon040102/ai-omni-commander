@@ -31,10 +31,19 @@ import { SaFlowAnalyzer } from './documents/SaFlowAnalyzer.js';
 import { listProjects } from './db/queries/projects.js';
 import { getTask } from './db/queries/tasks.js';
 import { getRecentPaths, addRecentPath, removeRecentPath, clearRecentPaths, migrateProjectPathsToRecent } from './db/queries/recentPaths.js';
+import { getAllProjectNotes, createProjectNote, archiveProjectNote } from './db/queries/projectNotes.js';
 import { genId } from './utils/uuid.js';
 import { logger } from './utils/logger.js';
 import type { WsMessage } from '@omni/shared';
 import { EventTypes, CURRENT_MODELS, LEGACY_MODELS } from '@omni/shared';
+
+process.on('uncaughtException', (err) => {
+  logger.error({ err }, 'Uncaught exception — server continues running, investigate ASAP');
+});
+
+process.on('unhandledRejection', (reason) => {
+  logger.error({ err: reason }, 'Unhandled promise rejection');
+});
 
 async function main() {
   // NOTE: Self-signed cert handling is done per-connection in externalDb.ts
@@ -137,14 +146,19 @@ async function main() {
   const app = express();
   app.use(express.json({ limit: '50mb' }));
 
+  // Assigned after the WS server is created (routes above it may reference it at request time)
+  let wsServerRef: OmniWebSocketServer | null = null;
+
   /** Validate path parameters to prevent directory traversal */
   const isSafePathParam = (v: string): boolean => !v.includes('..') && !v.includes('/') && !v.includes('\\');
 
-  // Health check
+  // Health check (ok + uptime consumed by MCP health_check tool)
   app.get('/api/health', (_req, res) => {
     res.json({
+      ok: true,
       status: 'ok',
       mode: 'sdk',
+      uptime: process.uptime(),
       activeAgents: agentManager.getActiveAgents().length,
       projectRoot: config.projectRoot.replace(/\\/g, '/'),
     });
@@ -337,7 +351,7 @@ async function main() {
   const DB_TABLE_WHITELIST = [
     'projects', 'agents', 'tasks', 'task_dependencies', 'task_documents', 'events',
     'agent_outputs', 'documents', 'interventions', 'agent_plans',
-    'recent_paths', 'workspace_skills',
+    'recent_paths', 'workspace_skills', 'spec_gaps',
   ];
 
   app.get('/api/db/tables', (_req, res) => {
@@ -656,13 +670,14 @@ async function main() {
       });
     } catch (err: any) {
       logger.error({ err, taskId: req.params['taskId'] }, 'Failed to build execution plan');
-      res.status(500).json({ error: err.message || 'Failed to build execution plan', stack: err.stack });
+      res.status(500).json({ error: err.message || 'Failed to build execution plan' });
     }
   });
 
   // 4. Create HTTP server and WebSocket server
   const httpServer = createServer(app);
   const wsServer = new OmniWebSocketServer(httpServer);
+  wsServerRef = wsServer;
 
   // 5. Create sync service (needs wsServer)
   const asanaSyncService = new AsanaSyncService(asanaClient, taskClassifier, pipeline, wsServer);
@@ -692,14 +707,139 @@ async function main() {
     res.json({ projectId, lastSyncAt: lastSync || null });
   });
 
+  // ── Spec gaps endpoints (backs the Web UI 待補規格 panel) ──────
+  app.get('/api/spec-gaps/:projectId', (req, res) => {
+    const projectId = req.params['projectId'];
+    if (!projectId) { res.status(400).json({ error: 'Missing projectId' }); return; }
+    try {
+      const rows = db.prepare(`
+        SELECT g.id, g.task_id, g.project_id, g.category, g.description, g.status,
+               g.resolution_note, g.created_at, g.resolved_at, t.title as task_title
+        FROM spec_gaps g LEFT JOIN tasks t ON t.id = g.task_id
+        WHERE g.project_id = ?
+        ORDER BY g.status ASC, g.created_at DESC
+      `).all(projectId) as Array<Record<string, unknown>>;
+      res.json({
+        projectId,
+        gaps: rows.map(r => ({
+          id: r['id'],
+          taskId: r['task_id'],
+          taskTitle: r['task_title'],
+          category: r['category'],
+          description: r['description'],
+          status: r['status'],
+          resolutionNote: r['resolution_note'],
+          createdAt: r['created_at'],
+          resolvedAt: r['resolved_at'],
+        })),
+      });
+    } catch (err) {
+      logger.error({ err }, 'Failed to list spec gaps');
+      res.status(500).json({ error: 'Failed to list spec gaps' });
+    }
+  });
+
+  app.post('/api/spec-gaps/:gapId/resolve', (req, res) => {
+    const gapId = req.params['gapId'];
+    if (!gapId) { res.status(400).json({ error: 'Missing gapId' }); return; }
+    try {
+      const gap = db.prepare('SELECT id, task_id, project_id, category, description, status FROM spec_gaps WHERE id = ?').get(gapId) as
+        { id: string; task_id: string; project_id: string; category: string; description: string; status: string } | undefined;
+      if (!gap) { res.status(404).json({ error: 'Spec gap not found' }); return; }
+      const note = (req.body as { note?: string } | undefined)?.note;
+      if (gap.status !== 'resolved') {
+        db.prepare("UPDATE spec_gaps SET status = 'resolved', resolution_note = ?, resolved_at = datetime('now') WHERE id = ?")
+          .run(note || null, gapId);
+        // Broadcast so open SpecGaps panels refetch
+        wsServerRef?.broadcast({
+          type: 'task.specGap',
+          id: gapId,
+          timestamp: new Date().toISOString(),
+          payload: { gapId, taskId: gap.task_id, projectId: gap.project_id, category: gap.category, description: gap.description, status: 'resolved', action: 'resolved' },
+        } as any);
+      }
+      res.json({ ok: true });
+    } catch (err) {
+      logger.error({ err }, 'Failed to resolve spec gap');
+      res.status(500).json({ error: 'Failed to resolve spec gap' });
+    }
+  });
+
+  // ── Project notes endpoints (backs the Web UI 專案筆記 panel) ──
+  app.get('/api/project-notes/:projectId', (req, res) => {
+    const projectId = req.params['projectId'];
+    if (!projectId) { res.status(400).json({ error: 'Missing projectId' }); return; }
+    try {
+      res.json({ projectId, notes: getAllProjectNotes(projectId) });
+    } catch (err) {
+      logger.error({ err }, 'Failed to list project notes');
+      res.status(500).json({ error: 'Failed to list project notes' });
+    }
+  });
+
+  app.post('/api/project-notes/:projectId', (req, res) => {
+    const projectId = req.params['projectId'];
+    if (!projectId) { res.status(400).json({ error: 'Missing projectId' }); return; }
+    try {
+      const body = (req.body || {}) as { content?: string; category?: string };
+      const content = typeof body.content === 'string' ? body.content.trim() : '';
+      if (!content) { res.status(400).json({ error: 'Missing content' }); return; }
+      const project = getProject(projectId);
+      if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+
+      const note = createProjectNote(projectId, content, typeof body.category === 'string' && body.category.trim() ? body.category.trim() : null);
+      // Broadcast so open ProjectNotes panels refetch
+      wsServerRef?.broadcast({
+        type: 'project.noteSaved',
+        id: note.id,
+        timestamp: new Date().toISOString(),
+        payload: { noteId: note.id, projectId, category: note.category, content: note.content, action: 'created' },
+      } as any);
+      res.json({ note });
+    } catch (err) {
+      logger.error({ err }, 'Failed to create project note');
+      res.status(500).json({ error: 'Failed to create project note' });
+    }
+  });
+
+  app.post('/api/project-notes/:noteId/archive', (req, res) => {
+    const noteId = req.params['noteId'];
+    if (!noteId) { res.status(400).json({ error: 'Missing noteId' }); return; }
+    try {
+      const note = archiveProjectNote(noteId);
+      if (!note) { res.status(404).json({ error: 'Project note not found' }); return; }
+      // Broadcast so open ProjectNotes panels refetch
+      wsServerRef?.broadcast({
+        type: 'project.noteSaved',
+        id: note.id,
+        timestamp: new Date().toISOString(),
+        payload: { noteId: note.id, projectId: note.projectId, category: note.category, content: note.content, action: 'archived' },
+      } as any);
+      res.json({ ok: true });
+    } catch (err) {
+      logger.error({ err }, 'Failed to archive project note');
+      res.status(500).json({ error: 'Failed to archive project note' });
+    }
+  });
+
   // ── MCP Notification endpoint ──────────────────────────
   // Receives notifications from the MCP Server process (separate process)
   // and broadcasts them via WebSocket to the Web UI.
+  // Whitelist covers every event the MCP tools actually send (see server/src/mcp/tools/*):
+  // agent.started / agent.output / agent.completed, task.milestone / task.statusChange / task.created / task.updated / task.specGap,
+  // project.created / project.updated / project.noteSaved, sa-flow.saved, asana.syncResult.
+  const MCP_EVENT_PREFIXES = ['agent.', 'task.', 'project.', 'sa-flow.', 'asana.'];
+
   app.post('/api/mcp-notify', (req, res) => {
     try {
       const { event, data } = req.body as { event: string; data: Record<string, unknown> };
-      if (!event) {
+      if (!event || typeof event !== 'string') {
         res.status(400).json({ error: 'Missing event field' });
+        return;
+      }
+      if (!MCP_EVENT_PREFIXES.some(prefix => event.startsWith(prefix))) {
+        logger.warn({ event }, 'Rejected MCP notify event (not in whitelist)');
+        res.status(400).json({ error: `Event not allowed: ${event}` });
         return;
       }
 
@@ -711,6 +851,14 @@ async function main() {
       logger.error({ err }, 'MCP notify error');
       res.status(500).json({ error: 'Internal error' });
     }
+  });
+
+  // Express error middleware (must be registered after all routes)
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    logger.error({ err }, 'Unhandled Express error');
+    if (res.headersSent) return;
+    res.status(500).json({ error: 'Internal server error' });
   });
 
   // 6. Wire EventBus to WebSocket broadcast
@@ -808,8 +956,8 @@ async function main() {
   await agentManager.recoverRunningAgents();
 
   // 9. Listen
-  httpServer.listen(config.port, () => {
-    logger.info({ port: config.port }, 'AI-OmniCommander server is running');
+  httpServer.listen(config.port, config.host, () => {
+    logger.info({ port: config.port, host: config.host }, 'AI-OmniCommander server is running');
     logger.info(`Dashboard: http://localhost:5174`);
     logger.info(`API: http://localhost:${config.port}/api/health`);
     logger.info(`WebSocket: ws://localhost:${config.port}`);
@@ -819,8 +967,9 @@ async function main() {
   const shutdown = async () => {
     logger.info('Shutting down...');
     asanaSyncService.stopAll();
-    // Kill PTY processes but DON'T change DB status — leave agents as 'running'
-    // so startup recovery can resume them on next launch
+    // Kill agent processes without touching DB status here — on next startup,
+    // recoverRunningAgents() kills any leftover PIDs and marks these agents as
+    // 'error' / resets their tasks to 'pending' (no auto-resume).
     await agentManager.killAllProcessesForShutdown();
     await contractWatcher.stop();
     await asanaClient.disconnect();

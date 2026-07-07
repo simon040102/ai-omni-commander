@@ -56,7 +56,7 @@ A dual-mode AI collaborative development system. Originally orchestrated multipl
 ### 選擇任務後
 1. 先問：「要做**前端**、**後端**、還是**都做**？」
 2. 取得任務詳情 `get_task(taskId)`
-3. 自動查找：SVN 文件 `get_documents()`、Axure 原型 `ls D:/暫存檔/claude\ code/ai-omni-commander-v5/docs/axure-snapshots/{projectId}/{code}-*.html`
+3. 自動查找：SVN 文件 `get_documents()`（定點查欄位名／API 路徑／訊息文字可用 `search_documents`）、Axure 原型 `find_axure_snapshot(projectId, code)`
 4. **檢查規格文件是否齊全**：
    - 前端任務 → 必須有 **SA 文件**（系統分析規格）+ **SD 文件**（系統設計規格），沒有就告知使用者並詢問是否提供
    - 後端任務 → 必須有 **SD 文件**（系統設計規格），沒有就告知使用者並詢問是否提供
@@ -72,6 +72,7 @@ A dual-mode AI collaborative development system. Originally orchestrated multipl
      請提供 SA 文件路徑，或說「跳過」強制執行。
      ```
    - **跳過時必須用 `report_output` 記錄**：`[SKIP] 使用者跳過規格檢查：缺少 {缺少的文件類型} 文件`
+   - 任務若已是 in_progress（接手舊任務）→ 先 `resume_task(taskId)` 恢復脈絡再判斷
 5. 告知使用者找到什麼，同時問：「有沒有額外文件？沒有的話說『執行』」
 6. 使用者說「執行」才派 subagent（前端 → cwd=frontendPath，後端 → cwd=backendPath，都做 → 派兩個 subagent）
 
@@ -114,6 +115,9 @@ A dual-mode AI collaborative development system. Originally orchestrated multipl
 ```
 
 #### 2. 確實閱讀規格文件
+
+> 此區塊已內建於 get_execution_plan（ExecutionPipeline 自動注入所有 role），orchestrator 不需手動注入。
+
 subagent prompt 中必須加入：
 ```
 ## 規格文件閱讀（強制，寫 code 之前必須完成）
@@ -127,6 +131,8 @@ subagent prompt 中必須加入：
 **⚠ 嚴禁在 prompt 中手動摘要規格內容。** prompt 只放規格文件的完整路徑，讓 subagent 自己用 Read tool 讀取原始文件。手動摘要容易打錯字或遺漏細節（如「儲存」寫成「存儲」），subagent 會照著錯的摘要實作而不會核對原始文件。
 
 #### 2a. 嚴禁自行編造（最高原則）
+
+> 此區塊已內建於 get_execution_plan（ExecutionPipeline 自動注入所有 role），orchestrator 不需手動注入。
 
 subagent prompt 中必須包含以下指令：
 ```
@@ -150,6 +156,8 @@ subagent prompt 中必須包含以下指令：
 
 #### 2b. 後端 subagent 必須先做效能分析
 
+> 此區塊已內建於 get_execution_plan（ExecutionPipeline 對 backend role 自動注入），orchestrator 不需手動注入。
+
 後端 subagent 的 prompt 中必須包含：
 ```
 ## 效能分析（強制 — 寫 code 之前必須完成，用 report_output 記錄）
@@ -165,6 +173,8 @@ subagent prompt 中必須包含以下指令：
 ```
 
 #### 2c. 安全弱點檢查
+
+> 此區塊已內建於 get_execution_plan（ExecutionPipeline 對 backend role 自動注入），orchestrator 不需手動注入。
 
 後端 subagent 的 prompt 中必須包含：
 ```
@@ -210,6 +220,7 @@ if task.label == 'backend' and config.backendExtraPrompt:
 - 這個步驟適用於所有專案，不只特定專案
 
 ### 執行時
+- 不確定做哪個任務時，可用 `next_task(projectId)` 取得推薦
 - **任務來源決定流程**：
   - **Asana 已存在的任務**（已有 taskId）→ 直接 `update_task_status(taskId, "in_progress")`
   - **使用者口述的新任務**（沒有 taskId）→ 先 `create_task(projectId, title, label, ...)`，用回傳的 taskId，再 `update_task_status(taskId, "in_progress")`
@@ -290,30 +301,78 @@ Claude Code / Claude Desktop
   └─ update_task_status() → marks task complete
 ```
 
+### 跨專案載入（重要）
+
+這個 MCP 常從**其他專案的資料夾**啟動（user-scope 註冊，session 開在 tvedi 等 workspace），此時 `process.cwd()` 不是本 repo。因此：
+
+- **MCP process 內所有相對路徑（DB_PATH、data dir、axure snapshots）一律以 repo root 解析**（由模組自身位置推導，見 `mcp/helpers.ts` 的 `resolveFromRepoRoot`），與 cwd 無關
+- `DB_PATH` env 可省略（預設 repo 的 `data/omni.db`）；MCP 啟動時會在 stderr 印出實際使用的 DB 路徑
+- 從其他專案註冊時，**mcp-entry.js 的路徑必須用絕對路徑**：
+  ```bash
+  claude mcp add --scope user omni-commander -- node "d:/暫存檔/claude code/ai-omni-commander-v5/server/dist/mcp-entry.js"
+  ```
+- 新增程式碼時**嚴禁**在 MCP process 內用 `process.cwd()` 解析路徑，一律走 `getDataDir()` / `resolveFromRepoRoot()`
+
 ### MCP Server Entry Point
 - `server/src/mcp-entry.ts` — stdio transport, spawned by Claude Code
-- `server/src/mcp/McpServer.ts` — registers all 14 tools
+- `server/src/mcp/McpServer.ts` — registers all 45 tools + start_task prompt + server instructions
 - `server/src/mcp/tools/` — tool implementations (task, document, project, progress, workspace)
 - `server/src/mcp/db.ts` — standalone SQLite connection for MCP process
 - `server/src/mcp/notify.ts` — HTTP POST to Web Server for real-time UI updates
 
-### MCP Tools (14 total)
+### MCP Tools (45 total)
 | Tool | Purpose |
 |------|---------|
 | `get_task` | Fetch task details (documents excluded by default; use `includeDocuments=true` to include) |
-| `list_pending_tasks` | List tasks with sourceRef. Filters: `taskType`, `label`, `keyword`, `statuses` |
+| `list_pending_tasks` | List tasks with sourceRef. Filters: `taskType`, `label`, `keyword`, `section`, `tag`, `statuses` |
 | `get_execution_plan` | Full execution prompt (superpowers + docs + strategy + completion criteria) |
-| `update_task_status` | Update task status (in_progress/completed/failed) |
+| `update_task_status` | Update task status (in_progress/completed/failed); completed gated by flow gate B |
+| `update_task` | Update task fields (whitelist: title/label/taskType/tags/section; status excluded) |
+| `next_task` | Recommend next executable task (unblocked deps; bug first, then created_at) + alternatives |
+| `get_task_outputs` | Fetch historical report_output/milestone records for a task (context recovery for new sessions) |
+| `resume_task` | One-shot context recovery: task core + flow-gate progress + recent outputs + open spec gaps + last verification + dependencies + project notes + nextSteps |
+| `add_task_dependency` | Add task dependency (guards: same project, no self-dep, no duplicate, no cycle) |
+| `remove_task_dependency` | Remove a task dependency |
+| `create_task` | Create task in project |
 | `get_documents` | List documents for project/task |
 | `read_document` | Read document content |
+| `search_documents` | Full-text search across project spec documents (filename + line + ±2-line snippet) |
+| `find_axure_snapshot` | Find Axure prototype HTML by function code under `docs/axure-snapshots/{projectId}/` |
+| `fetch_svn_specs` | Auto-fetch SA/SD spec documents from SVN by task parent_name |
+| `fetch_task_attachments` | Download Asana task attachments (e.g. bug screenshots) |
 | `list_projects` | List all projects |
 | `get_project` | Get project details with task stats |
 | `create_project` | Create new project |
-| `create_task` | Create task in project |
+| `update_project` | Update project settings |
+| `set_extra_prompt` | Set per-project frontend/backend extra prompt |
+| `set_global_config` | Set global config (SVN credentials, Asana PAT) |
 | `report_output` | Push execution output to Web UI terminal |
 | `report_milestone` | Report progress milestone |
-| `get_skill_gen_plan` | Get prompt for CLAUDE.md/.claude/skills generation |
+| `report_spec_gap` | Record a spec gap (規格未定義的欄位/API/邏輯) — structured [NEEDS_CLARIFICATION] |
+| `list_spec_gaps` | List spec gaps by project/task/status (規格缺少/待補清單) |
+| `resolve_spec_gap` | Mark a spec gap resolved (after the user supplies the spec/value) |
+| `check_spec_changes` | Compare recorded spec versions (task_spec_versions) against SVN last-modified; changed files auto-create a `spec_changed` spec gap |
+| `save_project_note` | Save a project experience note (前人踩坑教訓) — auto-injected into future execution plans |
+| `list_project_notes` | List project notes (active by default; `includeArchived=true` for all) |
+| `archive_project_note` | Archive a project note (active=0, no physical delete) |
+| `get_verification_plan` | Acceptance checklist by task label (backend: findAll/DDL/API smoke/seed SQL; frontend: tsc/Playwright) |
+| `report_verification_result` | Report checklist results → agent_outputs + milestone「驗收：X/Y 通過」 |
+| `report_verification_evidence` | Upload verification evidence file (screenshot/report) → documents (doc_type=verification) + task binding + milestone |
+| `save_task_flow` | Save a flow diagram (spec/plan/code/mindmap) for Flow-Gated Development |
+| `report_flow_check` | Report flow gate A/B comparison result |
+| `get_task_flows` | List saved flow diagrams for a task |
 | `save_sa_flow` | Save Mermaid SA flow diagram to cache |
+| `get_skill_gen_plan` | Get prompt for CLAUDE.md/.claude/skills generation |
+| `sync_asana_tasks` | Sync Asana tasks into local DB (5-min dedupe; `force=true` to override) |
+| `list_asana_projects` | List Asana workspace projects (to find project GID) |
+| `get_asana_task_comments` | Fetch Asana task comments (accepts omni UUID or Asana GID) |
+| `query_external_db` | Query a project's external database (read-only) |
+| `health_check` | Diagnose DB / Web Server / Asana PAT / SVN CLI health |
+
+### MCP Prompts (1)
+| Prompt | Purpose |
+|--------|---------|
+| `start_task` | Standard task workflow: get_execution_plan → in_progress → execute (specs via tools, gaps via report_spec_gap) → report → verification → completed/failed. `taskId` optional (locates via list_pending_tasks/next_task when omitted). |
 
 ### Execution Flow
 1. Web UI: user clicks Execute → shows MCP instruction modal
@@ -591,4 +650,6 @@ Use `/brainstorming`, `/systematic-debugging`, etc. to invoke.
 - **z-index stacking**: Fixed overlays use `z-10`. Confirm dialogs inside overlays must use `relative z-20` or higher to receive click events.
 - **Two separate Asana import paths**: `AsanaImportDrawer.tsx` sends `task.create` directly (client-side label decision). `AsanaSyncService.syncOnce()` is used by auto-sync / `asana.syncNow`. Changes to server-side classification only affect the sync path — NOT the manual import drawer.
 - **tsx watch unreliable on Windows**: `pnpm dev` uses `tsx watch` which may not detect file changes on Windows. Always **manually restart the server** after editing `.ts` files to guarantee the new code is loaded.
+- **svn CLI ≥ 1.10 required**: SVN 認證改走 `--password-from-stdin`（避免密碼出現在指令列），此旗標需要 svn 1.10+（2018）。舊版 svn 會報 unknown option 且不會走 curl NTLM fallback。
+- **Server binds 127.0.0.1 by default**: `HOST` env 可改（如 `0.0.0.0` 供區網存取）。所有內部預設 URL（NOTIFY_URL、Vite proxy、health_check）都用 `127.0.0.1` 而非 `localhost`，避免 Node 18 的 IPv6 解析問題（engines 已要求 Node ≥ 20）。
 - **Fullstack task label**: `fullstack` label triggers `FullstackController` (4-phase flow). Requires both `frontendPath` AND `backendPath` on the project. Uses `skipTaskStatusUpdate` flag (persistent `Set` in AgentManager) to prevent subagents from marking task completed. Coordinator and integration-test agents skip auto-resume (one-shot execution). Markers: `[FULLSTACK_FIX]{json}[/FULLSTACK_FIX]` for coordinator, `[INTEGRATION_TEST_RESULT]{json}[/INTEGRATION_TEST_RESULT]` for Playwright agent. Reports: `docs/verification-reports/{taskId}-frontend.md` and `{taskId}-backend.md`.

@@ -20,6 +20,7 @@ export function getDb(): Database.Database {
   instance = new Database(config.dbPath);
   instance.pragma('journal_mode = WAL');
   instance.pragma('foreign_keys = ON');
+  instance.pragma('busy_timeout = 30000');
 
   // Run migrations
   runMigrations(instance);

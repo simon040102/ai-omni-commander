@@ -37,6 +37,15 @@ test-*.js
 test-*.mjs
 test-*.ps1
 
+# Ad-hoc debug scripts (underscore prefix convention)
+_*.cjs
+_*.mjs
+server/_*.cjs
+server/_*.mjs
+
+# npm lockfile (this repo uses pnpm)
+package-lock.json
+
 docs/
 !docs/axure-snapshots/
 *.zip

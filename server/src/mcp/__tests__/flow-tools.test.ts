@@ -20,6 +20,7 @@ import { registerFlowTools } from '../tools/flow-tools.js';
 import { registerTaskTools } from '../tools/task-tools.js';
 import { getFlowState } from '../flow-gate.js';
 import type { FlowGateState } from '../flow-gate.js';
+import { callTool } from './test-helpers.js';
 
 let tmpDataDir: string;
 
@@ -51,13 +52,6 @@ function seedSaDocument(db: Database.Database, projectId = 'proj-1', docType = '
 function setFlowState(db: Database.Database, taskId: string, state: FlowGateState, flowRequired = 1) {
   db.prepare('UPDATE tasks SET flow_required = ?, flow_state = ? WHERE id = ?')
     .run(flowRequired, JSON.stringify(state), taskId);
-}
-
-async function callTool(server: McpServer, name: string, args: Record<string, unknown>) {
-  const tools = (server as any)._registeredTools as Record<string, any>;
-  const tool = tools[name];
-  if (!tool) throw new Error(`Tool "${name}" not found`);
-  return tool.handler(args, {} as any);
 }
 
 const MMD = 'flowchart TD\n  A[查詢資料] --> B[顯示清單]';

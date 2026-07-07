@@ -14,7 +14,7 @@ import type {
   AgentRole,
 } from '@omni/shared';
 import type { SvnConfig } from '@omni/shared';
-import { normalizeSvnUrl, extractFunctionCode } from '../svn/SvnSpecService.js';
+import { normalizeSvnUrl, extractFunctionCode, runCommand, buildSvnAuth, buildCurlAuth } from '../svn/SvnSpecService.js';
 import type { SvnSpecService } from '../svn/SvnSpecService.js';
 import { getSvnCredentials, setSvnCredentials, getAsanaPat, setAsanaPat, getGlobalMcpServers, setGlobalMcpServers } from '../db/queries/globalConfig.js';
 import type { McpStdioServerConfig } from '@omni/shared';
@@ -852,38 +852,29 @@ export function registerHandlers(
       }
 
       const creds = getSvnCredentials();
-      const authArgs = [
-        '--non-interactive',
-        '--trust-server-cert',
-        '--trust-server-cert-failures=unknown-ca,cn-mismatch,expired,not-yet-valid,other',
-        '--no-auth-cache',
-      ];
-      if (creds.username) { authArgs.push('--username', creds.username); }
-      if (creds.password) { authArgs.push('--password', creds.password); }
+      const svnAuth = buildSvnAuth(creds);
 
       // Run svn list (non-recursive, one level); fall back to curl --ntlm on E120190
-      const { spawnSync: svnSpawn } = await import('node:child_process');
       let buf: Buffer;
-      const spawnResult = svnSpawn(svnPath, ['list', svnUrl, ...authArgs], {
-        encoding: 'buffer',
+      const spawnResult = await runCommand(svnPath, ['list', svnUrl, ...svnAuth.args], {
         timeout: 30000,
         maxBuffer: 10 * 1024 * 1024,
+        ...(svnAuth.stdin !== undefined && { stdin: svnAuth.stdin }),
       });
       if (!spawnResult.error && spawnResult.status === 0) {
         buf = spawnResult.stdout;
       } else {
-        const errMsg = spawnResult.stderr ? spawnResult.stderr.toString('utf-8') : String(spawnResult.error ?? '');
+        const errMsg = spawnResult.stderr.length > 0 ? spawnResult.stderr.toString('utf-8') : String(spawnResult.error ?? '');
         if (/E120190|authentication context|NTLM|Negotiate/i.test(errMsg)) {
           // NTLM/Negotiate auth — fall back to curl GET (VisualSVN returns HTML index)
-          const curlCreds = creds.username ? ['-u', `${creds.username}:${creds.password || ''}`] : [];
+          const curlAuth = buildCurlAuth(creds.username, creds.password);
           const listUrl = svnUrl!.endsWith('/') ? svnUrl! : svnUrl + '/';
-          const curlResult = svnSpawn('curl', [
-            '--ntlm', '--silent', '--insecure', '--fail-with-body',
-            ...curlCreds,
+          const curlResult = await runCommand('curl', [
+            ...curlAuth.args,
             listUrl,
-          ], { encoding: 'buffer', timeout: 30000, maxBuffer: 10 * 1024 * 1024 });
+          ], { timeout: 30000, maxBuffer: 10 * 1024 * 1024, ...(curlAuth.stdin !== undefined && { stdin: curlAuth.stdin }) });
           if (curlResult.error || curlResult.status !== 0) {
-            throw new Error(curlResult.stderr?.toString('utf-8') ?? `curl NTLM failed (exit ${curlResult.status})`);
+            throw new Error(curlResult.stderr.toString('utf-8') || `curl NTLM failed (exit ${curlResult.status})`);
           }
           const html = curlResult.stdout.toString('utf-8');
           const entries: Array<{ name: string; isDir: boolean; fullUrl: string }> = [];
@@ -945,7 +936,7 @@ export function registerHandlers(
   });
 
   // SVN.PREVIEW — preview which spec files would be auto-fetched
-  wsServer.registerHandler('svn.preview', (msg: WsMessage, ws: WebSocket) => {
+  wsServer.registerHandler('svn.preview', async (msg: WsMessage, ws: WebSocket) => {
     const { payload } = msg as WsSvnPreview;
 
     try {
@@ -971,13 +962,16 @@ export function registerHandlers(
       const taskLabel = payload.taskLabel || 'frontend';
       const rootCode = functionCode.match(/^[A-Za-z]+/)?.[0]?.toUpperCase() || '';
 
-      const files = svnSpecService.previewSpecsForCode(functionCode, svnConfig, taskLabel);
+      const preview = await svnSpecService.previewSpecsForCode(functionCode, svnConfig, taskLabel);
+      if (preview.files.length === 0 && preview.errors.length > 0) {
+        throw new Error(`SVN 搜尋失敗: ${preview.errors.join('; ')}`);
+      }
 
       wsServer.send(ws, {
         type: 'svn.previewResult',
         id: genId(),
         timestamp: new Date().toISOString(),
-        payload: { functionCode, rootCode, files },
+        payload: { functionCode, rootCode, files: preview.files },
       } as WsMessage);
     } catch (err) {
       wsServer.send(ws, {
@@ -1035,7 +1029,6 @@ export function registerHandlers(
 
   // Test SVN credentials by running `svn info` on a known SVN path
   wsServer.registerHandler('config.testSvn', async (_msg: WsMessage, ws: WebSocket) => {
-    const { spawnSync } = await import('node:child_process');
     const { detectSvnBinary, isSvnAvailable } = await import('../svn/SvnSpecService.js');
 
     // Check svn binary exists
@@ -1064,14 +1057,7 @@ export function registerHandlers(
     }
 
     try {
-      const authArgs = [
-        '--non-interactive',
-        '--trust-server-cert',
-        '--trust-server-cert-failures=unknown-ca,cn-mismatch,expired,not-yet-valid,other',
-        '--no-auth-cache',
-      ];
-      if (creds.username) authArgs.push('--username', creds.username);
-      if (creds.password) authArgs.push('--password', creds.password);
+      const svnAuth = buildSvnAuth(creds);
 
       // Try to find a project with an SVN path configured
       const projects = listProjects();
@@ -1103,34 +1089,33 @@ export function registerHandlers(
       let connected = false;
       let svnError = '';
 
-      const svnResult = spawnSync(svnBin, ['info', normalizedUrl, ...authArgs], {
-        encoding: 'buffer', timeout: 15000,
+      const svnResult = await runCommand(svnBin, ['info', normalizedUrl, ...svnAuth.args], {
+        timeout: 15000, maxBuffer: 1024 * 1024, ...(svnAuth.stdin !== undefined && { stdin: svnAuth.stdin }),
       });
 
       if (!svnResult.error && svnResult.status === 0) {
         connected = true;
       } else {
-        svnError = (svnResult.stderr ? svnResult.stderr.toString('utf-8') : '') || String(svnResult.error ?? '');
+        svnError = (svnResult.stderr.length > 0 ? svnResult.stderr.toString('utf-8') : '') || String(svnResult.error ?? '');
         const isNtlm = /E120190|authentication context|NTLM|Negotiate/i.test(svnError);
         if (isNtlm) {
           // Try curl --ntlm
-          const curlCreds = creds.username ? ['-u', `${creds.username}:${creds.password || ''}`] : [];
-          const curlResult = spawnSync('curl', [
-            '--ntlm', '--silent', '--insecure', '--fail-with-body',
-            ...curlCreds,
+          const curlAuth = buildCurlAuth(creds.username, creds.password);
+          const curlResult = await runCommand('curl', [
+            ...curlAuth.args,
             '-X', 'PROPFIND', '-H', 'Depth: 0',
             '-H', 'Content-Type: text/xml',
             '-d', '<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:allprop/></D:propfind>',
             '-w', '\n%{http_code}',
             normalizedUrl,
-          ], { encoding: 'buffer', timeout: 15000 });
+          ], { timeout: 15000, maxBuffer: 1024 * 1024, ...(curlAuth.stdin !== undefined && { stdin: curlAuth.stdin }) });
 
-          const curlOut = curlResult.stdout?.toString('utf-8') ?? '';
+          const curlOut = curlResult.stdout.toString('utf-8');
           const httpCode = curlOut.trim().split('\n').pop() ?? '0';
           if (!curlResult.error && (curlResult.status === 0 || parseInt(httpCode) < 400)) {
             connected = true;
           } else {
-            throw new Error(`NTLM auth failed: ${curlResult.stderr?.toString('utf-8')?.slice(0, 200) || httpCode}`);
+            throw new Error(`NTLM auth failed: ${curlResult.stderr.toString('utf-8').slice(0, 200) || httpCode}`);
           }
         } else {
           throw new Error(svnError.slice(0, 300));

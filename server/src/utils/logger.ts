@@ -10,6 +10,10 @@ export const logger = pino({
     },
   },
   level: process.env['LOG_LEVEL'] || 'info',
+  redact: {
+    paths: ['err.spawnargs', '*.password', '*.pat', '*.token', '*.connectionString'],
+    censor: '[REDACTED]',
+  },
 });
 
 export function createChildLogger(name: string, meta?: Record<string, unknown>) {

@@ -20,6 +20,7 @@ export function useWebSocket() {
   const setPlans = useProjectStore(s => s.setPlans);
   const addPlan = useProjectStore(s => s.addPlan);
   const updateTaskStatus = useProjectStore(s => s.updateTaskStatus);
+  const updateTask = useProjectStore(s => s.updateTask);
   const updateAgentStatus = useProjectStore(s => s.updateAgentStatus);
   const addOrUpdateAgent = useProjectStore(s => s.addOrUpdateAgent);
   const addIntervention = useProjectStore(s => s.addIntervention);
@@ -304,15 +305,28 @@ export function useWebSocket() {
 
           case 'task.statusChange': {
             const taskStatus = payload['newStatus'] as string;
+            const changedTaskId = payload['taskId'] as string;
+            const prevStatus = useProjectStore.getState().tasks.find(t => t.id === changedTaskId)?.status;
             updateTaskStatus(
-              payload['taskId'] as string,
+              changedTaskId,
               taskStatus,
               payload['assignedAgentId'] as string | undefined,
             );
-            if (taskStatus === 'failed') {
-              addToast({ type: 'error', title: 'Task failed', message: `Task ${payload['taskId']}`, duration: 8000 });
-            } else if (taskStatus === 'completed') {
-              addToast({ type: 'success', title: 'Task completed' });
+            if (taskStatus !== prevStatus) {
+              if (taskStatus === 'failed') {
+                addToast({ type: 'error', title: 'Task failed', message: `Task ${changedTaskId}`, duration: 8000 });
+              } else if (taskStatus === 'completed') {
+                addToast({ type: 'success', title: 'Task completed' });
+              }
+            }
+            break;
+          }
+
+          // Task fields updated via MCP update_task — merge into store, no toast
+          case 'task.updated': {
+            const updatedTask = payload['task'] as (Partial<import('../stores/projectStore').Task> & { id: string }) | undefined;
+            if (updatedTask?.id) {
+              updateTask(updatedTask);
             }
             break;
           }
@@ -335,6 +349,25 @@ export function useWebSocket() {
             }
             break;
           }
+
+          // Spec gap reported/resolved via MCP — notify listening panels (SpecGapsPanel)
+          case 'task.specGap': {
+            window.dispatchEvent(new CustomEvent('omni:spec-gap', { detail: payload }));
+            if (payload['action'] === 'reported') {
+              addToast({
+                type: 'warning',
+                title: '規格缺口',
+                message: (payload['description'] as string) || '任務回報了規格缺少/待補項目',
+                duration: 8000,
+              });
+            }
+            break;
+          }
+
+          // Project note saved/archived (MCP or REST) — notify listening panels (ProjectNotesPanel)
+          case 'project.noteSaved':
+            window.dispatchEvent(new CustomEvent('omni:project-note', { detail: payload }));
+            break;
 
           // v2: Workspace scan results (dispatched to listening components)
           case 'workspace.scanResult':

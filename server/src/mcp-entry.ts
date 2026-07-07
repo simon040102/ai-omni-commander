@@ -7,17 +7,15 @@
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { createOmniMcpServer } from './mcp/McpServer.js';
 import { getMcpDb, closeMcpDb } from './mcp/db.js';
+import { getDbPath } from './mcp/helpers.js';
 
 async function main() {
-  // Validate required env vars
-  if (!process.env['DB_PATH']) {
-    process.stderr.write('ERROR: DB_PATH environment variable is required\n');
-    process.exit(1);
-  }
-
-  // Initialize DB connection (validates path, runs migrations)
+  // DB_PATH is optional: relative values (and the default ./data/omni.db) are
+  // resolved against the OmniCommander repo root, NOT process.cwd() — the MCP
+  // server may be spawned from any project folder via user-scope registration.
   try {
     getMcpDb();
+    process.stderr.write(`[MCP] Using database: ${getDbPath()}\n`);
   } catch (err) {
     process.stderr.write(`ERROR: Failed to connect to database: ${err}\n`);
     process.exit(1);
@@ -28,18 +26,29 @@ async function main() {
 
   // Connect via stdio transport
   const transport = new StdioServerTransport();
-  await server.connect(transport);
 
-  process.stderr.write('OmniCommander MCP Server started (stdio)\n');
-
-  // Graceful shutdown
+  // Graceful shutdown — idempotent, wired to signals, stdio EOF and transport close
+  let shuttingDown = false;
   const shutdown = () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     closeMcpDb();
     process.exit(0);
   };
 
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
+  // On Windows, Claude Code terminates the MCP server by closing stdio —
+  // without this the process would linger as an orphan.
+  process.stdin.on('end', shutdown);
+  process.on('unhandledRejection', (err) => {
+    process.stderr.write(`[MCP] Unhandled rejection: ${err instanceof Error ? (err.stack || err.message) : String(err)}\n`);
+  });
+  server.server.onclose = shutdown;
+
+  await server.connect(transport);
+
+  process.stderr.write('OmniCommander MCP Server started (stdio)\n');
 }
 
 main().catch((err) => {

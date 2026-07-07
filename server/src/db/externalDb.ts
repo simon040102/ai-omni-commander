@@ -4,7 +4,9 @@
  *
  * SECURITY:
  * - Only hardcoded information_schema queries — no user-provided SQL
- * - Sets read-only session immediately after connecting
+ * - PostgreSQL/MySQL: sets a read-only session immediately after connecting.
+ *   MSSQL has NO equivalent per-session read-only setting — use a read-only
+ *   (db_datareader / VIEW DEFINITION only) account for MSSQL connections.
  * - Closes connection immediately after fetching
  * - Connect timeout: 10s, query timeout: 30s
  */
@@ -15,6 +17,12 @@ const logger = createChildLogger('ExternalSchemaFetcher');
 
 const CONNECT_TIMEOUT = 10_000; // 10 seconds
 const QUERY_TIMEOUT = 30_000;   // 30 seconds
+
+// Minimum TLS version for MSSQL connections. Defaults to 'TLSv1' because many
+// legacy SQL Server installs (2008/2012) only speak TLS 1.0 — this is a known
+// downgrade risk. Set EXTERNAL_DB_TLS_MIN=TLSv1.2 (or TLSv1.3) to harden when
+// all target DBs support it.
+const TLS_MIN_VERSION = process.env['EXTERNAL_DB_TLS_MIN'] || 'TLSv1';
 
 export class ExternalSchemaFetcher {
   /**
@@ -302,7 +310,7 @@ export class ExternalSchemaFetcher {
           encrypt,
           trustServerCertificate,
           enableArithAbort: true,
-          cryptoCredentialsDetails: { minVersion: 'TLSv1' },
+          cryptoCredentialsDetails: { minVersion: TLS_MIN_VERSION },
         },
       };
     }
@@ -328,7 +336,7 @@ export class ExternalSchemaFetcher {
           encrypt,
           trustServerCertificate,
           enableArithAbort: true,
-          cryptoCredentialsDetails: { minVersion: 'TLSv1' },
+          cryptoCredentialsDetails: { minVersion: TLS_MIN_VERSION },
         },
       };
     }

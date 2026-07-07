@@ -4,7 +4,7 @@
  * so the Web UI can update in real-time.
  */
 
-const NOTIFY_URL = () => process.env['NOTIFY_URL'] || 'http://localhost:3457/api/mcp-notify';
+const NOTIFY_URL = () => process.env['NOTIFY_URL'] || 'http://127.0.0.1:3457/api/mcp-notify';
 
 export interface McpNotification {
   event: string;

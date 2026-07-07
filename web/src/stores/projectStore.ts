@@ -121,6 +121,8 @@ interface ProjectState {
   setPlans: (projectId: string, plans: AgentPlan[]) => void;
   addPlan: (plan: AgentPlan) => void;
   updateTaskStatus: (taskId: string, status: string, agentId?: string) => void;
+  /** Merge updated fields into an existing task by id (task.updated WS message) */
+  updateTask: (task: Partial<Task> & { id: string }) => void;
   updateAgentStatus: (agentId: string, status: string) => void;
   addOrUpdateAgent: (agent: Agent) => void;
   addIntervention: (intervention: Intervention) => void;
@@ -237,6 +239,10 @@ export const useProjectStore = create<ProjectState>((set) => ({
     tasks: state.tasks.map(t =>
       t.id === taskId ? { ...t, status, assignedAgentId: agentId ?? t.assignedAgentId } : t
     ),
+  })),
+
+  updateTask: (task) => set((state) => ({
+    tasks: state.tasks.map(t => t.id === task.id ? { ...t, ...task } : t),
   })),
 
   updateAgentStatus: (agentId, status) => set((state) => {

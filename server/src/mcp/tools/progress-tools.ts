@@ -6,6 +6,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { getMcpDb } from '../db.js';
 import { notifyWebServer } from '../notify.js';
+import { ensureMcpAgent } from '../helpers.js';
 
 export function registerProgressTools(server: McpServer): void {
 
@@ -18,6 +19,7 @@ export function registerProgressTools(server: McpServer): void {
       content: z.string().describe('The output content to display'),
       outputType: z.enum(['text', 'tool_use', 'tool_result', 'system', 'milestone']).optional().describe('Output type for display styling (default: text)'),
     },
+    { title: 'Report Output', readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     async ({ taskId, content, outputType }) => {
       const db = getMcpDb();
       const streamType = outputType || 'text';
@@ -28,23 +30,9 @@ export function registerProgressTools(server: McpServer): void {
         return { content: [{ type: 'text' as const, text: `Error: Task "${taskId}" not found` }], isError: true };
       }
 
-      // Store output in agent_outputs using taskId as agent_id for MCP-sourced output
-      // We use a synthetic agent ID pattern: "mcp-{taskId}" to distinguish from internal agents
-      const mcpAgentId = `mcp-${taskId}`;
-
-      // Get task info for title
-      const taskInfo = db.prepare('SELECT title, label FROM tasks WHERE id = ?').get(taskId) as { title: string; label: string } | undefined;
-      const agentRole = taskInfo?.label || 'quick';
-      const agentTitle = taskInfo?.title || null;
-
       // Ensure synthetic agent record exists — send agent.started on first creation
-      const existingAgent = db.prepare('SELECT id FROM agents WHERE id = ?').get(mcpAgentId);
-      if (!existingAgent) {
-        db.prepare(`
-          INSERT INTO agents (id, project_id, role, status, model, current_task_id, title)
-          VALUES (?, ?, ?, 'running', 'external', ?, ?)
-        `).run(mcpAgentId, task.project_id, agentRole, taskId, agentTitle);
-
+      const { agentId: mcpAgentId, created, role: agentRole, title: agentTitle } = ensureMcpAgent(db, taskId, task.project_id);
+      if (created) {
         // Notify Web Server to show agent in Agents view
         await notifyWebServer({
           event: 'agent.started',
@@ -89,6 +77,7 @@ export function registerProgressTools(server: McpServer): void {
       milestone: z.string().describe('Milestone description (e.g., "Analyzing documents")'),
       details: z.string().optional().describe('Optional additional details'),
     },
+    { title: 'Report Milestone', readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     async ({ taskId, milestone, details }) => {
       const db = getMcpDb();
 
@@ -106,17 +95,8 @@ export function registerProgressTools(server: McpServer): void {
         JSON.stringify({ milestone, details: details || null }));
 
       // Also store as a system output for the terminal view
-      const mcpAgentId = `mcp-${taskId}`;
-      const existingAgent = db.prepare('SELECT id FROM agents WHERE id = ?').get(mcpAgentId);
-      if (!existingAgent) {
-        const taskInfo = db.prepare('SELECT title, label FROM tasks WHERE id = ?').get(taskId) as { title: string; label: string } | undefined;
-        const agentRole = taskInfo?.label || 'quick';
-        const agentTitle = taskInfo?.title || null;
-        db.prepare(`
-          INSERT INTO agents (id, project_id, role, status, model, current_task_id, title)
-          VALUES (?, ?, ?, 'running', 'external', ?, ?)
-        `).run(mcpAgentId, task.project_id, agentRole, taskId, agentTitle);
-
+      const { agentId: mcpAgentId, created, role: agentRole, title: agentTitle } = ensureMcpAgent(db, taskId, task.project_id);
+      if (created) {
         await notifyWebServer({
           event: 'agent.started',
           data: { agentId: mcpAgentId, projectId: task.project_id, taskId, role: agentRole, title: agentTitle, model: 'external (MCP)' },

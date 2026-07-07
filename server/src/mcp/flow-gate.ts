@@ -16,6 +16,7 @@ import type Database from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { getDataDir, ensureMcpAgent } from './helpers.js';
 
 export type FlowRole = 'frontend' | 'backend' | 'default';
 export type FlowType = 'spec' | 'plan' | 'code' | 'mindmap';
@@ -84,8 +85,9 @@ export function saveFlowState(db: Database.Database, taskId: string, state: Flow
 }
 
 /**
- * Read-modify-write flow_state atomically (within this process) via a transaction.
- * Cross-process races are mitigated by WAL + busy_timeout (accepted residual risk).
+ * Read-modify-write flow_state atomically via an IMMEDIATE transaction —
+ * the write lock is taken up-front so a concurrent process (Web Server shares
+ * the same SQLite file) cannot interleave between our read and write.
  */
 export function mutateFlowState(
   db: Database.Database,
@@ -98,7 +100,7 @@ export function mutateFlowState(
     saveFlowState(db, taskId, state);
     return state;
   });
-  return txn();
+  return txn.immediate();
 }
 
 export function getRoleState(state: FlowGateState, role: FlowRole): RoleFlowState {
@@ -110,9 +112,7 @@ export function getRoleState(state: FlowGateState, role: FlowRole): RoleFlowStat
 
 /** Resolve data/sa-flows dir from DB_PATH (same convention as save_sa_flow). */
 export function getFlowsDir(): string {
-  const dbPath = process.env['DB_PATH'] || './data/omni.db';
-  const dataDir = path.dirname(path.isAbsolute(dbPath) ? dbPath : path.resolve(process.cwd(), dbPath));
-  const flowsDir = path.join(dataDir, 'sa-flows');
+  const flowsDir = path.join(getDataDir(), 'sa-flows');
   fs.mkdirSync(flowsDir, { recursive: true });
   return flowsDir;
 }
@@ -125,7 +125,7 @@ export function getFlowsDir(): string {
  */
 export function saveFlowFile(opts: {
   projectId: string;
-  taskId: string;
+  taskId?: string;
   flowType: FlowType;
   role: FlowRole;
   mermaidContent: string;
@@ -144,12 +144,12 @@ export function saveFlowFile(opts: {
   }
   meta.hash = hash;
   meta.generatedAt = new Date().toISOString();
-  meta.filename = opts.filename || `${opts.flowType}-flow (task ${opts.taskId})`;
+  meta.filename = opts.filename || `${opts.flowType}-flow${opts.taskId ? ` (task ${opts.taskId})` : ''}`;
   meta.projectId = opts.projectId;
   meta.flowType = opts.flowType;
   meta.role = opts.role;
   if (!Array.isArray(meta.taskIds)) meta.taskIds = [];
-  if (!(meta.taskIds as string[]).includes(opts.taskId)) {
+  if (opts.taskId && !(meta.taskIds as string[]).includes(opts.taskId)) {
     (meta.taskIds as string[]).push(opts.taskId);
   }
   fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
@@ -173,19 +173,11 @@ export function readFlowFile(projectId: string, hash: string): string | null {
  * agent, creating the agent record if needed (mirrors progress-tools behavior).
  */
 export function logTaskOutput(db: Database.Database, taskId: string, projectId: string, content: string): void {
-  const mcpAgentId = `mcp-${taskId}`;
-  const existingAgent = db.prepare('SELECT id FROM agents WHERE id = ?').get(mcpAgentId);
-  if (!existingAgent) {
-    const taskInfo = db.prepare('SELECT title, label FROM tasks WHERE id = ?').get(taskId) as { title: string; label: string } | undefined;
-    db.prepare(`
-      INSERT INTO agents (id, project_id, role, status, model, current_task_id, title)
-      VALUES (?, ?, ?, 'running', 'external', ?, ?)
-    `).run(mcpAgentId, projectId, taskInfo?.label || 'quick', taskId, taskInfo?.title || null);
-  }
+  const { agentId } = ensureMcpAgent(db, taskId, projectId);
   db.prepare(`
     INSERT INTO agent_outputs (agent_id, task_id, stream_type, content)
     VALUES (?, ?, 'system', ?)
-  `).run(mcpAgentId, taskId, content);
+  `).run(agentId, taskId, content);
 }
 
 /**
