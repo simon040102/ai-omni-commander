@@ -48,4 +48,6 @@ package-lock.json
 
 docs/
 !docs/axure-snapshots/
+!docs/操作手冊.md
+!docs/功能說明.md
 *.zip

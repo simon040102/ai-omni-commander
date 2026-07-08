@@ -2,298 +2,208 @@
 
 ## 概述
 
-AI-OmniCommander 是一個多 Agent 協作開發系統，透過 WebSocket 連接 React 前端與 Node.js 後端，管理多個 Claude Code CLI 子程序（Agent）同時執行軟體開發任務。
+AI-OmniCommander 是一個 **MCP Server**，為外部 Claude Code session 提供任務管理與開發脈絡：Asana 任務同步、SVN + 本地資料夾規格文件雙來源、規格檢查表與 AI 規格回對閘門、驗收清單、Web UI 即時監控。
+
+執行模型：**orchestrator（外部 Claude Code session）透過 MCP 工具取得脈絡，再用 Agent tool 派 subagent 到各專案 workspace 開發**。OmniCommander 本身不 spawn 任何 AI 程序（舊的 spawn 路徑已停用，見文末「Legacy 模式」）。
 
 ---
 
-## 一、專案模式
+## 一、現行工作流
 
-### 1. Spec Mode（規格模式）
-- 使用者上傳 SA（系統分析）/ SD（系統設計）文件（PDF、文字、Markdown）
-- 文件依角色自動路由：Frontend 拿 SA+SD，Backend 只拿 SD
-- 文件注入到 workspace 的 `.ai_specs/` 目錄，並在 CLAUDE.md 建立索引
-- 每個 workspace 生成一個 Agent，`cwd` 設為 workspace 路徑
-- Agent 自動讀取 workspace 的 CLAUDE.md 和 `.claude/` 技能
-- 支援 Debug Mode（針對既有 codebase 修改，而非全新建置）
+```
+列專案 → 同步 Asana → 選任務 → 自動判軌（bug 無規格→light / 規格驅動→full）
+→ 抓規格（SVN + 本地規格資料夾雙來源）→ 抽規格檢查表（checklist）
+→ [full 軌] Flow-Gated 流程圖閘門 A/B → 開發
+→ 程式預檢（run_spec_compliance）→ AI 回對（獨立 agent 逐項驗證，missing=0）
+→ 驗收（get_verification_plan + 證據上傳）→ completed（閘門放行）
+```
 
-### 2. Creative Mode（創意模式）
-- Architect Agent 逐一向使用者提問（一次一題，約 5-10 題）
-- 使用者回答後，Agent 生成 SA/SD 文件
-- 使用者確認或要求修改
-- 確認後進入規劃階段（Master Agent 建立任務計畫）
+### 自動判軌（full / light）
 
-### 3. Quick Mode（快速模式）
-- 單一 Agent 執行聚焦任務
-- 任務類型：Bug Fix / Small Change / Refactor / Other
-- 選擇 Agent 角色：Backend / Frontend / DevOps / Testing
-- 可附帶錯誤日誌和相關檔案路徑
-- 可選擇載入 workspace 的 CLAUDE.md 和 `.claude/commands/` 技能
+`get_execution_plan(taskId)` 會自動判斷任務軌道：
 
----
+- **light 軌**：taskType=bug 且無 SA/SD 規格文件 → 輕量修復流程。跳過 Flow-Gated 流程圖閘門、跳過 SA/SD 齊全檢查，規格檢查表改抽 BUG 原文
+- **full 軌**：其他情況 → 規格驅動完整流程（規格齊全檢查 + 流程圖閘門）
+- 輕的是**工序**不是**標準**：兩軌都要 AI 回對 missing=0 才能標 completed
+- 可用 `track="full"` / `track="light"` 明確覆寫
 
-## 二、Agent 系統
+### 完成閘門
 
-### Agent 角色
+`update_task_status(taskId, "completed")` 受兩道閘門管制：
 
-| 角色 | 預設模型 | 職責 | 工具權限 |
-|------|---------|------|---------|
-| master | opus | 解析 SA/SD、拆解任務 | Read, Glob, Grep |
-| architect | opus | 需求訪談、生成規格 | Read |
-| backend | sonnet | API、DB、後端邏輯、單元測試 | Read, Edit, Write, Bash, Glob, Grep, Agent |
-| frontend | sonnet | React/Tailwind UI、API 串接 | Read, Edit, Write, Bash, Glob, Grep, Agent |
-| devops | sonnet | Docker、CI/CD、基礎設施 | Read, Edit, Write, Bash, Glob, Grep, Agent |
-| testing | sonnet | 整合測試、QA、自動化 | Read, Edit, Write, Bash, Glob, Grep, Agent |
-| review | sonnet | 程式碼審查（唯讀） | Read, Glob, Grep |
-| quick | sonnet | 快速任務 | Read, Edit, Write, Bash, Glob, Grep, Agent |
+1. **Flow gate B**（full 軌）：程式碼流程圖與計畫流程圖比對通過
+2. **AI 規格回對閘門**：最新一次 AI 回對（ai_review run）missing=0
 
-### Agent 生命週期
-- 狀態：idle → starting → running → stopped / error
-- 透過 `claude --print --output-format stream-json --input-format stream-json` 啟動子程序
-- 初始 prompt 透過 stdin 傳送（避免 ARG_MAX 限制）
-- 支援透過 stdin 傳送後續指令
-- 完成標記：`[TASK_COMPLETE]`、`[NEEDS_HUMAN]`、`[ENTITY_CHANGED]`、`[PLAN_READY]`、`[SPEC_READY]`、`[REVIEW_COMPLETE]`
+`skipFlowGate=true` + `skipReason` 可覆寫，**限使用者明確同意**，會記 `[SKIP]` 供稽核。
 
-### Token / 成本追蹤
-- 追蹤 input tokens、output tokens、cache read/creation tokens
-- 計算 USD 成本
-- 統計對話 turn 數
-- Dashboard 顯示每個 Agent 的統計
+### 配套機制
+
+| 機制 | 工具 | 說明 |
+|------|------|------|
+| 規格缺口 | `report_spec_gap` | 規格沒定義的欄位/API/邏輯一律記錄，不可自行編造；Web UI 有「待補規格」面板 |
+| 專案經驗筆記 | `save_project_note` | 專案特有的坑/慣例記下來，自動注入之後的 execution plan |
+| 規格異動偵測 | `check_spec_changes` | 比對開工時記錄的規格版本與 SVN/本地最新版；Asana 同步後自動跑，變更會自動開 `spec_changed` 缺口 |
+| SA/SD 一致性檢查 | `check_spec_consistency` | 開工前建議跑：規格自相矛盾時實作永遠無法 100% 回對 |
+| 接手舊任務 | `resume_task` | 一次回傳任務摘要 + 閘門進度 + 歷史回報 + 未解決缺口 + 依賴狀態 + 下一步 |
+| 任務推薦 | `next_task` | 依賴未阻塞 + bug 優先的下一個可做任務 |
 
 ---
 
-## 三、前端 UI 頁面
+## 二、MCP 工具一覽（52 個）
 
-### 1. Setup（專案設定）
-- 四步驟建立精靈：模式選擇 → Workspace 設定 → 文件上傳/訪談/快速任務 → 執行
-- Workspace 設定：多個 workspace（label + 絕對路徑）
-- Folder Picker：伺服器端目錄瀏覽器 + 最近使用路徑
-- 文件上傳：拖放 + 貼上、自動偵測 SA/SD、每檔可切換類型
-- 模型選擇：Sonnet / Opus / Haiku
-- Superpowers 開關
-- Code Review 開關
-- Plan Approval 開關
-- Debug Mode 開關
+### 任務 / 執行計畫（11）
 
-### 2. Dashboard（儀表板）
-- **Agent 卡片**：按角色分組、顏色標記、運行狀態指示燈
-- **多終端檢視**（DualTerminal）：分割視窗顯示多個 Agent 輸出
-- **終端功能**：
-  - 串流文字輸出
-  - Tool use/result 格式化顯示
-  - 錯誤訊息紅色標示
-  - Markdown 自動渲染（標題、列表、程式碼區塊、粗體、斜體、連結）
-  - Thinking blocks 可折疊區塊（黃色標示）
-- **操作功能**：
-  - 向執行中 Agent 傳送指令
-  - Stop / Restart / Pause Agent
-  - Focus mode（點擊 Agent 卡片 → 全寬終端）
-- **迭代執行面板**：上傳新文件 + 重新執行
-- **Plan Panel**：顯示待審核計劃、批准/拒絕
-- **Intervention Bell**：人工介入通知
+- `get_execution_plan` — 取得任務完整執行計畫（自動判 full/light 軌，自動注入規格閱讀／規格遵循／後端效能／後端安全規範）— **開工第一步**
+- `list_pending_tasks` — 待辦任務清單（可用 taskType / label / keyword / section / tag / statuses 過濾，含 sourceRef）
+- `get_task` — 取任務詳情（documents 預設不回傳，`includeDocuments=true` 才含）
+- `update_task_status` — 更新任務狀態（in_progress / completed / failed…）；completed 受 flow gate B + AI 回對閘門管制
+- `update_task` — 更新任務欄位（title / label / taskType / tags / section；status 不在白名單）
+- `next_task` — 推薦下一個可做任務（依賴已完成 + bug 優先）+ 備選清單
+- `resume_task` — 接手舊任務的一站式脈絡恢復
+- `get_task_outputs` — 取回任務歷史回報記錄（新 session 恢復脈絡用）
+- `create_task` — 建立任務
+- `add_task_dependency` — 加任務依賴（同專案、防自依賴、防重複、防循環）
+- `remove_task_dependency` — 移除任務依賴
 
-### 3. Active Agents（活躍 Agent）
-- 顯示所有專案中正在執行的 Agent
-- 按專案分組
-- 點擊跳轉到該專案的 Dashboard
+### 文件 / 規格（6）
 
-### 4. Tasks（任務看板）
-- 任務卡片：狀態、優先度、分配 Agent
-- 依賴關係視覺化
-- 狀態篩選：pending / in_progress / completed / failed
+- `fetch_svn_specs` — 依任務 parent_name 從 **SVN + 本地規格資料夾（specFolders）雙來源**合併抓取 SA/SD（docx 自動轉 md，含快取）
+- `get_documents` — 列出專案/任務的文件
+- `read_document` — 讀取文件內容
+- `search_documents` — 規格全文搜尋（回檔名 + 行號 + 前後文片段；查欄位名/API 路徑/訊息文字用這個，比整份讀省 context）
+- `find_axure_snapshot` — 依功能代碼找 Axure 原型 HTML
+- `fetch_task_attachments` — 下載 Asana 任務附件（如 BUG 截圖）
 
-### 5. Events（事件日誌）
-- 所有專案事件的時間軸
-- Agent 活動、任務轉換等
+### 規格缺口（5）
 
-### 6. Asana 整合頁面
-- 瀏覽 Asana 中指派給使用者的任務
-- 搜尋篩選（名稱、專案、標籤）
-- 檢視任務詳情、留言/故事
-- 匯入任務到專案（預填名稱、描述、模式）
+- `report_spec_gap` — 記錄規格未定義的欄位/API/邏輯（結構化的 [NEEDS_CLARIFICATION]）
+- `list_spec_gaps` — 依專案/任務/狀態列出待補規格
+- `resolve_spec_gap` — 使用者補完規格後標記已解決
+- `check_spec_changes` — 偵測規格檔案是否在開工後被改過（SVN + 本地 file_ref 皆支援；變更自動開 `spec_changed` 缺口）
+- `check_spec_consistency` — SA/SD 規格互相矛盾檢查（開工前建議）
 
-### 7. Sidebar
-- 專案列表 + 狀態徽章
-- 切換專案時載入完整狀態
-- 活動指示器（有新輸出時）
+### 規格回對（checklist / compliance）（6）
 
-### 8. Header
-- 專案名稱 + 模式徽章
-- 狀態指示器
-- WebSocket 連線狀態
-- Intervention Bell
-- 頁面切換
+- `save_spec_checklist` — 讀完規格後抽取逐項檢查表（light 軌改抽 BUG 原文）
+- `get_spec_checklist` — 取回任務的規格檢查表
+- `waive_checklist_item` — 豁免檢查項（必附理由，供稽核）
+- `run_spec_compliance` — **程式預檢**：用程式比對 checklist 與程式碼，抓文字/路徑錯字（advisory，不解鎖完成閘門）
+- `get_compliance_review_plan` — 取得 **AI 回對**派工計畫（派獨立 reviewer agent，implementer 不可自評）
+- `save_compliance_review` — 寫回 AI 回對結果；**最新回對 missing=0 才可標 completed**
 
----
+### 驗收（3）
 
-## 四、文件處理系統
+- `get_verification_plan` — 依任務 label 取驗收清單（後端：findAll / DDL / API 煙霧測試 / seed SQL；前端：tsc / Playwright）
+- `report_verification_result` — 回報逐項驗收結果
+- `report_verification_evidence` — 上傳驗收證據檔（如 Playwright 截圖），存進任務記錄
 
-### 上傳與儲存
-- 儲存於 `data/uploads/{projectId}/`
-- SQLite `documents` 表：id, projectId, filename, filePath, fileType, docType, parsedText
-- 支援 PDF、TXT、MD、DOCX
+### 專案筆記（3）
 
-### 文件類型
-- **SA**（系統分析）：需求、使用案例、使用者故事
-- **SD**（系統設計）：架構、API 設計、DB Schema、UI Wireframe
+- `save_project_note` — 記錄專案特有的坑/慣例（規格沒寫但必須遵守），自動注入後續 execution plan
+- `list_project_notes` — 查看筆記（預設只列 active）
+- `archive_project_note` — 封存筆記（不實體刪除）
 
-### 路由規則
-- Frontend Agent：SA + SD
-- Backend Agent：SD only
-- 其他角色：SA + SD
+### Flow-Gated 流程圖（4）
 
-### Workspace 注入
-- 執行時文件複製到 workspace `.ai_specs/` 目錄
-- CLAUDE.md 中建立索引標記：`<!-- AI_SPECS_INDEX -->` ... `<!-- END_AI_SPECS_INDEX -->`
-- 迭代執行時合併新舊文件
+- `save_task_flow` — 儲存流程圖（spec / plan / code / mindmap）
+- `report_flow_check` — 回報流程圖閘門 A/B 比對結果
+- `get_task_flows` — 列出任務已存的流程圖
+- `save_sa_flow` — 儲存 SA 文件的 Mermaid 流程圖快取
 
-### PDF 處理
-- 檔案路徑寫入 prompt，Agent 用 Claude 的 Read tool 原生讀取
+### Asana（3）
 
----
+- `sync_asana_tasks` — 同步 Asana 任務進本地 DB（5 分鐘內去重，`force=true` 覆寫；**同步後自動跑規格異動檢查**）
+- `list_asana_projects` — 列出 Asana workspace 專案（找 GID 綁定用）
+- `get_asana_task_comments` — 取任務留言（支援 omni UUID 或 Asana GID）
 
-## 五、技能系統
+### 進度回報（2）
 
-### Workspace 技能
-- Agent 的 `cwd` 設為 workspace 路徑
-- Claude Code 自動載入 `CLAUDE.md` 和 `.claude/` 目錄
-- Quick Mode 的 UI 可瀏覽 `.claude/commands/*.md` 技能清單
+- `report_output` — 回報關鍵輸出到 Web UI
+- `report_milestone` — 回報里程碑
 
-### Superpowers 方法論
+### 專案 / 設定 / 診斷（9）
 
-#### Brainstorm（腦力激盪）
-- Discovery → Design → Validation 三階段
-- 在設計完成前不寫程式
+- `list_projects` — 列出所有專案
+- `get_project` — 專案詳情（含任務統計、config_json）
+- `create_project` — 建立專案
+- `update_project` — 更新專案設定（含 specFolders，設定時做安全驗證）
+- `set_extra_prompt` — 設定專案前端/後端 Extra Prompt（自動注入每個 subagent）
+- `set_global_config` — 設定全域設定（`svn.username` / `svn.password` / `asana.pat`）
+- `get_skill_gen_plan` — 產生 workspace CLAUDE.md / .claude/skills 的完整計畫（官方 SKILL.md 資料夾格式 + 經驗筆記注入 + 開發前必讀章節）
+- `query_external_db` — 唯讀查詢專案綁定的外部 DB（列表、表結構、SELECT）
+- `health_check` — 診斷 DB / Web Server / Asana PAT / SVN CLI 狀態（畫面沒更新、撈不到規格先跑這個）
 
-#### TDD（測試驅動開發）
-- RED → GREEN → REFACTOR 循環
-- 必須先寫失敗測試，再寫最小實作
+### MCP Prompt（1）
 
-#### Systematic Debugging（系統化除錯）
-- Reproduce → Isolate → Root Cause Analysis → Fix & Verify
-- 基於證據，一次只改一個地方
+- `start_task` — 標準任務工作流（get_execution_plan → in_progress → 執行 → 回報 → 驗收 → completed/failed；taskId 可省略，會自動定位）
+
+> 連上此 MCP 的 session 會自動收到 server instructions（7 條使用規則），不需要改任何 CLAUDE.md。
 
 ---
 
-## 六、人工介入系統
+## 三、規格文件來源（雙來源）
 
-- Agent 輸出 `[NEEDS_HUMAN]` 時觸發
-- UI 顯示 Intervention Bell 通知
-- 使用者可：批准繼續 / 傳送指令 / 跳過任務
-- 所有介入記錄持久化到 SQLite
+### SVN 自動抓取
 
----
+1. 從任務 `parent_name` 提取功能代碼（`WA04_已轉派工作清單` → `WA04` → root code `WA`）
+2. `svn list --xml` 搜尋匹配資料夾（XML 輸出確保 UTF-8）
+3. 遞迴搜尋 `.docx` / `.pdf`，下載到 `data/uploads/{projectId}/`
+4. `.docx` 自動轉 `.md`（mammoth + turndown，含圖片抽取）
+5. 三層快取：SVN last-modified → SHA-256 hash → DB 記錄
 
-## 七、計劃審核系統
+### 本地規格資料夾（specFolders）
 
-- Agent 輸出 `[PLAN_READY]` 時暫停
-- PlanPanel 顯示待審核計劃（Markdown 格式）
-- 使用者批准或拒絕（附回饋）
-- 審核歷史記錄
+專案設定 `config_json.specFolders`（Web UI 的 ProjectSettings「規格資料夾」區塊，或 `update_project`）：
 
----
+```json
+{ "specFolders": [ { "path": "D:\\specs\\tvedi-docs", "gitPull": true } ] }
+```
 
-## 八、程式碼審查系統
-
-- 任務完成後自動觸發（若啟用）
-- 唯讀 Review Agent（只有 Read, Glob, Grep）
-- 檢查：正確性、安全漏洞、API 合約一致性、錯誤處理、程式碼風格
-- 報告分類：CRITICAL / WARNING / SUGGESTION
+- 抓取時與 SVN 結果**合併**，功能代碼比對邏輯相同，docx→md 轉換與版本記錄同構
+- docType 由檔名慣例推斷（SA/SD token 或「需求規格/系統分析/系統設計」字樣，預設 SD）
+- **git pull 安全鐵律**：git 只允許 `status --porcelain` / `rev-parse HEAD` / `log -1 --format=%cI -- <file>` / `pull --ff-only` 四種操作，絕不寫入、絕不 stash/reset；working tree dirty → 跳過 pull + 警告；pull 逾時/失敗 → 用現有內容 + 明確警告
+- **設定驗證**：path 必須是絕對路徑；與該專案 frontendPath/backendPath 相同或互為父子**一律拒絕**（防誤 pull 程式碼 workspace）
 
 ---
 
-## 九、迭代執行
+## 四、Web UI（可選監控）
 
-- 專案完成後，Dashboard 顯示「New Execution」面板
-- 上傳新增/更新的文件
-- 合併新舊文件後重新生成 Agent
-- 舊 Agent 輸出保留在終端歷史中
+Web Server (:3457) + Vite (:5174)。MCP 每次寫入操作會 POST `/api/mcp-notify` 讓 UI 即時更新；**Web Server 沒跑時 MCP 工具照常可用**。
 
----
-
-## 十、動態新增 Agent
-
-- 專案執行中可新增 Agent
-- 設定：角色、自定義 Prompt、模型、工作目錄、Workspace 技能、Superpowers
-- 用途：新增專家、平行處理、動態擴展
+- **Dashboard** — 專案概況、任務狀態、agent 輸出、里程碑
+- **規格治理收合區**（Dashboard 內）— 三個面板：
+  - **待補規格** — report_spec_gap 記錄的缺口，可標記已解決
+  - **規格回對** — checklist 項目與比對結果（matched / missing / waived）
+  - **專案筆記** — save_project_note 累積的經驗
+- **Tasks** — 任務清單、狀態追蹤
+- **Settings** — Global Settings（SVN 帳密、Asana PAT）、Project Settings（SVN 規格路徑、規格資料夾、Extra Prompt、Asana 綁定、外部 DB 連線）
+- **Gen Skills** — 觸發 get_skill_gen_plan 產生 workspace 的 CLAUDE.md + skills
 
 ---
 
-## 十一、Asana 整合
+## 五、產生 Workspace Skills
 
-- 需要設定 `ASANA_PAT` 環境變數
-- 瀏覽指派給使用者的任務
-- 搜尋篩選、檢視詳情和留言
-- 匯入任務：預填專案名稱、描述、模式
-- 任務備註中的 URL 可點擊
+`get_skill_gen_plan(projectId, workspaceType)` 回傳完整計畫，讓 orchestrator 派 Opus 級 subagent 深讀 codebase，產生或增強該 workspace 的 `CLAUDE.md` 與 `.claude/skills/`：
 
----
-
-## 十二、WebSocket 通訊協定
-
-### Client → Server
-| 訊息類型 | 用途 |
-|---------|------|
-| `project.create` | 建立專案 |
-| `project.uploadDocument` | 上傳文件 |
-| `project.deleteDocument` | 刪除文件 |
-| `project.clearDocuments` | 清除舊文件 |
-| `project.startExecution` | 開始執行 |
-| `project.pause` / `project.resume` | 暫停/恢復 |
-| `project.delete` | 刪除專案 |
-| `project.update` | 更新專案 |
-| `project.getState` | 取得完整狀態 |
-| `interview.userResponse` | 訪談回應 |
-| `interview.confirmSpec` | 確認規格 |
-| `agent.command` | 傳送指令給 Agent |
-| `agent.action` | 控制 Agent（stop/restart/pause） |
-| `agent.add` | 新增 Agent |
-| `agent.delete` | 刪除 Agent |
-| `agent.planAction` | 審核計劃 |
-| `intervention.resolve` | 回應介入 |
-| `asana.*` | Asana 相關操作 |
-
-### Server → Client
-| 訊息類型 | 用途 |
-|---------|------|
-| `projects.list` | 專案列表 |
-| `project.state` | 完整專案狀態 |
-| `project.documents` | 文件列表 |
-| `agent.output` | 串流 Agent 輸出 |
-| `agent.statusChange` | Agent 狀態變更 |
-| `agent.started` / `agent.completed` | Agent 開始/完成 |
-| `agent.initialPrompt` | Agent 初始 prompt |
-| `agent.planReady` / `agent.plans` | 計劃相關 |
-| `task.statusChange` | 任務狀態變更 |
-| `intervention.request` | 介入請求 |
-| `interview.*` | 訪談相關 |
-| `error` | 錯誤訊息 |
+- 採**官方 SKILL.md 資料夾格式**（`<skill-name>/SKILL.md`），也認得舊的平面 .md
+- 注入專案經驗筆記（save_project_note 累積的坑）
+- 含「開發前必讀」章節
 
 ---
 
-## 十三、持久化與資料庫
+## 六、Legacy 模式（已停用）
 
-- SQLite：`data/omni.db`
-- 表：projects, agents, tasks, task_dependencies, documents, events, agent_outputs, interventions, agent_plans, recent_paths
-- 重啟後完整保留歷史資料
+早期版本由 Web UI 直接 spawn Claude Code CLI 子程序執行任務（Spec Mode / Creative Mode / Quick Mode、master / architect / backend / frontend / devops / testing / review 角色、SDK / `claude -p` 派工）。
 
----
-
-## 十四、REST API 端點
-
-| 端點 | 用途 |
-|------|------|
-| `GET /api/skills?path=...` | 取得 workspace 技能列表 |
-| `GET /api/recent-paths?limit=...` | 最近使用的路徑 |
-| `POST /api/recent-paths` | 儲存路徑 |
-| `GET /api/browse-dir?path=...` | 瀏覽目錄（Folder Picker） |
+**這條路徑已禁用**：現行執行一律走**外部 Claude Code session + MCP 工具 + Agent tool 派 subagent**。相關程式碼（AgentManager、SpecModeHandler、CreativeModeHandler 等）僅供歷史參考，細節見 `ARCHITECTURE.md` 標注「Legacy」的章節。
 
 ---
 
-## 十五、技術細節
+## 七、技術細節
 
-- Server port：3457（可透過 `PORT` 環境變數設定）
-- Vite dev server：5174，proxy `/omni-ws` 和 `/api` 到 server
-- Claude CLI 路徑：`CLAUDE_PATH` 環境變數（預設 `claude`）
-- stdin prompt：初始 prompt 透過 stdin 傳送，格式 `{"type":"user","content":"..."}`
-- EventBus wildcard：`agent.*` 事件直接作為 WS 訊息廣播
-- SQLite datetime：`datetime('now')` 回傳 UTC 無 'Z'，前端補上 'Z'
+- MCP Server：stdio transport（`server/dist/mcp-entry.js`），由 Claude Code 依 `.mcp.json` 或 user-scope 註冊自動 spawn
+- **跨專案載入**：MCP process 內所有路徑以 repo root 解析（與 cwd 無關）；`DB_PATH` 可省略，啟動時 stderr 印出實際 DB 路徑
+- SQLite：`data/omni.db`，MCP process 與 Web Server 共用
+- Server port：3457（`PORT` env）；預設綁 `127.0.0.1`（`HOST` env 可改）
+- Node.js >= 20；SVN CLI >= 1.10（認證走 `--password-from-stdin`）
+- Windows：`tsx watch` 不穩定，改 `.ts` 後手動重啟 server；SVN 輸出用 `--xml` 避免 CP950 亂碼
