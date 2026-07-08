@@ -212,51 +212,60 @@ export function SpecCompliancePanel({ taskSummaries, loading, error, refetch }: 
 
               {/* detail */}
               {selectedTaskId === t.taskId && detail && (
-                <div className="pb-2 pl-1">
+                <div className="pb-3 pl-1">
                   {detail.latestRun && (
-                    <p className="text-[10px] text-muted-foreground mb-1">
+                    <p className="text-xs text-muted-foreground mb-2">
                       最後回對（{detail.latestRun.source === 'ai_review' ? 'AI 回對' : '程式預檢'}）：{parseServerDate(detail.latestRun.runAt).toLocaleString()}
                     </p>
                   )}
-                  <ul className="space-y-0.5">
-                    {sortedItems.map(item => {
-                      const status = statusOf(item);
-                      const r = resultByItemId.get(item.id);
-                      return (
-                        <li key={item.id} className="flex items-start gap-1.5 text-[11px]">
-                          <span className="flex-shrink-0 mt-px">{statusBadge(status)}</span>
-                          <span className="px-1 rounded bg-muted/60 text-muted-foreground text-[10px] flex-shrink-0 mt-px">
-                            {TYPE_LABELS[item.itemType] || item.itemType}
-                          </span>
-                          <div className="flex-1 min-w-0">
-                            <span className={`break-words ${status === 'missing' ? 'text-red-400' : status === 'waived' ? 'text-muted-foreground line-through' : 'text-foreground'}`}>
-                              {item.content}
-                            </span>
-                            {status === 'matched' && r?.evidence && r.evidence.length > 0 && (
-                              <span className="text-[10px] text-muted-foreground ml-1">
-                                {r.evidence.map(e => `${e.file}:${e.line}`).join(', ')}
-                              </span>
-                            )}
-                            {r?.note && status !== 'matched' && (
-                              <span className="text-[10px] text-muted-foreground ml-1">{r.note}</span>
-                            )}
-                            {item.waived && item.waiveReason && (
-                              <span className="text-[10px] text-muted-foreground ml-1">豁免：{item.waiveReason}</span>
-                            )}
-                          </div>
-                          {!item.waived && status === 'missing' && (
-                            <button
-                              onClick={() => void handleWaive(item)}
-                              disabled={waivingId === item.id}
-                              className="flex-shrink-0 px-1.5 py-0.5 text-[10px] font-medium rounded bg-amber-500/10 text-amber-400 border border-amber-500/20 hover:bg-amber-500/20 transition-colors disabled:opacity-50"
-                            >
-                              {waivingId === item.id ? '...' : '豁免'}
-                            </button>
-                          )}
-                        </li>
-                      );
-                    })}
-                  </ul>
+                  <div className="overflow-x-auto rounded border border-border/60">
+                    <table className="w-full text-xs border-collapse">
+                      <thead>
+                        <tr className="bg-muted/40 text-muted-foreground text-left">
+                          <th className="font-medium py-1.5 px-2 w-10 text-center">狀態</th>
+                          <th className="font-medium py-1.5 px-2 whitespace-nowrap">類型</th>
+                          <th className="font-medium py-1.5 px-2">內容</th>
+                          <th className="font-medium py-1.5 px-2">證據 / 說明</th>
+                          <th className="font-medium py-1.5 px-2 w-14"></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {sortedItems.map(item => {
+                          const status = statusOf(item);
+                          const r = resultByItemId.get(item.id);
+                          const detailText = status === 'matched'
+                            ? (r?.evidence?.length ? r.evidence.map(e => `${e.file}:${e.line}`).join(', ') : '')
+                            : item.waived && item.waiveReason ? `豁免：${item.waiveReason}`
+                            : r?.note || '';
+                          return (
+                            <tr key={item.id} className="border-t border-border/40 align-top">
+                              <td className="py-1.5 px-2 text-center">{statusBadge(status)}</td>
+                              <td className="py-1.5 px-2 whitespace-nowrap text-muted-foreground">
+                                {TYPE_LABELS[item.itemType] || item.itemType}
+                              </td>
+                              <td className={`py-1.5 px-2 break-words ${status === 'missing' ? 'text-red-400' : status === 'waived' ? 'text-muted-foreground line-through' : 'text-foreground'}`}>
+                                {item.content}
+                              </td>
+                              <td className="py-1.5 px-2 break-words text-muted-foreground font-mono text-[11px]">
+                                {detailText}
+                              </td>
+                              <td className="py-1.5 px-2 text-right">
+                                {!item.waived && status === 'missing' && (
+                                  <button
+                                    onClick={() => void handleWaive(item)}
+                                    disabled={waivingId === item.id}
+                                    className="px-2 py-0.5 text-xs font-medium rounded bg-amber-500/10 text-amber-400 border border-amber-500/20 hover:bg-amber-500/20 transition-colors disabled:opacity-50"
+                                  >
+                                    {waivingId === item.id ? '...' : '豁免'}
+                                  </button>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               )}
             </li>
