@@ -13,6 +13,10 @@ import mammoth from 'mammoth';
 import iconv from 'iconv-lite';
 import { getMcpDb } from '../db.js';
 import { getDataDir, getAsanaPat, ASANA_API_BASE, ASANA_FETCH_TIMEOUT_MS, truncateResponse } from '../helpers.js';
+import {
+  prepareFolder, findSpecFiles, getFileVersion, readSpecFolders, filterSafeSpecFolders,
+  type FolderSpecFile, type SpecFolderConfig,
+} from '../../documents/FolderSpecSource.js';
 
 interface DocumentRow {
   id: string;
@@ -237,7 +241,7 @@ export function registerDocumentTools(server: McpServer): void {
   // ── fetch_svn_specs ─────────────────────────────────────────
   server.tool(
     'fetch_svn_specs',
-    '從 SVN 自動抓取任務的 SA/SD 規格文件。根據任務的 parent_name 提取功能代碼，搜尋 SVN 中匹配的規格文件並下載。',
+    '從 SVN 與設定的規格資料夾（specFolders）自動抓取任務的 SA/SD 規格文件。根據任務的 parent_name 提取功能代碼，搜尋匹配的規格文件並下載/複製；git 規格資料夾會先安全地 pull --ff-only（dirty 跳過）。',
     {
       projectId: z.string().describe('專案 ID'),
       taskId: z.string().describe('任務 ID'),
@@ -257,22 +261,32 @@ export function registerDocumentTools(server: McpServer): void {
       }
 
       // 2. Get project SVN config
-      const project = db.prepare('SELECT config_json FROM projects WHERE id = ?').get(projectId) as
-        { config_json: string | null } | undefined;
+      const project = db.prepare('SELECT config_json, frontend_path, backend_path FROM projects WHERE id = ?').get(projectId) as
+        { config_json: string | null; frontend_path: string | null; backend_path: string | null } | undefined;
       if (!project) {
         return { content: [{ type: 'text' as const, text: `Error: Project "${projectId}" not found` }], isError: true };
       }
 
       let svnConfig: { frontendSpecPath?: string; backendSpecPath?: string } = {};
+      let specFolders: SpecFolderConfig[] = [];
+      const folderGuardWarnings: string[] = [];
       if (project.config_json) {
         try {
           const config = JSON.parse(project.config_json);
           svnConfig = config.svnConfig || {};
+          // Defense-in-depth：workspace 路徑可能在設定後才被改成與規格資料夾重疊
+          // （單邊更新繞過設定驗證）——抓取前複查，重疊一律跳過不跑 git。
+          const { safe, blockedWarnings } = filterSafeSpecFolders(
+            readSpecFolders(config), [project.frontend_path, project.backend_path],
+          );
+          specFolders = safe;
+          folderGuardWarnings.push(...blockedWarnings);
         } catch { /* ignore parse error */ }
       }
 
-      if (!svnConfig.frontendSpecPath && !svnConfig.backendSpecPath) {
-        return { content: [{ type: 'text' as const, text: `Error: Project has no SVN spec paths configured. Set svnConfig.frontendSpecPath and/or svnConfig.backendSpecPath in project settings.` }], isError: true };
+      const hasSvn = !!(svnConfig.frontendSpecPath || svnConfig.backendSpecPath);
+      if (!hasSvn && specFolders.length === 0) {
+        return { content: [{ type: 'text' as const, text: `Error: Project has no spec sources configured. Set svnConfig.frontendSpecPath / svnConfig.backendSpecPath and/or specFolders in project settings.` }], isError: true };
       }
 
       // 3. Get SVN credentials
@@ -303,10 +317,23 @@ export function registerDocumentTools(server: McpServer): void {
         rootCode = '__ALL__'; // signal to skip folder matching, search all files
       }
 
-      // 5. Determine SVN roots based on task label
-      const svnRoots = resolveSvnRoots(svnConfig, task.label);
-      if (svnRoots.length === 0) {
-        return { content: [{ type: 'text' as const, text: `No SVN root paths configured for task label "${task.label}"` }], isError: true };
+      // 5. Determine SVN roots based on task label (empty when only specFolders are configured)
+      const svnRoots = hasSvn ? resolveSvnRoots(svnConfig, task.label) : [];
+      if (svnRoots.length === 0 && specFolders.length === 0) {
+        return { content: [{ type: 'text' as const, text: `No SVN root paths configured for task label "${task.label}" and no spec folders configured` }], isError: true };
+      }
+
+      // Extract Chinese names for fallback matching (e.g. "收文單" from "收文單_前端" or "DF01_收文單")
+      // — shared by both SVN and folder matching
+      const chineseNames: string[] = [];
+      {
+        const cnSearchText = task.parent_name || task.title;
+        const cnMatch = cnSearchText.replace(/^[A-Za-z0-9]+[_\s]*/g, '').replace(/[_\s]*(前端|後端|串接)$/g, '');
+        if (cnMatch && /[一-鿿]/.test(cnMatch)) chineseNames.push(cnMatch);
+        if (task.title) {
+          const titleCn = task.title.replace(/^[A-Za-z0-9]+[_\s]*/g, '').replace(/[_\s]*(前端|後端|串接)$/g, '');
+          if (titleCn && /[一-鿿]/.test(titleCn) && !chineseNames.includes(titleCn)) chineseNames.push(titleCn);
+        }
       }
 
       // Detect svn binary and NTLM mode
@@ -346,18 +373,6 @@ export function registerDocumentTools(server: McpServer): void {
             }
           }
 
-          // Extract Chinese names for fallback matching (e.g. "收文單" from "收文單_前端" or "DF01_收文單")
-          const chineseNames: string[] = [];
-          const searchText = task.parent_name || task.title;
-          // Remove code prefix and label suffix, keep Chinese part
-          const cnMatch = searchText.replace(/^[A-Za-z0-9]+[_\s]*/g, '').replace(/[_\s]*(前端|後端|串接)$/g, '');
-          if (cnMatch && /[一-鿿]/.test(cnMatch)) chineseNames.push(cnMatch);
-          // Also try title
-          if (task.title) {
-            const titleCn = task.title.replace(/^[A-Za-z0-9]+[_\s]*/g, '').replace(/[_\s]*(前端|後端|串接)$/g, '');
-            if (titleCn && /[一-鿿]/.test(titleCn) && !chineseNames.includes(titleCn)) chineseNames.push(titleCn);
-          }
-
           const matchedFiles = findMatchingFiles(allFiles, functionCode, chineseNames);
 
           // Fallback: check 0_共用/ if nothing found
@@ -378,12 +393,6 @@ export function registerDocumentTools(server: McpServer): void {
         }
       }
 
-      if (allMatchedFiles.length === 0) {
-        return {
-          content: [{ type: 'text' as const, text: `No spec files found for "${functionCode}" (rootCode: ${rootCode}) in SVN.\nSearched roots: ${svnRoots.join(', ')}` }],
-        };
-      }
-
       // 7. Download files and save to DB
       const uploadsDir = path.join(getDataDir(), 'uploads', projectId);
       fs.mkdirSync(uploadsDir, { recursive: true });
@@ -392,7 +401,8 @@ export function registerDocumentTools(server: McpServer): void {
       const targetDir = path.join(uploadsDir, subFolder);
       fs.mkdirSync(targetDir, { recursive: true });
 
-      const results: Array<{ docType: string; filename: string; mdPath?: string }> = [];
+      const results: Array<{ docType: string; filename: string; mdPath?: string; source: 'svn' | 'folder' }> = [];
+      const sourceWarnings: string[] = [...folderGuardWarnings];
 
       for (const { fileUrl, isFrontendRoot } of allMatchedFiles) {
         try {
@@ -425,7 +435,7 @@ export function registerDocumentTools(server: McpServer): void {
               'INSERT OR IGNORE INTO task_documents (task_id, document_id) VALUES (?, ?)'
             ).run(taskId, existing.id);
             recordSpecVersion();
-            results.push({ docType, filename });
+            results.push({ docType, filename, source: 'svn' });
             continue;
           }
 
@@ -451,7 +461,7 @@ export function registerDocumentTools(server: McpServer): void {
             ).run(taskId, existing.id);
             recordSpecVersion();
             try { fs.unlinkSync(tempPath); } catch { /* ignore */ }
-            results.push({ docType, filename });
+            results.push({ docType, filename, source: 'svn' });
             continue;
           }
 
@@ -464,17 +474,17 @@ export function registerDocumentTools(server: McpServer): void {
               try {
                 const mdPath = await convertDocxToMarkdown(buffer, existing.id, targetDir, filename);
                 parsedText = `[Document saved at: ${mdPath.replace(/\\/g, '/')}]`;
-                results.push({ docType, filename, mdPath });
+                results.push({ docType, filename, mdPath, source: 'svn' });
               } catch {
                 parsedText = `[DOCX file saved at: ${existing.file_path}]`;
-                results.push({ docType, filename });
+                results.push({ docType, filename, source: 'svn' });
               }
             } else if (filename.toLowerCase().endsWith('.pdf')) {
               parsedText = `[PDF file - use Read tool to view: ${existing.file_path}]`;
-              results.push({ docType, filename });
+              results.push({ docType, filename, source: 'svn' });
             } else {
               parsedText = fs.readFileSync(existing.file_path, 'utf-8');
-              results.push({ docType, filename });
+              results.push({ docType, filename, source: 'svn' });
             }
 
             db.prepare(
@@ -501,20 +511,20 @@ export function registerDocumentTools(server: McpServer): void {
             try {
               const mdPath = await convertDocxToMarkdown(buffer, docId, targetDir, filename);
               parsedText = `[Document saved at: ${mdPath.replace(/\\/g, '/')}]`;
-              results.push({ docType, filename, mdPath });
+              results.push({ docType, filename, mdPath, source: 'svn' });
             } catch {
               parsedText = `[DOCX file saved at: ${filePath}]`;
-              results.push({ docType, filename });
+              results.push({ docType, filename, source: 'svn' });
             }
           } else if (filename.toLowerCase().endsWith('.pdf')) {
             parsedText = `[PDF file - use Read tool to view: ${filePath}]`;
-            results.push({ docType, filename });
+            results.push({ docType, filename, source: 'svn' });
           } else if (['.md', '.txt'].some(ext => filename.toLowerCase().endsWith(ext))) {
             parsedText = buffer.toString('utf-8');
-            results.push({ docType, filename });
+            results.push({ docType, filename, source: 'svn' });
           } else {
             parsedText = `[Binary file saved at: ${filePath}]`;
-            results.push({ docType, filename });
+            results.push({ docType, filename, source: 'svn' });
           }
 
           db.prepare(`
@@ -533,27 +543,150 @@ export function registerDocumentTools(server: McpServer): void {
         }
       }
 
+      // 7b. Local spec folders（與 SVN 並存）— prepare (safe git pull --ff-only) → match → copy/convert
+      for (const folder of specFolders) {
+        const prep = await prepareFolder(folder);
+        sourceWarnings.push(...prep.warnings.map(w => `${folder.path}: ${w}`));
+        if (!prep.ok) {
+          sourceWarnings.push(prep.error || `規格資料夾無法使用：${folder.path}`);
+          continue;
+        }
+
+        let folderFiles: FolderSpecFile[];
+        try {
+          folderFiles = findSpecFiles(folder.path, functionCode, chineseNames);
+        } catch (err) {
+          sourceWarnings.push(`${folder.path}: 掃描失敗：${err instanceof Error ? err.message : String(err)}`);
+          continue;
+        }
+
+        for (const file of folderFiles) {
+          try {
+            const version = await getFileVersion(folder.path, file.filePath, prep.isGitRepo);
+            const fileRef = file.filePath.replace(/\\/g, '/');
+            const filename = path.basename(file.filePath);
+            const docType = file.docType;
+
+            const recordSpecVersion = () => {
+              db.prepare(`
+                INSERT OR REPLACE INTO task_spec_versions (task_id, file_ref, last_modified, recorded_at)
+                VALUES (?, ?, ?, datetime('now'))
+              `).run(taskId, fileRef, version);
+            };
+
+            const existing = db.prepare(
+              'SELECT id, file_path, svn_last_modified, content_hash FROM documents WHERE project_id = ? AND source_url = ?'
+            ).get(projectId, fileRef) as { id: string; file_path: string; svn_last_modified: string | null; content_hash: string | null } | undefined;
+
+            // Dedupe: same file + same version → just bind
+            if (existing && existing.svn_last_modified === version && fs.existsSync(existing.file_path)) {
+              db.prepare('INSERT OR IGNORE INTO task_documents (task_id, document_id) VALUES (?, ?)').run(taskId, existing.id);
+              recordSpecVersion();
+              results.push({ docType, filename, source: 'folder' });
+              continue;
+            }
+
+            const buffer = fs.readFileSync(file.filePath);
+            const newHash = createHash('sha256').update(buffer).digest('hex');
+
+            // Content identical → just refresh version and bind
+            if (existing && existing.content_hash === newHash && fs.existsSync(existing.file_path)) {
+              db.prepare('UPDATE documents SET svn_last_modified = ? WHERE id = ?').run(version, existing.id);
+              db.prepare('INSERT OR IGNORE INTO task_documents (task_id, document_id) VALUES (?, ?)').run(taskId, existing.id);
+              recordSpecVersion();
+              results.push({ docType, filename, source: 'folder' });
+              continue;
+            }
+
+            if (existing) {
+              // Content changed → overwrite cached copy and re-parse
+              fs.writeFileSync(existing.file_path, buffer);
+              const parsed = await buildFolderParsedText(buffer, existing.id, targetDir, filename, existing.file_path);
+              db.prepare(
+                "UPDATE documents SET svn_last_modified = ?, content_hash = ?, parsed_text = ?, created_at = datetime('now') WHERE id = ?"
+              ).run(version, newHash, parsed.parsedText, existing.id);
+              db.prepare('INSERT OR IGNORE INTO task_documents (task_id, document_id) VALUES (?, ?)').run(taskId, existing.id);
+              recordSpecVersion();
+              results.push({ docType, filename, ...(parsed.mdPath && { mdPath: parsed.mdPath }), source: 'folder' });
+              continue;
+            }
+
+            // New document — copy into uploads/{projectId}/{subFolder}/
+            const docId = randomUUID();
+            const labeledFilename = `[${docType}] ${filename}`;
+            const filePath = path.join(targetDir, `${docId}-${labeledFilename}`);
+            fs.writeFileSync(filePath, buffer);
+            const parsed = await buildFolderParsedText(buffer, docId, targetDir, filename, filePath);
+
+            db.prepare(`
+              INSERT INTO documents (id, project_id, filename, file_path, file_type, doc_type, parsed_text, source, source_url, svn_last_modified, content_hash)
+              VALUES (?, ?, ?, ?, ?, ?, ?, 'folder', ?, ?, ?)
+            `).run(docId, projectId, labeledFilename, filePath, 'binary', docType, parsed.parsedText, fileRef, version, newHash);
+
+            db.prepare('INSERT OR IGNORE INTO task_documents (task_id, document_id) VALUES (?, ?)').run(taskId, docId);
+            recordSpecVersion();
+            results.push({ docType, filename, ...(parsed.mdPath && { mdPath: parsed.mdPath }), source: 'folder' });
+          } catch (err) {
+            sourceWarnings.push(`${file.relPath}: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+      }
+
       // 8. Format result
+      const warningBlock = sourceWarnings.length > 0
+        ? `\n\nWarnings:\n${sourceWarnings.map(w => `- ⚠ ${w}`).join('\n')}`
+        : '';
+
       if (results.length === 0) {
+        if (allMatchedFiles.length > 0) {
+          return {
+            content: [{ type: 'text' as const, text: `Found ${allMatchedFiles.length} matching files in SVN but all failed to download.${warningBlock}` }],
+            isError: true,
+          };
+        }
+        const searched: string[] = [];
+        if (svnRoots.length > 0) searched.push(`SVN roots: ${svnRoots.join(', ')}`);
+        if (specFolders.length > 0) searched.push(`Spec folders: ${specFolders.map(f => f.path).join(', ')}`);
         return {
-          content: [{ type: 'text' as const, text: `Found ${allMatchedFiles.length} matching files in SVN but all failed to download.` }],
-          isError: true,
+          content: [{ type: 'text' as const, text: `No spec files found for "${functionCode}" (rootCode: ${rootCode}).\nSearched ${searched.join(' | ')}${warningBlock}` }],
+          ...(sourceWarnings.length > 0 && { isError: true }),
         };
       }
 
       const lines = results.map(r => {
         const mdNote = r.mdPath ? ` → ${path.basename(r.mdPath)}` : '';
-        return `- [${r.docType}] ${r.filename}${mdNote}`;
+        return `- [${r.docType}] ${r.filename}${mdNote} (${r.source})`;
       });
 
       return {
         content: [{
           type: 'text' as const,
-          text: `Found ${results.length} spec files for ${functionCode}:\n${lines.join('\n')}\n\nFiles saved to ${targetDir.replace(/\\/g, '/')}`,
+          text: `Found ${results.length} spec files for ${functionCode}:\n${lines.join('\n')}\n\nFiles saved to ${targetDir.replace(/\\/g, '/')}${warningBlock}`,
         }],
       };
     },
   );
+}
+
+/**
+ * Build parsed_text for a folder-source document (mirrors the SVN branch logic):
+ * DOCX → convert to Markdown pointer; PDF → Read-tool pointer; MD/TXT → inline text.
+ */
+async function buildFolderParsedText(
+  buffer: Buffer, docId: string, targetDir: string, filename: string, savedPath: string,
+): Promise<{ parsedText: string; mdPath?: string }> {
+  const lower = filename.toLowerCase();
+  if (lower.endsWith('.docx')) {
+    try {
+      const mdPath = await convertDocxToMarkdown(buffer, docId, targetDir, filename);
+      return { parsedText: `[Document saved at: ${mdPath.replace(/\\/g, '/')}]`, mdPath };
+    } catch {
+      return { parsedText: `[DOCX file saved at: ${savedPath}]` };
+    }
+  }
+  if (lower.endsWith('.pdf')) return { parsedText: `[PDF file - use Read tool to view: ${savedPath}]` };
+  if (lower.endsWith('.md') || lower.endsWith('.txt')) return { parsedText: buffer.toString('utf-8') };
+  return { parsedText: `[Binary file saved at: ${savedPath}]` };
 }
 
 // =============================================

@@ -54,6 +54,17 @@ export interface SvnConfig {
   backendSpecPath: string;   // SVN root for backend specs
 }
 
+/**
+ * A local folder spec source (parallel to SVN).
+ * path must be an absolute path (local disk or UNC share).
+ * gitPull=true → when the folder is a git repo, run a safe `git pull --ff-only`
+ * before scanning (dirty tree → skip pull; failure → warn + use existing content).
+ */
+export interface SpecFolderConfig {
+  path: string;
+  gitPull?: boolean;
+}
+
 /** SVN credentials stored in global config (not per-project) */
 export interface SvnCredentials {
   username: string;
@@ -68,6 +79,7 @@ export interface ProjectConfig {
   autoExecuteConfig?: { bug: boolean; feature: boolean; refactor: boolean };
   asanaSyncConfig?: AsanaSyncConfig;
   svnConfig?: SvnConfig;
+  specFolders?: SpecFolderConfig[];
   axshareUrl?: string;
   dbConnections?: import('./schema-types.js').DbConnectionConfig[];
 }
@@ -93,7 +105,7 @@ export interface Document {
   fileType: string | null;
   docType: DocType | null;
   parsedText: string | null;
-  source: 'upload' | 'svn';
+  source: 'upload' | 'svn' | 'folder';
   sourceUrl: string | null;
   svnLastModified: string | null;
   createdAt: string;

@@ -128,7 +128,7 @@ export class DocumentParser {
     content: string,
     fileType: string,
     docType: DocType = 'SD',
-    opts?: { source?: 'upload' | 'svn'; sourceUrl?: string; svnLastModified?: string; subFolder?: string },
+    opts?: { source?: 'upload' | 'svn' | 'folder'; sourceUrl?: string; svnLastModified?: string; subFolder?: string },
   ): Promise<ParsedDocument> {
     const id = genId();
     const source = opts?.source || 'upload';
@@ -202,7 +202,7 @@ export class DocumentParser {
     filename: string,
     buffer: Buffer,
     docType: DocType = 'SD',
-    opts?: { source?: 'upload' | 'svn'; sourceUrl?: string; svnLastModified?: string; parsedText?: string; subFolder?: string },
+    opts?: { source?: 'upload' | 'svn' | 'folder'; sourceUrl?: string; svnLastModified?: string; parsedText?: string; subFolder?: string },
   ): Promise<ParsedDocument> {
     const id = genId();
     const source = opts?.source || 'upload';

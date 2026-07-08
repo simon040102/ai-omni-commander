@@ -50,6 +50,36 @@ describe('project-tools', () => {
     });
   });
 
+  describe('update_project specFolders overlap guard', () => {
+    it('rejects configJson whose specFolders overlap a workspace', async () => {
+      testDb.prepare('INSERT INTO projects (id, name, working_dir, frontend_path) VALUES (?, ?, ?, ?)')
+        .run('p1', 'P', 'D:\\fork\\app', 'D:\\fork\\app');
+
+      const result = await callTool(server, 'update_project', {
+        projectId: 'p1',
+        configJson: JSON.stringify({ specFolders: [{ path: 'D:\\fork\\app\\docs', gitPull: true }] }),
+      });
+
+      expect(result.isError).toBe(true);
+    });
+
+    it('rejects single-side workspace update that would overlap existing specFolders (A4 bypass)', async () => {
+      testDb.prepare('INSERT INTO projects (id, name, working_dir, frontend_path, config_json) VALUES (?, ?, ?, ?, ?)')
+        .run('p1', 'P', 'D:\\fork\\app', 'D:\\fork\\app', JSON.stringify({ specFolders: [{ path: 'D:\\specs\\docs', gitPull: true }] }));
+
+      // 不帶 configJson、只改 frontendPath 指向規格資料夾 → 必須被擋
+      const result = await callTool(server, 'update_project', {
+        projectId: 'p1',
+        frontendPath: 'D:\\specs\\docs',
+      });
+
+      expect(result.isError).toBe(true);
+      // 專案路徑未被改動
+      const row = testDb.prepare("SELECT frontend_path FROM projects WHERE id = 'p1'").get() as { frontend_path: string };
+      expect(row.frontend_path).toBe('D:\\fork\\app');
+    });
+  });
+
   describe('get_project', () => {
     it('returns project with task stats', async () => {
       testDb.prepare(`INSERT INTO projects (id, name, working_dir) VALUES (?, ?, ?)`).run('p1', 'Test', '/tmp');

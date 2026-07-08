@@ -3,8 +3,9 @@ import path from 'node:path';
 import fs from 'node:fs';
 import iconv from 'iconv-lite';
 import mammoth from 'mammoth';
-import type { SvnConfig, SvnCredentials, DocType } from '@omni/shared';
+import type { SvnConfig, SvnCredentials, DocType, SpecFolderConfig } from '@omni/shared';
 import type { DocumentParser } from '../documents/DocumentParser.js';
+import { prepareFolder, findSpecFiles, getFileVersion } from '../documents/FolderSpecSource.js';
 import { bindDocumentToTask, getDocumentsForTask } from '../db/queries/taskDocuments.js';
 import { recordTaskSpecVersion } from '../db/queries/taskSpecVersions.js';
 import { getSvnCredentials } from '../db/queries/globalConfig.js';
@@ -257,6 +258,95 @@ export class SvnSpecService {
     }
 
     return docIds;
+  }
+
+  /**
+   * Fetch spec documents from configured local spec folders (specFolders in
+   * project config) — the folder-source counterpart of fetchSpecsForTask.
+   *
+   * Per folder: prepareFolder (safe git pull --ff-only when configured) →
+   * findSpecFiles by function code → copy/convert into uploads/{projectId}/ →
+   * documents upsert (source='folder', dedupe by source_url + version) →
+   * task_documents binding → task_spec_versions record (file_ref = absolute path).
+   *
+   * Never throws for per-folder problems: prepare/pull issues become warnings,
+   * unreachable folders become errors — the caller decides how to present them
+   * (docs found + warnings → doc-section warnings; nothing at all → error banner).
+   */
+  async fetchFolderSpecsForTask(
+    projectId: string,
+    taskId: string,
+    parentName: string,
+    specFolders: SpecFolderConfig[],
+    _taskLabel: string,
+  ): Promise<{ docIds: string[]; warnings: string[]; errors: string[] }> {
+    const functionCode = extractFunctionCode(parentName) || parentName;
+    const subFolder = `${functionCode}_${taskId.slice(0, 8)}`;
+    const docIds: string[] = [];
+    const warnings: string[] = [];
+    const errors: string[] = [];
+
+    for (const folder of specFolders) {
+      const prep = await prepareFolder(folder);
+      warnings.push(...prep.warnings.map(w => `${folder.path}: ${w}`));
+      if (!prep.ok) {
+        errors.push(prep.error || `規格資料夾無法使用：${folder.path}`);
+        continue;
+      }
+
+      let files;
+      try {
+        files = findSpecFiles(folder.path, functionCode);
+      } catch (err) {
+        errors.push(`${folder.path}: 掃描失敗：${firstLine((err as Error).message)}`);
+        continue;
+      }
+      if (files.length === 0) continue;
+
+      logger.info({ projectId, taskId, folder: folder.path, functionCode, fileCount: files.length }, 'Found matching spec files in local folder');
+
+      for (const file of files) {
+        try {
+          const version = await getFileVersion(folder.path, file.filePath, prep.isGitRepo);
+          const sourceRef = file.filePath.replace(/\\/g, '/');
+          const filename = path.basename(file.filePath);
+
+          // Dedupe: same file (source_url) + same version → just re-bind
+          const cached = this.documentParser.findBySourceUrl(projectId, sourceRef);
+          if (cached && cached.svnLastModified === version && fs.existsSync(cached.filePath)) {
+            bindDocumentToTask(taskId, cached.id);
+            recordTaskSpecVersion(taskId, sourceRef, version);
+            docIds.push(cached.id);
+            continue;
+          }
+
+          const buffer = fs.readFileSync(file.filePath);
+          const parsedText = await this.extractText(file.filePath, filename);
+
+          if (cached) {
+            await this.documentParser.updateSvnDocument(cached.id, buffer, version, parsedText || undefined);
+            bindDocumentToTask(taskId, cached.id);
+            recordTaskSpecVersion(taskId, sourceRef, version);
+            docIds.push(cached.id);
+            continue;
+          }
+
+          const labeledFilename = `[${file.docType}] ${filename}`;
+          const doc = await this.documentParser.saveFromBuffer(
+            projectId, labeledFilename, buffer, file.docType,
+            { source: 'folder', sourceUrl: sourceRef, svnLastModified: version, parsedText: parsedText || undefined, subFolder },
+          );
+          bindDocumentToTask(taskId, doc.id);
+          recordTaskSpecVersion(taskId, sourceRef, version);
+          docIds.push(doc.id);
+          logger.info({ docId: doc.id, filename, sourceRef }, 'Folder spec document saved and bound to task');
+        } catch (err) {
+          errors.push(`${file.relPath}: ${firstLine((err as Error).message)}`);
+        }
+      }
+    }
+
+    return { docIds, warnings, errors };
   }
 
   /**

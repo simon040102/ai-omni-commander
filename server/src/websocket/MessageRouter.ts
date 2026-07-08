@@ -15,6 +15,7 @@ import type {
 } from '@omni/shared';
 import type { SvnConfig } from '@omni/shared';
 import { normalizeSvnUrl, extractFunctionCode, runCommand, buildSvnAuth, buildCurlAuth } from '../svn/SvnSpecService.js';
+import { validateSpecFolders } from '../documents/FolderSpecSource.js';
 import type { SvnSpecService } from '../svn/SvnSpecService.js';
 import { getSvnCredentials, setSvnCredentials, getAsanaPat, setAsanaPat, getGlobalMcpServers, setGlobalMcpServers } from '../db/queries/globalConfig.js';
 import type { McpStdioServerConfig } from '@omni/shared';
@@ -619,6 +620,37 @@ export function registerHandlers(
     if (payload.asanaProjectGid !== undefined) updates.asanaProjectGid = payload.asanaProjectGid;
     if (payload.dbConnectionString !== undefined) updates.dbConnectionString = payload.dbConnectionString;
     if (payload.configJson !== undefined) updates.configJson = payload.configJson ?? undefined;
+
+    // Validate specFolders vs workspace overlap (絕對路徑、不可與 workspace 重疊) — throws → error toast
+    // 重疊不變量必須在「任一邊」改變時重驗：configJson 帶 specFolders 時驗新值；
+    // 只改 frontendPath/backendPath 時，對「既存」specFolders 重驗（防單邊更新繞過）。
+    {
+      const effectiveFrontend = payload.frontendPath !== undefined ? payload.frontendPath : existing.frontendPath;
+      const effectiveBackend = payload.backendPath !== undefined ? payload.backendPath : existing.backendPath;
+
+      let specFoldersRaw: unknown;
+      if (updates.configJson) {
+        let parsedConfig: unknown;
+        try {
+          parsedConfig = JSON.parse(updates.configJson);
+        } catch {
+          throw new Error('configJson 不是有效的 JSON');
+        }
+        specFoldersRaw = (parsedConfig as { specFolders?: unknown } | null)?.specFolders;
+      } else if (payload.frontendPath !== undefined || payload.backendPath !== undefined) {
+        // workspace 路徑變更但沒帶 configJson：對既存設定重驗
+        try {
+          specFoldersRaw = (JSON.parse(existing.configJson || '{}') as { specFolders?: unknown } | null)?.specFolders;
+        } catch { /* 既存 config 損壞時交由其他路徑處理 */ }
+      }
+
+      if (specFoldersRaw !== undefined) {
+        const { warnings } = validateSpecFolders(specFoldersRaw, [effectiveFrontend, effectiveBackend]);
+        if (warnings.length > 0) {
+          logger.warn({ projectId: payload.projectId, warnings }, 'specFolders validation warnings');
+        }
+      }
+    }
 
     updateProject(payload.projectId, updates);
     logger.info({ projectId: payload.projectId }, 'Project updated');

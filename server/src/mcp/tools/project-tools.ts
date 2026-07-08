@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { getMcpDb } from '../db.js';
 import { notifyWebServer } from '../notify.js';
 import { parseJson, maskProjectConfig } from '../helpers.js';
+import { validateSpecFolders } from '../../documents/FolderSpecSource.js';
 
 function genId(): string {
   return crypto.randomUUID();
@@ -164,6 +165,35 @@ export function registerProjectTools(server: McpServer): void {
       const project = db.prepare('SELECT * FROM projects WHERE id = ?').get(projectId) as ProjectRow | undefined;
       if (!project) {
         return { content: [{ type: 'text' as const, text: `Error: Project "${projectId}" not found` }], isError: true };
+      }
+
+      // Validate specFolders vs workspace overlap (絕對路徑、不可與 workspace 重疊)。
+      // 重疊不變量在「任一邊」改變時都要重驗：configJson 帶 specFolders 驗新值；
+      // 只改 frontendPath/backendPath 時對「既存」specFolders 重驗（防單邊更新繞過）。
+      {
+        const effectiveFrontend = frontendPath !== undefined ? frontendPath : project.frontend_path;
+        const effectiveBackend = backendPath !== undefined ? backendPath : project.backend_path;
+
+        let specFoldersRaw: unknown;
+        if (configJson !== undefined && configJson) {
+          let parsedConfig: unknown;
+          try {
+            parsedConfig = JSON.parse(configJson);
+          } catch {
+            return { content: [{ type: 'text' as const, text: 'Error: configJson is not valid JSON' }], isError: true };
+          }
+          specFoldersRaw = (parsedConfig as { specFolders?: unknown } | null)?.specFolders;
+        } else if (frontendPath !== undefined || backendPath !== undefined) {
+          specFoldersRaw = parseJson<{ specFolders?: unknown }>(project.config_json, {}).specFolders;
+        }
+
+        if (specFoldersRaw !== undefined) {
+          try {
+            validateSpecFolders(specFoldersRaw, [effectiveFrontend, effectiveBackend]);
+          } catch (err) {
+            return { content: [{ type: 'text' as const, text: `Error: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
+          }
+        }
       }
 
       // Build SET clause dynamically from provided fields

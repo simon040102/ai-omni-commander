@@ -14,6 +14,22 @@ interface SvnConfig {
   backendSpecPath: string;
 }
 
+interface SpecFolderEntry {
+  path: string;
+  gitPull: boolean;
+}
+
+// Windows drive (D:\ or D:/), UNC (\\nas\share), or POSIX (/...)
+const isAbsolutePath = (p: string) => /^[A-Za-z]:[\\/]/.test(p) || p.startsWith('\\\\') || p.startsWith('/');
+
+const normalizePathForCompare = (p: string) => p.replace(/[\\/]+/g, '/').replace(/\/+$/, '').toLowerCase();
+
+const pathsOverlap = (a: string, b: string) => {
+  const na = normalizePathForCompare(a);
+  const nb = normalizePathForCompare(b);
+  return na === nb || na.startsWith(nb + '/') || nb.startsWith(na + '/');
+};
+
 export function ProjectSettings() {
   const project = useProjectStore(s => s.projects.find(p => p.id === s.currentProjectId));
   const client = useWsStore(s => s.client);
@@ -32,6 +48,9 @@ export function ProjectSettings() {
   // SVN config state (per-project paths)
   const [svnFrontendPath, setSvnFrontendPath] = useState('');
   const [svnBackendPath, setSvnBackendPath] = useState('');
+
+  // Local spec folders (parallel spec source to SVN)
+  const [specFolders, setSpecFolders] = useState<SpecFolderEntry[]>([]);
 
   // Axure Share URL
   const [axshareUrl, setAxshareUrl] = useState('');
@@ -77,6 +96,10 @@ export function ProjectSettings() {
       const svn = existingConfig?.svnConfig as SvnConfig | undefined;
       setSvnFrontendPath(svn?.frontendSpecPath || '');
       setSvnBackendPath(svn?.backendSpecPath || '');
+      const savedFolders = existingConfig?.specFolders as Array<{ path?: string; gitPull?: boolean }> | undefined;
+      setSpecFolders(Array.isArray(savedFolders)
+        ? savedFolders.map(f => ({ path: f.path || '', gitPull: f.gitPull === true }))
+        : []);
       setAxshareUrl(existingConfig?.axshareUrl || '');
       setFrontendExtraPrompt(existingConfig?.frontendExtraPrompt || '');
       setBackendExtraPrompt(existingConfig?.backendExtraPrompt || '');
@@ -106,9 +129,27 @@ export function ProjectSettings() {
       backendSpecPath: svnBackendPath.trim(),
     } : undefined;
 
+    // Validate spec folders client-side (server re-validates on save)
+    const cleanedFolders = specFolders
+      .map(f => ({ path: f.path.trim(), gitPull: f.gitPull }))
+      .filter(f => f.path.length > 0);
+    for (const f of cleanedFolders) {
+      if (!isAbsolutePath(f.path)) {
+        addToast({ type: 'error', title: '規格資料夾路徑無效', message: `必須是絕對路徑：${f.path}` });
+        return;
+      }
+      for (const ws of [frontendPath.trim(), backendPath.trim()].filter(Boolean)) {
+        if (pathsOverlap(f.path, ws)) {
+          addToast({ type: 'error', title: '規格資料夾路徑無效', message: `不可與 Frontend/Backend Path 相同或互為父子：${f.path}` });
+          return;
+        }
+      }
+    }
+
     const newConfig = {
       ...(existingConfig || {}),
       svnConfig,
+      specFolders: cleanedFolders.length > 0 ? cleanedFolders : undefined,
       axshareUrl: axshareUrl.trim() || undefined,
       frontendExtraPrompt: frontendExtraPrompt.trim() || undefined,
       backendExtraPrompt: backendExtraPrompt.trim() || undefined,
@@ -130,9 +171,9 @@ export function ProjectSettings() {
       },
     });
 
-    addToast({ type: 'success', title: 'Project settings saved' });
+    addToast({ type: 'success', title: '已儲存專案設定' });
   }, [client, project, name, frontendPath, backendPath, asanaProjectGid, dbConnections,
-    svnFrontendPath, svnBackendPath, axshareUrl, frontendExtraPrompt, backendExtraPrompt, existingConfig, addToast]);
+    svnFrontendPath, svnBackendPath, specFolders, axshareUrl, frontendExtraPrompt, backendExtraPrompt, existingConfig, addToast]);
 
   const handleGenSkills = useCallback((workspaceType: 'frontend' | 'backend') => {
     if (!project) return;
@@ -278,6 +319,53 @@ export function ProjectSettings() {
               className="w-full bg-muted border border-border rounded-md px-3 py-2 text-sm font-mono outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
             />
           </div>
+        </div>
+
+        {/* Local Spec Folders (parallel spec source to SVN) */}
+        <div className="border border-border rounded-lg p-4 space-y-3">
+          <div className="flex items-center gap-2">
+            <svg className="w-4 h-4 text-amber-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+            </svg>
+            <h4 className="text-sm font-medium">規格資料夾（本地 / NAS）</h4>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            與 SVN 並存的規格來源。抓取時依功能代碼掃描資料夾中的 .docx/.pdf/.md 規格文件。
+            勾選 git pull 的 git repo 資料夾會在抓取前安全更新（僅 <code className="font-mono">--ff-only</code>；有未提交變更則跳過，絕不 stash/reset）。
+            路徑必須是絕對路徑，且不可與 Frontend/Backend Path 相同或互為父子。
+          </p>
+          {specFolders.map((folder, idx) => (
+            <div key={idx} className="flex items-start gap-2">
+              <div className="flex-1">
+                <FolderPicker
+                  value={folder.path}
+                  onChange={(p) => setSpecFolders(specFolders.map((f, i) => i === idx ? { ...f, path: p } : f))}
+                />
+              </div>
+              <label className="flex items-center gap-1.5 text-xs text-muted-foreground whitespace-nowrap pt-2.5 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={folder.gitPull}
+                  onChange={(e) => setSpecFolders(specFolders.map((f, i) => i === idx ? { ...f, gitPull: e.target.checked } : f))}
+                  className="accent-primary"
+                />
+                git pull
+              </label>
+              <button
+                onClick={() => setSpecFolders(specFolders.filter((_, i) => i !== idx))}
+                className="p-2 mt-0.5 rounded-md text-muted-foreground hover:text-red-400 hover:bg-red-500/10 transition-colors"
+                title="移除此規格資料夾"
+              >
+                &times;
+              </button>
+            </div>
+          ))}
+          <button
+            onClick={() => setSpecFolders([...specFolders, { path: '', gitPull: false }])}
+            className="text-xs text-primary hover:underline"
+          >
+            + 新增規格資料夾
+          </button>
         </div>
 
         {/* Axure Share */}
@@ -452,7 +540,7 @@ export function ProjectSettings() {
               <button
                 onClick={() => {
                   navigator.clipboard.writeText(skillGenMcpCommand);
-                  addToast({ type: 'success', title: 'Copied!', message: 'MCP command copied to clipboard' });
+                  addToast({ type: 'success', title: '已複製', message: 'MCP 指令已複製到剪貼簿' });
                 }}
                 className="absolute top-2 right-2 px-3 py-1.5 rounded-md bg-primary text-primary-foreground text-xs font-medium hover:opacity-90 transition-opacity"
               >
