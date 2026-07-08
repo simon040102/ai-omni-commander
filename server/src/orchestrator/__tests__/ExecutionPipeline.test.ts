@@ -184,11 +184,11 @@ describe('ExecutionPipeline', () => {
 
       expect(fetchSpecsForTask).toHaveBeenCalledTimes(1);
       // Banner must be at the very front of the plan
-      expect(plan.prompt.startsWith('⚠ [SPEC_FETCH_ERROR] SVN 規格撈取失敗：SVN 認證失敗 (E170001)')).toBe(true);
+      expect(plan.prompt.startsWith('⚠ [SPEC_FETCH_ERROR] 規格自動撈取失敗（SVN／規格資料夾）：SVN 認證失敗 (E170001)')).toBe(true);
       expect(plan.prompt).toContain('規格不齊全不執行');
       expect(plan.prompt).toContain('[SKIP] 使用者跳過規格檢查');
       // Docs section must show the error honestly, not "no documents"
-      expect(plan.prompt).toContain('## SVN 規格文件（自動取得）');
+      expect(plan.prompt).toContain('## 規格文件（自動取得：SVN／規格資料夾）');
       expect(plan.prompt).toContain('⚠ 撈取失敗：SVN 認證失敗 (E170001)');
     });
 
@@ -232,7 +232,84 @@ describe('ExecutionPipeline', () => {
 
       expect(mockStartAgent).toHaveBeenCalledTimes(1);
       const call = mockStartAgent.mock.calls[0][0];
-      expect(call.prompt.startsWith('⚠ [SPEC_FETCH_ERROR] SVN 規格撈取失敗：svn: E175002: connection refused')).toBe(true);
+      expect(call.prompt.startsWith('⚠ [SPEC_FETCH_ERROR] 規格自動撈取失敗（SVN／規格資料夾）：svn: E175002: connection refused')).toBe(true);
+    });
+  });
+
+  describe('本地規格資料夾來源（specFolders 三態呈現）', () => {
+    const FOLDER_CONFIG_JSON = JSON.stringify({
+      specFolders: [{ path: 'D:\\specs\\demo', gitPull: true }],
+    });
+    const BOTH_CONFIG_JSON = JSON.stringify({
+      svnConfig: { frontendSpecPath: 'https://svn.example.com/specs/fe' },
+      specFolders: [{ path: 'D:\\specs\\demo', gitPull: true }],
+    });
+
+    function createFolderProjectAndTask(projectId: string, taskId: string, configJson: string) {
+      createProject({ id: projectId, name: 'Folder Test', workingDir: '/tmp/folder', configJson });
+      testDb.prepare(`
+        INSERT INTO tasks (id, project_id, title, description, label, task_type, parent_name)
+        VALUES (?, ?, 'WA05 查詢作業', '實作查詢頁', 'frontend', 'feature', 'WA05')
+      `).run(taskId, projectId);
+    }
+
+    function seedFolderDoc(projectId: string, taskId: string, docId: string) {
+      testDb.prepare(`
+        INSERT INTO documents (id, project_id, filename, file_path, doc_type, parsed_text, source, source_url)
+        VALUES (?, ?, '[SA] SPEC_WA05.md', 'D:/specs/demo/SPEC_WA05.md', 'SA', ?, 'folder', 'D:/specs/demo/SPEC_WA05.md')
+      `).run(docId, projectId, 'WA05 查詢作業規格內容。'.repeat(10));
+      testDb.prepare('INSERT INTO task_documents (task_id, document_id) VALUES (?, ?)').run(taskId, docId);
+    }
+
+    it('資料夾來源有文件 + pull 警告 → 文件區塊列警告，無 error banner', async () => {
+      createFolderProjectAndTask('p-fold-warn', 't-fold-warn', FOLDER_CONFIG_JSON);
+      seedFolderDoc('p-fold-warn', 't-fold-warn', 'doc-fold-1');
+      const fetchSpecsForTask = vi.fn();
+      const fetchFolderSpecsForTask = vi.fn().mockResolvedValue({
+        docIds: ['doc-fold-1'],
+        warnings: ['D:\\specs\\demo: git pull --ff-only 失敗（使用現有內容）：timeout'],
+        errors: [],
+      });
+      pipeline.setSvnSpecService({ fetchSpecsForTask, fetchFolderSpecsForTask } as any);
+
+      const plan = await pipeline.buildExecutionPlan('t-fold-warn');
+
+      expect(fetchSpecsForTask).not.toHaveBeenCalled(); // no svnConfig
+      expect(fetchFolderSpecsForTask).toHaveBeenCalledTimes(1);
+      expect(plan.prompt).not.toContain('[SPEC_FETCH_ERROR]');
+      expect(plan.prompt).toContain('## 規格文件（自動取得：SVN／規格資料夾）');
+      expect(plan.prompt).toContain('規格來源警告');
+      expect(plan.prompt).toContain('git pull --ff-only 失敗（使用現有內容）：timeout');
+      expect(plan.prompt).toContain('SPEC_WA05.md');
+    });
+
+    it('SVN 失敗但資料夾來源成功 → 錯誤降級為警告，不掛 banner', async () => {
+      createFolderProjectAndTask('p-fold-rescue', 't-fold-rescue', BOTH_CONFIG_JSON);
+      seedFolderDoc('p-fold-rescue', 't-fold-rescue', 'doc-fold-2');
+      const fetchSpecsForTask = vi.fn().mockRejectedValue(new Error('SVN 認證失敗 (E170001)'));
+      const fetchFolderSpecsForTask = vi.fn().mockResolvedValue({ docIds: ['doc-fold-2'], warnings: [], errors: [] });
+      pipeline.setSvnSpecService({ fetchSpecsForTask, fetchFolderSpecsForTask } as any);
+
+      const plan = await pipeline.buildExecutionPlan('t-fold-rescue');
+
+      expect(plan.prompt).not.toContain('[SPEC_FETCH_ERROR]');
+      expect(plan.prompt).toContain('規格來源警告');
+      expect(plan.prompt).toContain('SVN 認證失敗 (E170001)');
+    });
+
+    it('SVN 與資料夾來源全失敗（0 文件）→ [SPEC_FETCH_ERROR] banner 包含兩者', async () => {
+      createFolderProjectAndTask('p-fold-fail', 't-fold-fail', BOTH_CONFIG_JSON);
+      const fetchSpecsForTask = vi.fn().mockRejectedValue(new Error('SVN 認證失敗 (E170001)'));
+      const fetchFolderSpecsForTask = vi.fn().mockResolvedValue({
+        docIds: [], warnings: [], errors: ['規格資料夾不存在或無法存取：D:\\specs\\demo'],
+      });
+      pipeline.setSvnSpecService({ fetchSpecsForTask, fetchFolderSpecsForTask } as any);
+
+      const plan = await pipeline.buildExecutionPlan('t-fold-fail');
+
+      expect(plan.prompt).toContain('[SPEC_FETCH_ERROR]');
+      expect(plan.prompt).toContain('SVN 認證失敗 (E170001)');
+      expect(plan.prompt).toContain('規格資料夾：規格資料夾不存在或無法存取');
     });
   });
 
@@ -331,6 +408,31 @@ describe('ExecutionPipeline', () => {
       expect(plan.prompt).not.toContain('report_verification_evidence');
     });
 
+    it('規格檢查表（save_spec_checklist）+ 兩步規格回對（程式預檢 + AI 回對）出現在所有 role', async () => {
+      createTask('p-cl-fe', 't-cl-fe', 'frontend', 'feature');
+      createTask('p-cl-be', 't-cl-be', 'backend', 'feature');
+      createTask('p-cl-ot', 't-cl-ot', 'devops', 'other');
+
+      for (const tid of ['t-cl-fe', 't-cl-be', 't-cl-ot']) {
+        const plan = await pipeline.buildExecutionPlan(tid);
+        // 規格檢查表區塊（讀完規格後立即抽取，content 逐字抄）
+        expect(plan.prompt).toContain('## 規格檢查表（強制 — 讀完規格後立即執行）');
+        expect(plan.prompt).toContain(`mcp__omni-commander__save_spec_checklist(taskId="${tid}", items=[{itemType, content, side?, sourceRef?}, ...])`);
+        expect(plan.prompt).toContain('itemType="logic"');
+        // 第一步：run_spec_compliance 程式預檢（advisory，不解鎖閘門）
+        expect(plan.prompt).toContain(`mcp__omni-commander__run_spec_compliance(taskId="${tid}")`);
+        expect(plan.prompt).toContain('程式預檢');
+        expect(plan.prompt).toContain('不解鎖完成閘門');
+        expect(plan.prompt).toContain('waive_checklist_item');
+        // 第二步：獨立 AI 回對（get_compliance_review_plan → save_compliance_review），missing=0 才可標 completed
+        expect(plan.prompt).toContain('通知 orchestrator 派獨立 AI 回對 agent');
+        expect(plan.prompt).toContain(`get_compliance_review_plan(taskId="${tid}")`);
+        expect(plan.prompt).toContain('save_compliance_review');
+        expect(plan.prompt).toContain('**missing=0 才可標 completed**');
+        expect(plan.prompt).toContain('你（implementer）不可自行執行 AI 回對');
+      }
+    });
+
     it('executeAdHoc（無 taskId）工具呼叫範例省略 taskId 參數', async () => {
       createProject({ id: 'p-adhoc-mandate', name: 'AdHoc Mandate', workingDir: '/tmp/adhoc-mandate' });
 
@@ -341,6 +443,63 @@ describe('ExecutionPipeline', () => {
       expect(call.prompt).toContain('mcp__omni-commander__fetch_task_attachments(projectId="p-adhoc-mandate")');
       expect(call.prompt).not.toContain('taskId="undefined"');
       expect(call.prompt).not.toContain('docs/verification-reports/undefined.md');
+    });
+  });
+
+  describe('任務軌道（light / full）prompt 變體', () => {
+    function createTask(projectId: string, taskId: string, label: string, taskType: string) {
+      createProject({ id: projectId, name: 'Track Test', workingDir: '/tmp/track' });
+      testDb.prepare(`
+        INSERT INTO tasks (id, project_id, title, description, label, task_type)
+        VALUES (?, ?, 'SM27 查詢欄位失效', '計劃部門查詢欄位失效', ?, ?)
+      `).run(taskId, projectId, label, taskType);
+    }
+
+    it('track=light：檢查表改抽 BUG 原文、規格閱讀改讀 BUG 原文、規格遵循含 light 註記', async () => {
+      createTask('p-lt', 't-lt', 'frontend', 'bug');
+
+      const plan = await pipeline.buildExecutionPlan('t-lt', undefined, undefined, undefined, undefined, 'light');
+
+      // 規格檢查表 light 變體（BUG 原文抽取）
+      expect(plan.prompt).toContain('## 規格檢查表（light 軌 — 從 BUG 原文抽取，強制）');
+      expect(plan.prompt).toContain('修復後預期行為');
+      expect(plan.prompt).toContain('itemType="logic"');
+      expect(plan.prompt).toContain('mcp__omni-commander__get_asana_task_comments(taskId="t-lt")');
+      expect(plan.prompt).toContain('mcp__omni-commander__fetch_task_attachments(projectId="p-lt", taskId="t-lt")');
+      expect(plan.prompt).toContain('mcp__omni-commander__save_spec_checklist(taskId="t-lt"');
+      expect(plan.prompt).toContain('計劃部門查詢欄位輸入值後查詢，結果正確過濾'); // 範例
+      // 不含 SA/SD 閱讀強制節；改為 BUG 原文閱讀
+      expect(plan.prompt).not.toContain('## 規格文件閱讀（強制，寫 code 之前必須完成）');
+      expect(plan.prompt).not.toContain('## 規格檢查表（強制 — 讀完規格後立即執行）');
+      expect(plan.prompt).toContain('## BUG 原文閱讀（light 軌 — 強制，寫 code 之前必須完成）');
+      // 規格遵循（最高原則）保留 + light 語境註記
+      expect(plan.prompt).toContain('## 規格遵循（最高原則 — 違反此規則等同任務失敗）');
+      expect(plan.prompt).toContain('light 軌註記');
+      expect(plan.prompt).toContain('現有程式碼慣例');
+      // 完成標準：兩步規格回對照舊（missing=0 才可標 completed）
+      expect(plan.prompt).toContain('mcp__omni-commander__run_spec_compliance(taskId="t-lt")');
+      expect(plan.prompt).toContain('get_compliance_review_plan(taskId="t-lt")');
+      expect(plan.prompt).toContain('**missing=0 才可標 completed**');
+    });
+
+    it('預設（未帶 track）維持 full：規格文件閱讀 / 規格檢查表照舊、無 light 內容', async () => {
+      createTask('p-ft', 't-ft', 'frontend', 'bug');
+
+      const plan = await pipeline.buildExecutionPlan('t-ft');
+
+      expect(plan.prompt).toContain('## 規格檢查表（強制 — 讀完規格後立即執行）');
+      expect(plan.prompt).toContain('## 規格文件閱讀（強制，寫 code 之前必須完成）');
+      expect(plan.prompt).not.toContain('light 軌');
+      expect(plan.prompt).not.toContain('## BUG 原文閱讀');
+    });
+
+    it('preparePromptForRole 也透傳 track=light', async () => {
+      createTask('p-pr', 't-pr', 'frontend', 'bug');
+
+      const plan = await pipeline.preparePromptForRole('t-pr', 'frontend', { track: 'light' });
+
+      expect(plan.prompt).toContain('## 規格檢查表（light 軌 — 從 BUG 原文抽取，強制）');
+      expect(plan.prompt).toContain('## BUG 原文閱讀（light 軌 — 強制，寫 code 之前必須完成）');
     });
   });
 });

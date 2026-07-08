@@ -10,6 +10,7 @@ import {
   GATE_B_MAX_FAILURES, FLOW_NODE_LEVEL_SPEC,
   resolveRole, mutateFlowState, getFlowState, getRoleState,
   detectSpecDocuments, getCompletionBlockers, logTaskOutput,
+  type ExecutionTrack,
 } from '../flow-gate.js';
 import { parseJson, getAsanaPat, ASANA_API_BASE, ASANA_FETCH_TIMEOUT_MS } from '../helpers.js';
 import { runSpecChangeCheck, type SpecChangeTarget } from '../spec-change.js';
@@ -224,25 +225,48 @@ export function registerTaskTools(server: McpServer): void {
   // ── get_execution_plan ────────────────────────────────────
   server.tool(
     'get_execution_plan',
-    'Get a complete execution plan for a task. Returns prompt, workspace paths (frontendPath + backendPath), and model. Use role param to get role-specific plan (frontend/backend). Orchestrator should ask user "前端、後端、還是都做？" before calling.',
+    'Get a complete execution plan for a task. Returns prompt, workspace paths (frontendPath + backendPath), and model. Use role param to get role-specific plan (frontend/backend). Orchestrator should ask user "前端、後端、還是都做？" before calling. Track: omit for auto — taskType=bug 且無 SA/SD 規格文件 → light（輕量修復流程，跳過流程圖閘門；檢查表改抽 BUG 原文，AI 回對 missing=0 標準不變）; otherwise full. Explicit track overrides auto detection.',
     {
       taskId: z.string().describe('The task ID to generate an execution plan for'),
       role: z.enum(['frontend', 'backend']).optional().describe('Override role for plan generation. Omit to use task label.'),
+      track: z.enum(['light', 'full']).optional().describe('Execution track. Omit for auto detection (bug without SA/SD docs → light; otherwise full). Explicit value overrides.'),
     },
     { title: 'Get Execution Plan', readOnlyHint: false, idempotentHint: true, openWorldHint: false },
-    async ({ taskId, role }) => {
+    async ({ taskId, role, track }) => {
       const db = getMcpDb();
       const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId) as TaskRow | undefined;
       if (!task) {
         return { content: [{ type: 'text' as const, text: `Error: Task "${taskId}" not found` }], isError: true };
       }
 
+      // ── 任務自動判軌（light / full）──
+      // light = 小 bug 輕量修復流程：跳過 Flow-Gated 閘門，但 checklist（改抽
+      // BUG 原文）+ AI 回對 missing=0 的完成標準不變——輕的是工序，不是標準。
+      // 判定粒度是「任務綁定」的 SA/SD（task_documents）：專案層難免有其他功能的
+      // SA/SD，用專案層判定會讓 bug 永遠判不到 light。fetch_svn_specs 撈到的規格
+      // 會自動綁定到任務，所以「為這個 bug 撈過規格」= full。
+      const hasSpecDocs = detectSpecDocuments(db, task.id, task.project_id); // 專案層 fallback，僅供 flow-gate specExpected 用
+      const taskBoundSpecDocs = (db.prepare(`
+        SELECT COUNT(*) as c FROM task_documents td
+        JOIN documents d ON d.id = td.document_id
+        WHERE td.task_id = ? AND d.doc_type IN ('SA','SD')
+      `).get(task.id) as { c: number }).c > 0;
+      const autoTrack: ExecutionTrack = task.task_type === 'bug' && !taskBoundSpecDocs ? 'light' : 'full';
+      const effectiveTrack: ExecutionTrack = track ?? autoTrack;
+      const trackReason = track
+        ? `呼叫端指定 track="${track}"`
+        : effectiveTrack === 'light'
+          ? '自動判定：taskType=bug 且任務未綁定 SA/SD 規格文件'
+          : `自動判定：taskType=${task.task_type}${taskBoundSpecDocs ? '（任務已綁定 SA/SD 規格文件）' : ''}`;
+
       const notifyUrl = process.env['NOTIFY_URL'] || 'http://127.0.0.1:3457/api/mcp-notify';
       const baseUrl = notifyUrl.replace('/api/mcp-notify', '');
-      const roleParam = role ? `?role=${role}` : '';
+      const query = new URLSearchParams();
+      if (role) query.set('role', role);
+      query.set('track', effectiveTrack);
 
       try {
-        const response = await fetch(`${baseUrl}/api/execution-plan/${taskId}${roleParam}`, {
+        const response = await fetch(`${baseUrl}/api/execution-plan/${taskId}?${query.toString()}`, {
           signal: AbortSignal.timeout(30000),
         });
 
@@ -254,21 +278,28 @@ export function registerTaskTools(server: McpServer): void {
 
           const effectiveRole = role || task.label;
 
-          // ── Flow-Gated Development: initialize state machine ──
-          // flow_required is set only AFTER the plan is successfully fetched (review M6).
-          // flow_state is merged, never overwritten (review C2): existing flows/gates/
-          // failure counters survive repeated get_execution_plan calls.
-          const flowRole = resolveRole(role || (task.label === 'frontend' || task.label === 'backend' ? task.label : undefined));
-          const specExpected = detectSpecDocuments(db, task.id, task.project_id);
-          db.prepare("UPDATE tasks SET flow_required = 1, updated_at = datetime('now') WHERE id = ?").run(task.id);
-          const flowState = mutateFlowState(db, task.id, (s) => {
-            // upgrade-only: adding docs later upgrades to three-flow mode; never downgrade (review I-1)
-            s.specExpected = s.specExpected || specExpected;
-            getRoleState(s, flowRole).required = true;
-          });
+          // ── 判軌結果持久化（merge 式 flow_state，供 compliance/resume 讀取）──
+          // Persisted only AFTER the plan is successfully fetched (same rule as flow_required).
+          const prevTrack = getFlowState(db, task.id)?.track;
 
-          const rolePart = role ? `, role="${role}"` : '';
-          const flowGateSection = `
+          let flowGateSection = '';
+          if (effectiveTrack === 'full') {
+            // ── Flow-Gated Development: initialize state machine（full 軌限定）──
+            // flow_required is set only AFTER the plan is successfully fetched (review M6).
+            // flow_state is merged, never overwritten (review C2): existing flows/gates/
+            // failure counters survive repeated get_execution_plan calls.
+            const flowRole = resolveRole(role || (task.label === 'frontend' || task.label === 'backend' ? task.label : undefined));
+            db.prepare("UPDATE tasks SET flow_required = 1, updated_at = datetime('now') WHERE id = ?").run(task.id);
+            const flowState = mutateFlowState(db, task.id, (s) => {
+              s.track = 'full';
+              s.trackReason = trackReason;
+              // upgrade-only: adding docs later upgrades to three-flow mode; never downgrade (review I-1)
+              s.specExpected = s.specExpected || hasSpecDocs;
+              getRoleState(s, flowRole).required = true;
+            });
+
+            const rolePart = role ? `, role="${role}"` : '';
+            flowGateSection = `
 ## Flow-Gated Development（強制工作流 — 依序執行，不可跳步）
 
 本任務已啟用流程圖閘門。**閘門 B 未通過前，update_task_status(completed) 會被拒絕。**
@@ -285,8 +316,42 @@ ${flowState.specExpected ? `2. **spec-flow**：完整讀取 SA/SD 規格文件�
 7. **閘門 B**：依工具回應的比對準則做語意比對（建議由主 session 執行，不要由寫 code 的 subagent 自評），report_flow_check(gate="B", ...)。不符 → 修正後重存 code-flow（失敗上限 ${GATE_B_MAX_FAILURES} 次，達上限標 [NEEDS_HUMAN] 回報使用者）
 8. **閘門 B 通過後才跑測試**；測試通過才 update_task_status(taskId="${task.id}", status="completed")
 `;
+          } else {
+            // ── light 軌：不設 flow_required、不初始化 role gate ──
+            // update_task_status 的 flow 閘門只擋 flow_required=1 的任務，
+            // light 軌不啟用即不受擋；規格回對閘門（checklist + AI 回對）照常生效。
+            mutateFlowState(db, task.id, (s) => {
+              s.track = 'light';
+              s.trackReason = trackReason;
+            });
+          }
 
-          const header = `**Task ID:** ${task.id}
+          // 留痕：判軌結果寫入 agent_outputs（Web UI 終端可見）。只在首次判軌
+          // 或軌道變更時寫，避免重複呼叫 get_execution_plan 灌噪音。
+          if (prevTrack !== effectiveTrack) {
+            logTaskOutput(db, task.id, task.project_id, `[TRACK] ${effectiveTrack} — ${trackReason}`);
+          }
+
+          // full→light 覆寫時 flow_required 不降級（保守），聲明必須如實反映閘門仍生效
+          const flowStillRequired = (db.prepare('SELECT flow_required FROM tasks WHERE id = ?').get(task.id) as { flow_required: number | null }).flow_required === 1;
+          const lightFlowLine = flowStillRequired
+            ? `⚠ 注意：此任務先前已啟用 Flow-Gated 閘門，閘門**不降級**——結案仍需通過閘門 B（或使用者明確同意 skipFlowGate）。規格回對標準不變：`
+            : `本任務跳過 Flow-Gated 流程圖閘門，但規格回對標準不變：`;
+          const trackSection = effectiveTrack === 'light'
+            ? `## 任務軌道：LIGHT（輕量修復流程）
+判定依據：${trackReason}
+${lightFlowLine}
+- 檢查表來源 = 原始 BUG 內容（任務描述 + Asana 留言 + 附件截圖）
+- 完成前一樣要 AI 回對（missing=0 才能標 completed）
+如需完整流程，重新呼叫 get_execution_plan(taskId="${task.id}", track="full")。
+
+`
+            : `## 任務軌道：FULL（規格驅動流程）
+判定依據：${trackReason}
+
+`;
+
+          const header = trackSection + `**Task ID:** ${task.id}
 **Role:** ${effectiveRole}
 **Workspace:** ${data.workingDir}
 **Frontend Path:** ${data.frontendPath || 'N/A'}
@@ -326,7 +391,7 @@ ${flowGateSection}
   // ── update_task_status ────────────────────────────────────
   server.tool(
     'update_task_status',
-    'Update the status of a task. Use this to mark tasks as in_progress, completed, or failed. For flow-gated tasks, "completed" is rejected until gate B has passed for every required role — skipFlowGate=true (with skipReason, only with explicit user approval) overrides.',
+    'Update the status of a task. Use this to mark tasks as in_progress, completed, or failed. For flow-gated tasks, "completed" is rejected until gate B has passed for every required role. Tasks with a spec checklist additionally require the latest run_spec_compliance run to have missing=0. skipFlowGate=true (with skipReason, only with explicit user approval) overrides both gates.',
     {
       taskId: z.string().describe('The task ID'),
       status: z.enum(['in_progress', 'completed', 'failed']).describe('New task status'),
@@ -387,6 +452,91 @@ ${lines}
 請依序補完（save_task_flow → report_flow_check），閘門 B 通過並跑完測試後再結案。
 若使用者明確同意跳過閘門，改用 skipFlowGate=true + skipReason 重新呼叫。`,
               };
+            }
+          }
+        }
+
+        // ── Spec Compliance: exit gate（AI 規格回對）──
+        // 有未 waived 的 checklist 項目（含 logic——AI 看得懂 code，logic 也驗）時，
+        // 要求「存在至少一次 AI 回對 run（source='ai_review'）且最新一次的 missing=0」。
+        // 程式預檢（source='engine'）僅 advisory，不解鎖此閘門。
+        // 無 checklist 的任務完全不受影響（向後相容）。
+        // 沿用 skipFlowGate+skipReason 跳過（訊息注明跳過的是規格回對閘門）。
+        // 只做同步 DB 查詢（在 immediate transaction 內）。
+        if (status === 'completed') {
+          const checklistCount = (db.prepare(
+            'SELECT COUNT(*) as c FROM spec_checklist_items WHERE task_id = ? AND waived = 0'
+          ).get(taskId) as { c: number }).c;
+
+          // Checklist enforcement: a task that obtained an execution plan (flow_state
+          // has track) must have a checklist before completion — otherwise the light
+          // track would have no structural gate at all when the agent skips
+          // save_spec_checklist (輕的是工序，不是標準). Legacy tasks (no track) unaffected.
+          const gateTrack = getFlowState(db, taskId)?.track;
+          if (checklistCount === 0 && gateTrack) {
+            if (skipFlowGate) {
+              if (!skipReason || !skipReason.trim()) {
+                return { kind: 'error', message: 'Error: skipFlowGate=true 需要 skipReason（使用者同意跳過閘門的原因）。' };
+              }
+              logTaskOutput(db, taskId, task.project_id, `[SKIP] 使用者跳過規格回對閘門（未建立檢查表）：${skipReason.trim()}`);
+            } else {
+              return {
+                kind: 'error',
+                message: `Error: 此任務走 ${gateTrack} 軌但尚未建立規格檢查表，不可標記 completed。
+請先呼叫 save_spec_checklist(taskId="${taskId}", items=[...])（${gateTrack === 'light' ? 'light 軌：從原始 BUG 內容抽「修復後預期行為」' : '從 SA/SD 規格逐字抽取'}），
+再執行 AI 規格回對（get_compliance_review_plan → save_compliance_review），missing=0 後結案。
+若使用者明確同意跳過，改用 skipFlowGate=true + skipReason 重新呼叫（會記錄 [SKIP]）。`,
+              };
+            }
+          }
+
+          if (checklistCount > 0) {
+            const run = db.prepare(
+              "SELECT id, run_at, missing, results_json FROM spec_compliance_runs WHERE task_id = ? AND source = 'ai_review' ORDER BY run_at DESC, rowid DESC LIMIT 1"
+            ).get(taskId) as { id: string; run_at: string; missing: number; results_json: string } | undefined;
+
+            // Staleness guard: checklist items added after the latest AI review were
+            // never verified — a clean-but-stale review must not unlock completion.
+            const staleCount = run ? (db.prepare(
+              'SELECT COUNT(*) as c FROM spec_checklist_items WHERE task_id = ? AND waived = 0 AND created_at > ?'
+            ).get(taskId, run.run_at) as { c: number }).c : 0;
+
+            const complianceBlocked = !run || run.missing > 0 || staleCount > 0;
+            if (complianceBlocked) {
+              if (skipFlowGate) {
+                if (!skipReason || !skipReason.trim()) {
+                  return { kind: 'error', message: 'Error: skipFlowGate=true 需要 skipReason（使用者同意跳過閘門的原因）。' };
+                }
+                logTaskOutput(db, taskId, task.project_id, `[SKIP] 使用者跳過規格回對閘門（AI 回對）：${skipReason.trim()}`);
+              } else if (run && run.missing === 0 && staleCount > 0) {
+                return {
+                  kind: 'error',
+                  message: `Error: 規格檢查表在最後一次 AI 規格回對之後新增了 ${staleCount} 項（尚未驗證），不可標記 completed。
+請重新執行 AI 規格回對（get_compliance_review_plan(taskId="${taskId}") 派獨立 reviewer → save_compliance_review）讓所有項目都經過驗證。`,
+                };
+              } else if (!run) {
+                return {
+                  kind: 'error',
+                  message: `Error: 此任務有 ${checklistCount} 項規格檢查表項目，但尚未執行 AI 規格回對，不可標記 completed。
+請先執行 AI 規格回對：呼叫 get_compliance_review_plan(taskId="${taskId}") 取得派工計畫，由 orchestrator 派**獨立 reviewer** 逐項驗證後 save_compliance_review，missing 為 0 後再結案。
+（run_spec_compliance 只是程式預檢，不解鎖此閘門。）
+若使用者明確同意跳過，改用 skipFlowGate=true + skipReason 重新呼叫（會記錄 [SKIP]）。`,
+                };
+              } else {
+                const missingItems = parseJson<Array<{ content?: string; itemType?: string; note?: string; status?: string }>>(run.results_json, [])
+                  .filter(r => r.status === 'missing');
+                const lines = missingItems.slice(0, 10)
+                  .map(r => `- [${r.itemType || '?'}] ${r.content || '(unknown)'}${r.note ? ` — ${r.note}` : ''}`);
+                const more = missingItems.length > 10 ? `\n（其餘 ${missingItems.length - 10} 項略——get_spec_checklist 有完整清單）` : '';
+                return {
+                  kind: 'error',
+                  message: `Error: AI 規格回對未通過（missing ${run.missing} 項），不可標記 completed。缺少的實作：
+${lines.join('\n')}${more}
+
+修正後**重新執行 AI 規格回對**（get_compliance_review_plan(taskId="${taskId}") → 獨立 reviewer → save_compliance_review），或對有正當理由的項目用 waive_checklist_item(itemId, reason) 豁免後重新回對。
+若使用者明確同意跳過閘門，改用 skipFlowGate=true + skipReason 重新呼叫（會記錄 [SKIP]）。`,
+                };
+              }
             }
           }
         }

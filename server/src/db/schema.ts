@@ -492,7 +492,7 @@ export function runMigrations(db: Database.Database): void {
         task_id         TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
         project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
         category        TEXT NOT NULL CHECK(category IN ('sa_missing', 'sd_missing', 'field_undefined',
-                                                          'api_undefined', 'logic_unclear', 'other', 'spec_changed')),
+                                                          'api_undefined', 'logic_unclear', 'other', 'spec_changed', 'sa_sd_mismatch')),
         description     TEXT NOT NULL,
         status          TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'resolved')),
         resolution_note TEXT,
@@ -628,6 +628,118 @@ export function runMigrations(db: Database.Database): void {
         `);
       } catch (err) {
         process.stderr.write(`[schema] v13 documents verification doc_type migration failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        db.exec('PRAGMA foreign_keys = ON');
+      }
+    }
+  }
+
+  // =============================================
+  // v14 Migration: spec_checklist_items — 規格回對引擎的結構化 checklist。
+  // subagent 讀完 SA/SD 後用 save_spec_checklist 抽取（content 從規格逐字抄），
+  // run_spec_compliance 用純程式比對 workspace 程式碼。
+  // Failure is non-fatal: warn on stderr and continue (v9 pattern).
+  // =============================================
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS spec_checklist_items (
+        id            TEXT PRIMARY KEY,
+        task_id       TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        item_type     TEXT NOT NULL CHECK(item_type IN ('ui_text', 'api', 'param',
+                                                         'response_field', 'db_field', 'logic')),
+        content       TEXT NOT NULL,
+        side          TEXT CHECK(side IN ('frontend', 'backend', 'both')) DEFAULT 'both',
+        detail_json   TEXT,
+        source_ref    TEXT,
+        waived        INTEGER NOT NULL DEFAULT 0,
+        waive_reason  TEXT,
+        created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_spec_checklist_items_task ON spec_checklist_items(task_id);
+    `);
+  } catch (err) {
+    process.stderr.write(`[schema] v14 spec_checklist_items migration failed: ${err instanceof Error ? err.message : String(err)}\n`);
+  }
+
+  // =============================================
+  // v15 Migration: spec_compliance_runs — run_spec_compliance 的每次比對結果。
+  // update_task_status(completed) 閘門檢查最新一次 run 的 missing 是否為 0。
+  // Failure is non-fatal: warn on stderr and continue (v9 pattern).
+  // =============================================
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS spec_compliance_runs (
+        id            TEXT PRIMARY KEY,
+        task_id       TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        run_at        TEXT NOT NULL DEFAULT (datetime('now')),
+        total         INTEGER NOT NULL DEFAULT 0,
+        matched       INTEGER NOT NULL DEFAULT 0,
+        missing       INTEGER NOT NULL DEFAULT 0,
+        manual        INTEGER NOT NULL DEFAULT 0,
+        waived        INTEGER NOT NULL DEFAULT 0,
+        results_json  TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_spec_compliance_runs_task ON spec_compliance_runs(task_id);
+    `);
+  } catch (err) {
+    process.stderr.write(`[schema] v15 spec_compliance_runs migration failed: ${err instanceof Error ? err.message : String(err)}\n`);
+  }
+
+  // =============================================
+  // v16 Migration: spec_compliance_runs.source — 'engine'（run_spec_compliance
+  // 程式預檢）或 'ai_review'（save_compliance_review 獨立 AI 回對）。
+  // 完成閘門只認最新一次 ai_review run 的 missing=0。
+  // Idempotent: duplicate column throw is swallowed; other errors warn on stderr.
+  // =============================================
+  try {
+    db.exec("ALTER TABLE spec_compliance_runs ADD COLUMN source TEXT NOT NULL DEFAULT 'engine'");
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!/duplicate column/i.test(msg)) {
+      process.stderr.write(`[schema] v16 spec_compliance_runs.source migration failed: ${msg}\n`);
+    }
+  }
+
+  // =============================================
+  // v17 Migration: spec_gaps category CHECK 擴充 'sa_sd_mismatch'
+  // (check_spec_consistency 派出的一致性檢查 agent 用 report_spec_gap 寫入).
+  // Existing DBs have the 7-value CHECK — rebuild the table (CREATE new →
+  // INSERT SELECT explicit columns → DROP → RENAME) so no data is lost
+  // (v12 pattern). Fresh DBs already get the 8-value CHECK from v9 above
+  // and skip this.
+  // =============================================
+  {
+    const specGapsInfo = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='spec_gaps'").get() as { sql: string } | undefined;
+    if (specGapsInfo?.sql && !specGapsInfo.sql.includes("'sa_sd_mismatch'")) {
+      try {
+        db.exec(`
+          PRAGMA foreign_keys = OFF;
+
+          CREATE TABLE IF NOT EXISTS spec_gaps_new (
+            id              TEXT PRIMARY KEY,
+            task_id         TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            category        TEXT NOT NULL CHECK(category IN ('sa_missing', 'sd_missing', 'field_undefined',
+                                                              'api_undefined', 'logic_unclear', 'other', 'spec_changed', 'sa_sd_mismatch')),
+            description     TEXT NOT NULL,
+            status          TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'resolved')),
+            resolution_note TEXT,
+            created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+            resolved_at     TEXT
+          );
+          INSERT OR IGNORE INTO spec_gaps_new (id, task_id, project_id, category, description, status, resolution_note, created_at, resolved_at)
+            SELECT id, task_id, project_id, category, description, status, resolution_note, created_at, resolved_at
+            FROM spec_gaps;
+          DROP TABLE spec_gaps;
+          ALTER TABLE spec_gaps_new RENAME TO spec_gaps;
+          CREATE INDEX IF NOT EXISTS idx_spec_gaps_project ON spec_gaps(project_id);
+          CREATE INDEX IF NOT EXISTS idx_spec_gaps_task ON spec_gaps(task_id);
+          CREATE INDEX IF NOT EXISTS idx_spec_gaps_status ON spec_gaps(status);
+
+          PRAGMA foreign_keys = ON;
+        `);
+      } catch (err) {
+        process.stderr.write(`[schema] v17 spec_gaps sa_sd_mismatch migration failed: ${err instanceof Error ? err.message : String(err)}\n`);
         db.exec('PRAGMA foreign_keys = ON');
       }
     }

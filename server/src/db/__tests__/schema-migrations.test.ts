@@ -3,11 +3,11 @@ import Database from 'better-sqlite3';
 import { runMigrations } from '../schema.js';
 
 /**
- * v12/v13 table-rebuild migrations: simulate an OLD DB (6-value spec_gaps CHECK,
+ * v12/v13/v17 table-rebuild migrations: simulate an OLD DB (6-value spec_gaps CHECK,
  * 3-value documents CHECK), re-run migrations, and verify data survives and the
- * new CHECK values (spec_changed / verification) are accepted.
+ * new CHECK values (spec_changed / verification / sa_sd_mismatch) are accepted.
  */
-describe('schema migrations (v10–v13)', () => {
+describe('schema migrations (v10–v17)', () => {
   function oldShapeDb(): Database.Database {
     const db = new Database(':memory:');
     db.pragma('foreign_keys = ON');
@@ -76,6 +76,53 @@ describe('schema migrations (v10–v13)', () => {
     runMigrations(db);
     expect((db.prepare('SELECT COUNT(*) as c FROM spec_gaps').get() as any).c).toBe(2);
     expect((db.prepare('SELECT COUNT(*) as c FROM documents').get() as any).c).toBe(2);
+  });
+
+  it('v17: rebuilds a 7-value spec_gaps CHECK to accept sa_sd_mismatch, keeping existing rows', () => {
+    // Simulate a post-v12 / pre-v17 DB: spec_gaps has 'spec_changed' but not 'sa_sd_mismatch'
+    const db = new Database(':memory:');
+    db.pragma('foreign_keys = ON');
+    runMigrations(db);
+    db.exec('PRAGMA foreign_keys = OFF');
+    db.exec(`
+      DROP TABLE spec_gaps;
+      CREATE TABLE spec_gaps (
+        id              TEXT PRIMARY KEY,
+        task_id         TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        category        TEXT NOT NULL CHECK(category IN ('sa_missing', 'sd_missing', 'field_undefined',
+                                                          'api_undefined', 'logic_unclear', 'other', 'spec_changed')),
+        description     TEXT NOT NULL,
+        status          TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'resolved')),
+        resolution_note TEXT,
+        created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+        resolved_at     TEXT
+      );
+    `);
+    db.exec('PRAGMA foreign_keys = ON');
+
+    db.prepare("INSERT INTO projects (id, name, working_dir) VALUES ('p1','P','/tmp')").run();
+    db.prepare("INSERT INTO tasks (id, project_id, title, label, task_type) VALUES ('t1','p1','T','frontend','other')").run();
+    db.prepare("INSERT INTO spec_gaps (id, task_id, project_id, category, description) VALUES ('g1','t1','p1','spec_changed','old gap')").run();
+
+    // The 7-value CHECK rejects the new value before migration
+    expect(() => db.prepare("INSERT INTO spec_gaps (id, task_id, project_id, category, description) VALUES ('gx','t1','p1','sa_sd_mismatch','x')").run()).toThrow();
+
+    runMigrations(db); // triggers the v17 rebuild (v12 skips: 'spec_changed' already present)
+
+    // Existing row survives
+    expect((db.prepare("SELECT description FROM spec_gaps WHERE id='g1'").get() as any).description).toBe('old gap');
+
+    // New value now accepted
+    db.prepare("INSERT INTO spec_gaps (id, task_id, project_id, category, description) VALUES ('g2','t1','p1','sa_sd_mismatch','SA 說必填 vs SD optional')").run();
+
+    // Indexes recreated
+    const indexes = db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='spec_gaps'").all() as any[];
+    expect(indexes.map(i => i.name)).toEqual(expect.arrayContaining(['idx_spec_gaps_project', 'idx_spec_gaps_task', 'idx_spec_gaps_status']));
+
+    // Idempotent: another run keeps all rows
+    runMigrations(db);
+    expect((db.prepare('SELECT COUNT(*) as c FROM spec_gaps').get() as any).c).toBe(2);
   });
 
   it('creates project_notes and task_spec_versions tables', () => {

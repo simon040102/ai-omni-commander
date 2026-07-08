@@ -128,6 +128,24 @@ describe('context-tools', () => {
       const result = await callTool(server, 'resume_task', { taskId: 'nope' });
       expect(result.isError).toBe(true);
     });
+
+    it('includes track / trackReason from flow_state（無記錄 → full / 未判定）', async () => {
+      seed(testDb);
+
+      // 未判軌：預設 full + 未判定說明
+      let data = JSON.parse((await callTool(server, 'resume_task', { taskId: 'task-1' })).content[0].text);
+      expect(data.track).toBe('full');
+      expect(data.trackReason).toContain('未判定');
+
+      // get_execution_plan 判軌後寫入 flow_state（light 軌不設 flow_required 也要能讀到）
+      testDb.prepare(`UPDATE tasks SET flow_state = ? WHERE id = 'task-1'`).run(
+        JSON.stringify({ roles: {}, track: 'light', trackReason: '自動判定：taskType=bug 且無 SA/SD 規格文件' }),
+      );
+      data = JSON.parse((await callTool(server, 'resume_task', { taskId: 'task-1' })).content[0].text);
+      expect(data.track).toBe('light');
+      expect(data.trackReason).toBe('自動判定：taskType=bug 且無 SA/SD 規格文件');
+      expect(data.flowGate.enabled).toBe(false); // light 軌不啟用 flow-gate
+    });
   });
 
   describe('project notes', () => {

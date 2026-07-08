@@ -41,7 +41,19 @@ export interface RoleFlowState {
   gateBFailures: number;
 }
 
+export type ExecutionTrack = 'light' | 'full';
+
 export interface FlowGateState {
+  /**
+   * Execution track decided by get_execution_plan（任務自動判軌）：
+   * 'light' = 小 bug 輕量修復流程（無 flow-gate，checklist 改抽 BUG 原文）；
+   * 'full'  = 規格驅動完整流程（現狀）。輕的是工序，不是標準——light 軌
+   * 一樣要 AI 回對且 missing=0 才能標 completed。
+   * Read by get_compliance_review_plan / resume_task; absent = full（舊任務向後相容）.
+   */
+  track?: ExecutionTrack;
+  /** 判軌依據（自動判定 or 呼叫端指定），供 resume_task / 稽核顯示。 */
+  trackReason?: string;
   /**
    * Whether this task has SA/SD spec documents — the SINGLE source of truth
    * for three-flow vs two-flow mode (review I-1). Set by get_execution_plan

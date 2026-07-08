@@ -648,13 +648,15 @@ async function main() {
     try {
       const { taskId } = req.params;
       const role = req.query['role'] as string | undefined;
-      logger.info({ taskId, role }, 'Building execution plan');
+      // 任務軌道：light = 輕量修復流程（checklist 改抽 BUG 原文）；預設 full（向後相容）
+      const track: 'light' | 'full' = req.query['track'] === 'light' ? 'light' : 'full';
+      logger.info({ taskId, role, track }, 'Building execution plan');
 
       let result: { prompt: string; workingDir: string; model: string };
       if (role && (role === 'frontend' || role === 'backend')) {
-        result = await pipeline.preparePromptForRole(taskId, role);
+        result = await pipeline.preparePromptForRole(taskId, role, { track });
       } else {
-        result = await pipeline.buildExecutionPlan(taskId);
+        result = await pipeline.buildExecutionPlan(taskId, undefined, undefined, undefined, undefined, track);
       }
 
       // Always include both paths for orchestrator
@@ -765,6 +767,124 @@ async function main() {
     }
   });
 
+  // ── Spec compliance endpoints (backs the Web UI 規格回對 panel) ──
+  // Project-level summary: tasks that have checklist items + their latest run counts.
+  app.get('/api/spec-compliance/project/:projectId', (req, res) => {
+    const projectId = req.params['projectId'];
+    if (!projectId) { res.status(400).json({ error: 'Missing projectId' }); return; }
+    try {
+      const rows = db.prepare(`
+        SELECT c.task_id, t.title as task_title, t.status as task_status, COUNT(*) as item_count,
+               SUM(CASE WHEN c.waived = 1 THEN 1 ELSE 0 END) as waived_count
+        FROM spec_checklist_items c LEFT JOIN tasks t ON t.id = c.task_id
+        WHERE c.project_id = ?
+        GROUP BY c.task_id
+        ORDER BY MAX(c.created_at) DESC
+      `).all(projectId) as Array<{ task_id: string; task_title: string | null; task_status: string | null; item_count: number; waived_count: number }>;
+      const latestRunStmt = db.prepare(
+        'SELECT id, run_at, source, total, matched, missing, manual, waived FROM spec_compliance_runs WHERE task_id = ? ORDER BY run_at DESC, rowid DESC LIMIT 1'
+      );
+      const aiReviewCountStmt = db.prepare(
+        "SELECT COUNT(*) as c FROM spec_compliance_runs WHERE task_id = ? AND source = 'ai_review'"
+      );
+      res.json({
+        projectId,
+        tasks: rows.map(r => {
+          const run = latestRunStmt.get(r.task_id) as { id: string; run_at: string; source: string; total: number; matched: number; missing: number; manual: number; waived: number } | undefined;
+          const hasAiReviewRun = (aiReviewCountStmt.get(r.task_id) as { c: number }).c > 0;
+          return {
+            taskId: r.task_id,
+            taskTitle: r.task_title,
+            taskStatus: r.task_status,
+            itemCount: r.item_count,
+            waivedCount: r.waived_count,
+            hasAiReviewRun,
+            latestRun: run ? { id: run.id, runAt: run.run_at, source: run.source, total: run.total, matched: run.matched, missing: run.missing, manual: run.manual, waived: run.waived } : null,
+          };
+        }),
+      });
+    } catch (err) {
+      logger.error({ err }, 'Failed to list spec compliance summary');
+      res.status(500).json({ error: 'Failed to list spec compliance summary' });
+    }
+  });
+
+  // Task-level detail: checklist items + latest run (with per-item results).
+  app.get('/api/spec-compliance/:taskId', (req, res) => {
+    const taskId = req.params['taskId'];
+    if (!taskId) { res.status(400).json({ error: 'Missing taskId' }); return; }
+    try {
+      const items = db.prepare(
+        'SELECT id, task_id, project_id, item_type, content, side, detail_json, source_ref, waived, waive_reason, created_at FROM spec_checklist_items WHERE task_id = ? ORDER BY created_at ASC, rowid ASC'
+      ).all(taskId) as Array<Record<string, unknown>>;
+      const run = db.prepare(
+        'SELECT id, run_at, source, total, matched, missing, manual, waived, results_json FROM spec_compliance_runs WHERE task_id = ? ORDER BY run_at DESC, rowid DESC LIMIT 1'
+      ).get(taskId) as { id: string; run_at: string; source: string; total: number; matched: number; missing: number; manual: number; waived: number; results_json: string } | undefined;
+      const hasAiReviewRun = (db.prepare(
+        "SELECT COUNT(*) as c FROM spec_compliance_runs WHERE task_id = ? AND source = 'ai_review'"
+      ).get(taskId) as { c: number }).c > 0;
+      let runResults: unknown[] = [];
+      if (run) {
+        try { runResults = JSON.parse(run.results_json) as unknown[]; } catch { /* corrupt json — return empty */ }
+      }
+      res.json({
+        taskId,
+        items: items.map(r => ({
+          id: r['id'],
+          itemType: r['item_type'],
+          content: r['content'],
+          side: r['side'] ?? 'both',
+          sourceRef: r['source_ref'],
+          waived: r['waived'] === 1,
+          waiveReason: r['waive_reason'],
+          createdAt: r['created_at'],
+        })),
+        hasAiReviewRun,
+        latestRun: run ? {
+          id: run.id,
+          runAt: run.run_at,
+          source: run.source,
+          total: run.total,
+          matched: run.matched,
+          missing: run.missing,
+          manual: run.manual,
+          waived: run.waived,
+          results: runResults,
+        } : null,
+      });
+    } catch (err) {
+      logger.error({ err }, 'Failed to get spec compliance detail');
+      res.status(500).json({ error: 'Failed to get spec compliance detail' });
+    }
+  });
+
+  // Waive a checklist item from the Web UI (reason required).
+  app.post('/api/checklist-items/:itemId/waive', (req, res) => {
+    const itemId = req.params['itemId'];
+    if (!itemId) { res.status(400).json({ error: 'Missing itemId' }); return; }
+    try {
+      const reason = (req.body as { reason?: string } | undefined)?.reason;
+      if (typeof reason !== 'string' || !reason.trim()) { res.status(400).json({ error: 'Missing reason' }); return; }
+      const item = db.prepare('SELECT id, task_id, project_id, content, waived FROM spec_checklist_items WHERE id = ?').get(itemId) as
+        { id: string; task_id: string; project_id: string; content: string; waived: number } | undefined;
+      if (!item) { res.status(404).json({ error: 'Checklist item not found' }); return; }
+      if (item.waived !== 1) {
+        db.prepare('UPDATE spec_checklist_items SET waived = 1, waive_reason = ? WHERE id = ?').run(reason.trim(), itemId);
+        // Broadcast so open SpecCompliance panels refetch
+        wsServerRef?.broadcast({
+          type: 'task.checklistSaved',
+          id: itemId,
+          timestamp: new Date().toISOString(),
+          payload: { taskId: item.task_id, projectId: item.project_id, itemId, action: 'waived' },
+        } as any);
+      }
+      res.json({ ok: true });
+    } catch (err) {
+      logger.error({ err }, 'Failed to waive checklist item');
+      res.status(500).json({ error: 'Failed to waive checklist item' });
+    }
+  });
+
   // ── Project notes endpoints (backs the Web UI 專案筆記 panel) ──
   app.get('/api/project-notes/:projectId', (req, res) => {
     const projectId = req.params['projectId'];
@@ -826,7 +946,7 @@ async function main() {
   // Receives notifications from the MCP Server process (separate process)
   // and broadcasts them via WebSocket to the Web UI.
   // Whitelist covers every event the MCP tools actually send (see server/src/mcp/tools/*):
-  // agent.started / agent.output / agent.completed, task.milestone / task.statusChange / task.created / task.updated / task.specGap,
+  // agent.started / agent.output / agent.completed, task.milestone / task.statusChange / task.created / task.updated / task.specGap / task.checklistSaved,
   // project.created / project.updated / project.noteSaved, sa-flow.saved, asana.syncResult.
   const MCP_EVENT_PREFIXES = ['agent.', 'task.', 'project.', 'sa-flow.', 'asana.'];
 

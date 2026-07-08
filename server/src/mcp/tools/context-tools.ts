@@ -68,8 +68,13 @@ export function registerContextTools(server: McpServer): void {
         'SELECT id, name, working_dir, frontend_path, backend_path FROM projects WHERE id = ?'
       ).get(task.project_id) as { id: string; name: string; working_dir: string; frontend_path: string | null; backend_path: string | null } | undefined;
 
+      // ── track（任務軌道）── flow_state 不論 flow_required 都可能帶 track（light 軌不設 flow_required）
+      const rawFlowState: FlowGateState | null = getFlowState(db, taskId);
+      const track = rawFlowState?.track ?? 'full';
+      const trackReason = rawFlowState?.trackReason ?? '未判定（get_execution_plan 執行後才會記錄；無記錄視同 full）';
+
       // ── flow-gate summary ──
-      const flowState: FlowGateState | null = task.flow_required === 1 ? getFlowState(db, taskId) : null;
+      const flowState: FlowGateState | null = task.flow_required === 1 ? rawFlowState : null;
       let flowGate: Record<string, unknown>;
       if (task.flow_required !== 1) {
         flowGate = { enabled: false, note: '此任務未啟用 Flow-Gated Development（get_execution_plan 執行後才會啟用）' };
@@ -173,6 +178,8 @@ export function registerContextTools(server: McpServer): void {
           parentName: task.parent_name,
           resultSummary: task.result_summary,
         },
+        track,
+        trackReason,
         project: project ? {
           id: project.id,
           name: project.name,

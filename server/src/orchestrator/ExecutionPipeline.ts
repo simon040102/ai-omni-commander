@@ -16,10 +16,20 @@ import { getTask, updateTask } from '../db/queries/tasks.js';
 import { getConfig } from '../config.js';
 import { getDocumentsForTask } from '../db/queries/taskDocuments.js';
 import { getActiveProjectNotes, type ProjectNote } from '../db/queries/projectNotes.js';
+import { filterSafeSpecFolders } from '../documents/FolderSpecSource.js';
 import { loadSuperpowersPrompt } from '../skills/superpowers/index.js';
 import { createChildLogger } from '../utils/logger.js';
 
 const logger = createChildLogger('ExecutionPipeline');
+
+/**
+ * 任務軌道（由 MCP get_execution_plan 判定後透過 /api/execution-plan?track= 傳入）：
+ * 'light' = 小 bug 輕量修復流程——規格檢查表改抽 BUG 原文、規格閱讀改讀 BUG 原文；
+ * 'full'  = 規格驅動完整流程（現狀，預設）。
+ * 輕的是工序，不是標準：light 軌的兩步規格回對（run_spec_compliance + AI 回對
+ * missing=0）完成標準不變。
+ */
+export type ExecutionTrack = 'light' | 'full';
 
 /**
  * 效能分析（後端限定，強制）— 逐字取自專案 CLAUDE.md「#### 2b. 後端 subagent 必須先做效能分析」。
@@ -74,6 +84,88 @@ export class ExecutionPipeline {
   }
 
   /**
+   * Auto-fetch spec documents from ALL configured sources (SVN + local spec
+   * folders) for a task. Shared by executeTask / buildExecutionPlan /
+   * preparePromptForRole so the three call sites stay identical.
+   *
+   * 三態聚合（規格不齊全不執行）：
+   * - 有檔案 + 有錯誤/警告 → 錯誤降級成警告（文件區塊列出）
+   * - 完全沒檔案 + 有錯誤 → error（呼叫端放 [SPEC_FETCH_ERROR] banner）
+   * - 沒設定任何來源 → attempted=false，行為與現狀相同
+   */
+  private async fetchAutoSpecs(
+    task: { projectId: string; title: string; parentName: string | null; taskType: TaskType },
+    taskId: string,
+    projectConfig: ProjectConfig | null,
+    roleLabel: string,
+  ): Promise<{ docIds: string[]; attempted: boolean; functionCode: string | null; error: string | null; warnings: string[] }> {
+    const functionCode = task.parentName || extractFunctionCode(task.title);
+    const docIds: string[] = [];
+    const warnings: string[] = [];
+    const errors: string[] = [];
+    let attempted = false;
+
+    if (task.taskType !== 'testing' && functionCode && this.svnSpecService) {
+      if (projectConfig?.svnConfig) {
+        attempted = true;
+        try {
+          const svnIds = await this.svnSpecService.fetchSpecsForTask(
+            task.projectId, taskId, functionCode, projectConfig.svnConfig, roleLabel,
+          );
+          docIds.push(...svnIds);
+          logger.info({ taskId, functionCode, source: task.parentName ? 'parentName' : 'title', docCount: svnIds.length }, 'Fetched SVN specs');
+        } catch (err) {
+          // 規格不齊全不執行：do NOT swallow — surface prominently（可能被資料夾來源救回）
+          errors.push(err instanceof Error ? err.message : String(err));
+          logger.error({ err, taskId, functionCode }, 'SVN spec fetch failed');
+        }
+      }
+
+      const configuredFolders = projectConfig?.specFolders?.filter(f => typeof f?.path === 'string' && f.path.trim().length > 0) ?? [];
+      let specFolders = configuredFolders;
+      if (configuredFolders.length > 0) {
+        // Defense-in-depth：workspace 路徑可能在設定之後才被改成與規格資料夾
+        // 重疊（單邊更新繞過設定驗證）——抓取前複查，重疊一律跳過。
+        const proj = getProject(task.projectId);
+        const { safe, blockedWarnings } = filterSafeSpecFolders(configuredFolders, [proj?.frontendPath, proj?.backendPath]);
+        specFolders = safe;
+        if (blockedWarnings.length > 0) {
+          warnings.push(...blockedWarnings);
+          logger.warn({ taskId, blockedWarnings }, 'Spec folders overlapping workspace were skipped');
+        }
+      }
+      if (specFolders.length > 0) {
+        attempted = true;
+        try {
+          const r = await this.svnSpecService.fetchFolderSpecsForTask(
+            task.projectId, taskId, functionCode, specFolders, roleLabel,
+          );
+          docIds.push(...r.docIds);
+          warnings.push(...r.warnings);
+          errors.push(...r.errors.map(e => `規格資料夾：${e}`));
+          logger.info({ taskId, functionCode, folderCount: specFolders.length, docCount: r.docIds.length, warnings: r.warnings }, 'Fetched folder specs');
+        } catch (err) {
+          errors.push(`規格資料夾：${err instanceof Error ? err.message : String(err)}`);
+          logger.error({ err, taskId, functionCode }, 'Folder spec fetch failed');
+        }
+      }
+    }
+
+    let error: string | null = null;
+    if (errors.length > 0) {
+      if (docIds.length === 0) {
+        error = errors.join('; ');
+        logger.error({ taskId, functionCode, error }, 'Spec fetch failed with no documents — prompt will carry [SPEC_FETCH_ERROR] block（規格不齊全不執行）');
+      } else {
+        // 部分來源失敗但已取得規格文件 → 降級為警告，附在文件區塊
+        warnings.push(...errors);
+      }
+    }
+
+    return { docIds, attempted, functionCode: functionCode || null, error, warnings };
+  }
+
+  /**
    * Execute a specific task from the task list.
    */
   async executeTask(taskId: string, model?: string, mockupFiles?: string[], testOptions?: TestOptions, executionRunId?: string): Promise<string> {
@@ -120,32 +212,19 @@ export class ExecutionPipeline {
         logger.warn({ err, taskId, specUrl: task.specUrl }, 'Failed to fetch spec content');
       }
     }
-    // Auto-fetch SVN spec documents (skip for testing tasks — no spec reading needed):
+    // Auto-fetch spec documents from SVN + local spec folders (skip for testing tasks):
     // Priority 1: use parentName (from Asana parent task, e.g. "OV0101")
     // Priority 2: extract function code from task title (e.g. "IC01 修改發票查詢" → "IC01")
-    let svnDocIds: string[] = [];
-    let svnFetchError: string | null = null;
-    let svnFetchAttempted = false;
-    const functionCode = task.parentName || extractFunctionCode(task.title);
-    if (task.taskType !== 'testing' && functionCode && projectConfig?.svnConfig && this.svnSpecService) {
-      svnFetchAttempted = true;
-      try {
-        svnDocIds = await this.svnSpecService.fetchSpecsForTask(
-          task.projectId, taskId, functionCode, projectConfig.svnConfig, task.label,
-        );
-        logger.info({ taskId, functionCode, source: task.parentName ? 'parentName' : 'title', docCount: svnDocIds.length }, 'Fetched SVN specs');
-      } catch (err) {
-        svnFetchError = err instanceof Error ? err.message : String(err);
-        logger.error({ err, taskId, functionCode }, 'SVN spec fetch failed — prompt will carry [SPEC_FETCH_ERROR] block（規格不齊全不執行）');
-      }
-    }
+    const specFetch = await this.fetchAutoSpecs(task, taskId, projectConfig, task.label);
 
     // Find task-associated attachments scoped to this execution run
     const taskAttachments = this.getTaskAttachments(task.projectId, taskId, executionRunId);
 
-    // Get SVN-bound documents for this task, filtered by role:
+    // Get auto-fetched (SVN / folder) documents for this task, filtered by role:
     // Frontend agent → SA + SD, Backend agent → SD only
-    const allSvnDocs = svnDocIds.length > 0 ? getDocumentsForTask(taskId).filter(d => d.source === 'svn') : [];
+    const allSvnDocs = specFetch.docIds.length > 0
+      ? getDocumentsForTask(taskId).filter(d => d.source === 'svn' || d.source === 'folder')
+      : [];
     const svnDocuments = task.label === 'backend'
       ? allSvnDocs.filter(d => d.docType === 'SD')
       : allSvnDocs;  // frontend / others get SA + SD
@@ -211,7 +290,7 @@ export class ExecutionPipeline {
       testOptions,
       extraPrompt,
       saFlowResult: saFlowResult ?? undefined,
-      svnSpecFetch: { attempted: svnFetchAttempted, functionCode: functionCode || undefined, error: svnFetchError },
+      svnSpecFetch: { attempted: specFetch.attempted, functionCode: specFetch.functionCode || undefined, error: specFetch.error, warnings: specFetch.warnings },
     });
 
     // Resolve working directory
@@ -246,7 +325,7 @@ export class ExecutionPipeline {
    * Used by MCP Server to provide execution context to external Claude Code sessions.
    * Reuses the same assembleContext logic as executeTask.
    */
-  async buildExecutionPlan(taskId: string, model?: string, mockupFiles?: string[], testOptions?: TestOptions, executionRunId?: string): Promise<{ prompt: string; workingDir: string; model: string }> {
+  async buildExecutionPlan(taskId: string, model?: string, mockupFiles?: string[], testOptions?: TestOptions, executionRunId?: string, track?: ExecutionTrack): Promise<{ prompt: string; workingDir: string; model: string }> {
     const task = getTask(taskId);
     if (!task) throw new Error(`Task ${taskId} not found`);
 
@@ -268,25 +347,12 @@ export class ExecutionPipeline {
       } catch { /* ignore */ }
     }
 
-    let svnDocIds: string[] = [];
-    let svnFetchError: string | null = null;
-    let svnFetchAttempted = false;
-    const functionCode = task.parentName || extractFunctionCode(task.title);
-    if (task.taskType !== 'testing' && functionCode && projectConfig?.svnConfig && this.svnSpecService) {
-      svnFetchAttempted = true;
-      try {
-        svnDocIds = await this.svnSpecService.fetchSpecsForTask(
-          task.projectId, taskId, functionCode, projectConfig.svnConfig, task.label,
-        );
-      } catch (err) {
-        // 規格不齊全不執行：do NOT swallow — surface the error prominently in the plan
-        svnFetchError = err instanceof Error ? err.message : String(err);
-        logger.error({ err, taskId, functionCode }, 'SVN spec fetch failed — execution plan will carry [SPEC_FETCH_ERROR] block（規格不齊全不執行）');
-      }
-    }
+    const specFetch = await this.fetchAutoSpecs(task, taskId, projectConfig, task.label);
 
     const taskAttachments = this.getTaskAttachments(task.projectId, taskId, executionRunId);
-    const allSvnDocs = svnDocIds.length > 0 ? getDocumentsForTask(taskId).filter(d => d.source === 'svn') : [];
+    const allSvnDocs = specFetch.docIds.length > 0
+      ? getDocumentsForTask(taskId).filter(d => d.source === 'svn' || d.source === 'folder')
+      : [];
     const svnDocuments = task.label === 'backend'
       ? allSvnDocs.filter(d => d.docType === 'SD')
       : allSvnDocs;
@@ -332,6 +398,7 @@ export class ExecutionPipeline {
       superpowers,
       projectId: task.projectId,
       taskId,
+      track,
       role: task.label,
       taskTitle: task.title,
       taskDescription: task.description || '',
@@ -345,7 +412,7 @@ export class ExecutionPipeline {
       testOptions,
       extraPrompt,
       saFlowResult: saFlowResult ?? undefined,
-      svnSpecFetch: { attempted: svnFetchAttempted, functionCode: functionCode || undefined, error: svnFetchError },
+      svnSpecFetch: { attempted: specFetch.attempted, functionCode: specFetch.functionCode || undefined, error: specFetch.error, warnings: specFetch.warnings },
     });
 
     const workingDir = this.resolveWorkingDir(project, task.label);
@@ -368,6 +435,7 @@ export class ExecutionPipeline {
       testOptions?: TestOptions;
       executionRunId?: string;
       reportTaskId?: string;
+      track?: ExecutionTrack;
     },
   ): Promise<{ prompt: string; workingDir: string; model: string }> {
     const task = getTask(taskId);
@@ -391,25 +459,12 @@ export class ExecutionPipeline {
       } catch { /* ignore */ }
     }
 
-    let svnDocIds: string[] = [];
-    let svnFetchError: string | null = null;
-    let svnFetchAttempted = false;
-    const functionCode = task.parentName || extractFunctionCode(task.title);
-    if (task.taskType !== 'testing' && functionCode && projectConfig?.svnConfig && this.svnSpecService) {
-      svnFetchAttempted = true;
-      try {
-        svnDocIds = await this.svnSpecService.fetchSpecsForTask(
-          task.projectId, taskId, functionCode, projectConfig.svnConfig, forRole,
-        );
-      } catch (err) {
-        // 規格不齊全不執行：do NOT swallow — surface the error prominently in the prompt
-        svnFetchError = err instanceof Error ? err.message : String(err);
-        logger.error({ err, taskId, functionCode, forRole }, 'SVN spec fetch failed — prompt will carry [SPEC_FETCH_ERROR] block（規格不齊全不執行）');
-      }
-    }
+    const specFetch = await this.fetchAutoSpecs(task, taskId, projectConfig, forRole);
 
     const taskAttachments = this.getTaskAttachments(task.projectId, taskId, opts?.executionRunId);
-    const allSvnDocs = svnDocIds.length > 0 ? getDocumentsForTask(taskId).filter(d => d.source === 'svn') : [];
+    const allSvnDocs = specFetch.docIds.length > 0
+      ? getDocumentsForTask(taskId).filter(d => d.source === 'svn' || d.source === 'folder')
+      : [];
     const svnDocuments = forRole === 'backend'
       ? allSvnDocs.filter(d => d.docType === 'SD')
       : allSvnDocs;
@@ -455,6 +510,7 @@ export class ExecutionPipeline {
       projectId: task.projectId,
       taskId,
       reportTaskId: opts?.reportTaskId,
+      track: opts?.track,
       role: forRole,
       taskTitle: task.title,
       taskDescription: task.description || '',
@@ -468,7 +524,7 @@ export class ExecutionPipeline {
       testOptions: opts?.testOptions,
       extraPrompt,
       saFlowResult: saFlowResult ?? undefined,
-      svnSpecFetch: { attempted: svnFetchAttempted, functionCode: functionCode || undefined, error: svnFetchError },
+      svnSpecFetch: { attempted: specFetch.attempted, functionCode: specFetch.functionCode || undefined, error: specFetch.error, warnings: specFetch.warnings },
     });
 
     const workingDir = this.resolveWorkingDir(project, forRole);
@@ -575,6 +631,8 @@ export class ExecutionPipeline {
     taskId?: string;
     /** Override taskId used for verification report path only (e.g. `${taskId}-frontend`) */
     reportTaskId?: string;
+    /** 任務軌道：light = BUG 原文驅動的輕量流程；預設 full（規格驅動） */
+    track?: ExecutionTrack;
     role: string;
     taskTitle: string;
     taskDescription: string;
@@ -588,8 +646,13 @@ export class ExecutionPipeline {
     testOptions?: TestOptions;
     extraPrompt?: string;
     saFlowResult?: { fullFlow: string; relevantFlow: string; flowPath: string } | null;
-    /** SVN spec fetch outcome — attempted=true means SVN was configured and a fetch was tried; error is set when the fetch threw */
-    svnSpecFetch?: { attempted: boolean; functionCode?: string; error?: string | null };
+    /**
+     * Auto spec fetch outcome (SVN + local spec folders) — attempted=true means
+     * at least one source was configured and a fetch was tried; error is set when
+     * ALL sources failed with zero documents; warnings carry non-fatal issues
+     * (git pull skipped/failed, partial source failures rescued by another source).
+     */
+    svnSpecFetch?: { attempted: boolean; functionCode?: string; error?: string | null; warnings?: string[] };
   }): string {
     const parts: string[] = [];
 
@@ -616,28 +679,35 @@ export class ExecutionPipeline {
       parts.push(this.buildSpecSection(opts.specResult));
     }
 
-    // Layer 2.6: SVN specification documents (auto-fetched)
+    // Layer 2.6: Auto-fetched specification documents (SVN + local spec folders)
+    const specWarnings = opts.svnSpecFetch?.warnings ?? [];
     if (opts.svnSpecFetch?.error) {
-      // Fetch threw — show the error honestly instead of pretending "no documents"
+      // All sources failed — show the error honestly instead of pretending "no documents"
       parts.push([
-        '## SVN 規格文件（自動取得）',
+        '## 規格文件（自動取得：SVN／規格資料夾）',
         '',
         `⚠ 撈取失敗：${opts.svnSpecFetch.error}`,
         '',
-        '未取得任何 SVN 規格文件——這不代表規格不存在，而是 SVN 撈取發生錯誤。',
+        '未取得任何規格文件——這不代表規格不存在，而是規格來源（SVN／規格資料夾）撈取發生錯誤。',
         '處理方式見本 prompt 最前面的 [SPEC_FETCH_ERROR] 區塊。',
       ].join('\n'));
     } else if (opts.svnDocuments && opts.svnDocuments.length > 0) {
-      parts.push(this.buildSvnDocsSection(opts.svnDocuments));
+      parts.push(this.buildSvnDocsSection(opts.svnDocuments, specWarnings));
     } else if (opts.svnSpecFetch?.attempted) {
-      // SVN configured and fetch succeeded, but zero documents found for this task/role
-      parts.push([
-        '## SVN 規格文件（自動取得）',
+      // Sources configured and fetch succeeded, but zero documents found for this task/role
+      const lines = [
+        '## 規格文件（自動取得：SVN／規格資料夾）',
         '',
-        `⚠ 警告：未找到規格文件。SVN 已設定且撈取成功，但功能代碼「${opts.svnSpecFetch.functionCode ?? '(未知)'}」沒有找到本任務適用的 SA/SD 規格文件。`,
+        `⚠ 警告：未找到規格文件。規格來源已設定且撈取成功，但功能代碼「${opts.svnSpecFetch.functionCode ?? '(未知)'}」沒有找到本任務適用的 SA/SD 規格文件。`,
+      ];
+      if (specWarnings.length > 0) {
+        lines.push('', '規格來源警告：', ...specWarnings.map(w => `- ⚠ ${w}`));
+      }
+      lines.push(
         '依專案規範「規格不齊全不執行」，開工前請先告知使用者並取得指示（提供文件路徑，或明確說「跳過」）。',
         '若使用者選擇跳過，必須先用 report_output 記錄 [SKIP] 使用者跳過規格檢查。',
-      ].join('\n'));
+      );
+      parts.push(lines.join('\n'));
     }
 
     // Layer 2.7: Project experience notes（前人踩坑教訓）— placed next to the
@@ -684,6 +754,7 @@ export class ExecutionPipeline {
       reportTaskId: opts.reportTaskId ?? opts.taskId,
       realTaskId: opts.taskId,
       projectId: opts.projectId,
+      track: opts.track,
     });
     parts.push(taskPrompt);
 
@@ -943,7 +1014,7 @@ ${flowDiagram}
    */
   private buildSpecFetchErrorBanner(errorMessage: string): string {
     return [
-      `⚠ [SPEC_FETCH_ERROR] SVN 規格撈取失敗：${errorMessage}`,
+      `⚠ [SPEC_FETCH_ERROR] 規格自動撈取失敗（SVN／規格資料夾）：${errorMessage}`,
       '依專案規範「規格不齊全不執行」，請先告知使用者此錯誤並取得指示（重試 / 提供文件路徑 / 明確說「跳過」）後才能開始開發。',
       '若使用者選擇跳過，必須先用 report_output 記錄 [SKIP] 使用者跳過規格檢查。',
     ].join('\n');
@@ -954,11 +1025,19 @@ ${flowDiagram}
    * Only provides file paths — agent must use Read tool to access content.
    * This prevents spec content from being lost when conversation is compressed.
    */
-  private buildSvnDocsSection(docs: Array<{ documentId: string; filename: string; filePath: string; parsedText: string | null; docType: string | null }>): string {
-    const lines: string[] = ['## SVN 規格文件（自動取得）', ''];
-    lines.push('以下規格文件已從 SVN 自動下載，與本次任務相關。');
+  private buildSvnDocsSection(
+    docs: Array<{ documentId: string; filename: string; filePath: string; parsedText: string | null; docType: string | null }>,
+    warnings: string[] = [],
+  ): string {
+    const lines: string[] = ['## 規格文件（自動取得：SVN／規格資料夾）', ''];
+    lines.push('以下規格文件已從規格來源（SVN／本地規格資料夾）自動取得，與本次任務相關。');
     lines.push('**重要**：請使用 Read 工具讀取這些文件。如果對話被壓縮導致你忘記規格內容，請重新讀取這些檔案。');
     lines.push('');
+    if (warnings.length > 0) {
+      lines.push('⚠ 規格來源警告（文件仍已取得，但請知悉以下狀況並轉告使用者）：');
+      for (const w of warnings) lines.push(`- ${w}`);
+      lines.push('');
+    }
 
     for (const doc of docs) {
       const typeLabel = doc.docType === 'SA' ? '(SA 需求規格)' : doc.docType === 'SD' ? '(SD 系統設計)' : '';
@@ -988,10 +1067,10 @@ ${flowDiagram}
    * Get document context for an agent based on task binding.
    * Only returns documents explicitly bound to this task (via task_documents table).
    * Frontend gets SA+SD, Backend gets SD only.
-   * SVN documents are excluded here — they are handled separately in Layer 2.6.
+   * Auto-fetched documents (SVN / spec folders) are excluded here — they are handled separately in Layer 2.6.
    */
   private getDocumentContext(taskId: string, role: string): string | null {
-    const allTaskDocs = getDocumentsForTask(taskId).filter(d => d.source !== 'svn');
+    const allTaskDocs = getDocumentsForTask(taskId).filter(d => d.source !== 'svn' && d.source !== 'folder');
     if (allTaskDocs.length === 0) return null;
 
     const filteredDocs = allTaskDocs.filter(d => {
@@ -1052,9 +1131,9 @@ ${flowDiagram}
     title: string,
     description: string,
     taskType: TaskType,
-    promptOpts: { role?: string; testOptions?: TestOptions; reportTaskId?: string; realTaskId?: string; projectId?: string } = {},
+    promptOpts: { role?: string; testOptions?: TestOptions; reportTaskId?: string; realTaskId?: string; projectId?: string; track?: ExecutionTrack } = {},
   ): string {
-    const { role, testOptions, reportTaskId, realTaskId, projectId } = promptOpts;
+    const { role, testOptions, reportTaskId, realTaskId, projectId, track } = promptOpts;
     const taskId = realTaskId ?? reportTaskId;
     const typeLabels: Record<TaskType, string> = {
       bug: 'Bug Fix',
@@ -1079,9 +1158,11 @@ ${description}
 
 請先檢查工作目錄中是否有 CLAUDE.md 或 .claude/ 設定，如果有請讀取並遵循其中的指示和技能定義。
 
-${this.buildSpecComplianceSection(taskId)}
+${this.buildSpecComplianceSection(taskId, track)}
 
-${this.buildSpecReadingSection(taskId)}
+${this.buildSpecReadingSection(taskId, track)}
+
+${this.buildSpecChecklistSection(taskId, track, projectId)}
 
 ${this.buildStrategy(taskType, taskId, projectId)}
 
@@ -1095,11 +1176,17 @@ ${this.buildCompletionCriteria(role, testOptions, reportTaskId ?? realTaskId, ta
    * 規格遵循（最高原則）— 逐字取自專案 CLAUDE.md「#### 2a. 嚴禁自行編造（最高原則）」，
    * 「規格不清楚」的處理改為使用 report_spec_gap MCP 工具。所有 role 都注入。
    */
-  private buildSpecComplianceSection(taskId?: string): string {
+  private buildSpecComplianceSection(taskId?: string, track?: ExecutionTrack): string {
     const tidComma = taskId ? `taskId="${taskId}", ` : '';
+    // light 軌：原則不變，但「規格」的語境 = 原始 BUG 內容與現有程式碼慣例
+    const lightNote = track === 'light'
+      ? `
+
+（light 軌註記：本任務無 SA/SD 規格文件，「規格」= 原始 BUG 內容（任務描述 / Asana 留言 / 附件截圖）與現有程式碼慣例。修復不可偏離 BUG 原文描述的預期行為；BUG 原文沒提的東西不要順手改，訊息文字/欄位名一律沿用現有程式碼與 BUG 原文，不可自創。）`
+      : '';
     return `## 規格遵循（最高原則 — 違反此規則等同任務失敗）
 
-**所有實作都必須有規格依據。規格沒寫的東西，不做。規格寫的東西，照做。**
+**所有實作都必須有規格依據。規格沒寫的東西，不做。規格寫的東西，照做。**${lightNote}
 
 具體規則：
 1. 欄位名稱、按鈕文字、訊息文字 → 必須從 SA/SD 文件逐字抄，不可以自己翻譯或改寫
@@ -1119,17 +1206,81 @@ ${this.buildCompletionCriteria(role, testOptions, reportTaskId ?? realTaskId, ta
    * 規格文件閱讀協議 — 逐字取自專案 CLAUDE.md「#### 2. 確實閱讀規格文件」。所有 role 都注入。
    * 有 taskId 時第 4 條寫成具體的 report_output MCP 呼叫格式。
    */
-  private buildSpecReadingSection(taskId?: string): string {
+  private buildSpecReadingSection(taskId?: string, track?: ExecutionTrack): string {
+    // light 軌：無 SA/SD，改讀原始 BUG 內容（任務描述 + Asana 留言 + 附件截圖）
+    if (track === 'light') {
+      const commentsCall = taskId
+        ? `mcp__omni-commander__get_asana_task_comments(taskId="${taskId}")`
+        : 'mcp__omni-commander__get_asana_task_comments()';
+      const lightReportLine = taskId
+        ? `3. 讀完後，用 mcp__omni-commander__report_output(taskId="${taskId}", content="...") 摘要你理解的重點（問題現象、修復後預期行為、涉及的欄位/訊息文字）`
+        : '3. 讀完後，在 report_output 摘要你理解的重點（問題現象、修復後預期行為、涉及的欄位/訊息文字）';
+      return `## BUG 原文閱讀（light 軌 — 強制，寫 code 之前必須完成）
+
+本任務無 SA/SD 規格文件，**原始 BUG 內容就是驗證基準**：
+1. 完整讀取任務描述 — 逐字讀每個提到的欄位名稱、按鈕文字、訊息文字、操作步驟
+2. 呼叫 ${commentsCall} 讀回報討論串；有附件截圖就取回並用 Read tool 看圖
+${lightReportLine}
+4. 開發過程中遇到任何訊息文字、欄位名，回頭查 BUG 原文與現有程式碼確認，不要憑印象寫`;
+    }
+
     const reportLine = taskId
       ? `4. 讀完後，用 mcp__omni-commander__report_output(taskId="${taskId}", content="...") 摘要你理解的重點（欄位清單、API 清單、特殊邏輯）`
       : '4. 讀完後，在 report_output 摘要你理解的重點（欄位清單、API 清單、特殊邏輯）';
+    const consistencyCall = taskId
+      ? `check_spec_consistency(taskId="${taskId}")`
+      : 'check_spec_consistency(taskId)';
     return `## 規格文件閱讀（強制，寫 code 之前必須完成）
 
 1. 用 Read tool 完整讀取 SA 文件 — 不是掃過去，是逐項讀每個欄位名稱、按鈕文字、訊息文字、操作流程
 2. 用 Read tool 完整讀取 SD 文件 — 逐個 API 讀清楚 path、method、每個參數名和型別、response 結構
 3. 如果有 Axure HTML — 用 Read tool 讀取，對照 SA 確認 UI 結構
 ${reportLine}
-5. 開發過程中遇到任何文字、欄位名、API 路徑，回頭查規格確認，不要憑印象寫`;
+5. 開發過程中遇到任何文字、欄位名、API 路徑，回頭查規格確認，不要憑印象寫
+6. （建議）讀完後若發現 SA 與 SD 有疑似矛盾，通知 orchestrator 執行 ${consistencyCall} 做系統性比對——規格矛盾先解決再開工，否則規格回對無法 100%`;
+  }
+
+  /**
+   * 規格檢查表（規格回對輸入）— 讀完規格後立即用 save_spec_checklist 抽取
+   * 結構化 checklist；任務完成時 run_spec_compliance 做程式預檢（advisory），
+   * 再由獨立 AI 回對（save_compliance_review）逐項驗證，最新 AI 回對 missing
+   * 不為 0 無法標 completed。所有 role 都注入；有 taskId 才注入具體呼叫。
+   */
+  private buildSpecChecklistSection(taskId?: string, track?: ExecutionTrack, projectId?: string): string {
+    const saveCall = taskId
+      ? `mcp__omni-commander__save_spec_checklist(taskId="${taskId}", items=[{itemType, content, side?, sourceRef?}, ...])`
+      : 'save_spec_checklist(taskId, items=[...])';
+
+    // light 軌：檢查表來源改為原始 BUG 內容——工序輕，回對標準不變
+    if (track === 'light') {
+      const commentsCall = taskId
+        ? `mcp__omni-commander__get_asana_task_comments(taskId="${taskId}")`
+        : 'mcp__omni-commander__get_asana_task_comments()';
+      const attachArgs = [
+        projectId ? `projectId="${projectId}"` : '',
+        taskId ? `taskId="${taskId}"` : '',
+      ].filter(Boolean).join(', ');
+      const attachCall = `mcp__omni-commander__fetch_task_attachments(${attachArgs})`;
+      return `## 規格檢查表（light 軌 — 從 BUG 原文抽取，強制）
+
+本任務無 SA/SD，檢查表來源是原始 BUG 內容：
+1. 讀任務描述、呼叫 ${commentsCall} 讀回報討論串、${attachCall} 取截圖並用 Read tool 看圖
+2. 從中抽出「修復後預期行為」清單（每個可驗證的行為一項，itemType="logic"；若 bug 涉及特定訊息文字/欄位則用 ui_text）
+3. ${saveCall} 寫入
+範例：「計劃部門查詢欄位輸入值後查詢，結果正確過濾」
+
+任務完成時先用 run_spec_compliance 做程式預檢，再由 orchestrator 派獨立 AI 回對 agent 逐項驗證（含 logic 項目），最新 AI 回對的 missing 不為 0 無法標 completed——light 軌輕的是工序，不是標準。`;
+    }
+
+    return `## 規格檢查表（強制 — 讀完規格後立即執行）
+
+讀完 SA/SD 規格後，立即呼叫 ${saveCall} 抽取結構化檢查表：
+- **每一個欄位名/按鈕文字/訊息文字/API/DB 欄位都是一項**，content 必須從規格**逐字抄**（不可翻譯或改寫）
+- itemType：ui_text=規格逐字文字 / api=API 路徑（如 "POST /api/wa05/save"）/ param=請求參數 / response_field=回應欄位 / db_field=DB 欄位 / logic=邏輯規則
+- 邏輯類規則（WHERE 條件、排序、狀態轉換等）標 itemType="logic"（程式預檢不比對，由 AI 回對驗證）
+- sourceRef 填規格檔名+章節，方便回查
+
+任務完成時先用 run_spec_compliance 做程式預檢（抓文字/路徑錯字），再由 orchestrator 派獨立 AI 回對 agent 逐項驗證（含 logic 項目），最新 AI 回對的 missing 不為 0 無法標 completed。`;
   }
 
   /**
@@ -1208,6 +1359,8 @@ ${reportLine}
     if (includeEvidence) {
       lines.push(`- 截圖等驗收證據用 mcp__omni-commander__report_verification_evidence(${tidComma}filePath=...) 上傳`);
     }
+    lines.push(`- 完成後呼叫 mcp__omni-commander__run_spec_compliance(${tid}) 做程式預檢（抓文字/路徑錯字並修掉；有正當理由的項目用 waive_checklist_item 豁免並說明）——預檢僅供快速修正，不解鎖完成閘門`);
+    lines.push(`- **通知 orchestrator 派獨立 AI 回對 agent**（get_compliance_review_plan(${tid}) → reviewer 逐項驗證 → save_compliance_review），最新 AI 回對 **missing=0 才可標 completed**；你（implementer）不可自行執行 AI 回對或自評`);
     return lines;
   }
 
