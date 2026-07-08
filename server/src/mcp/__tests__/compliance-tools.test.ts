@@ -139,6 +139,35 @@ describe('compliance-tools', () => {
       const data = JSON.parse((await callTool(server, 'get_spec_checklist', { taskId: 'task-1' })).content[0].text);
       expect(data.latestRun).toMatchObject({ total: 1, matched: 1, missing: 0 });
     });
+
+    it('paginates a large checklist (total/hasMore/offset) so the reviewer can see every item', async () => {
+      seedProject(testDb);
+      seedTask(testDb);
+      const items = Array.from({ length: 120 }, (_, i) => ({
+        itemType: i % 5 === 0 ? 'logic' : 'ui_text',
+        content: `項目-${i}`,
+      }));
+      await callTool(server, 'save_spec_checklist', { taskId: 'task-1', items });
+
+      // page 1
+      const p1 = JSON.parse((await callTool(server, 'get_spec_checklist', { taskId: 'task-1', limit: 50, offset: 0 })).content[0].text);
+      expect(p1.total).toBe(120);
+      expect(p1.count).toBe(50);
+      expect(p1.hasMore).toBe(true);
+      // page 3 (last)
+      const p3 = JSON.parse((await callTool(server, 'get_spec_checklist', { taskId: 'task-1', limit: 50, offset: 100 })).content[0].text);
+      expect(p3.count).toBe(20);
+      expect(p3.hasMore).toBe(false);
+
+      // collect all ids across pages → covers all 120 incl. logic items
+      const allIds = new Set<string>();
+      for (let offset = 0; ; offset += 50) {
+        const page = JSON.parse((await callTool(server, 'get_spec_checklist', { taskId: 'task-1', limit: 50, offset })).content[0].text);
+        for (const it of page.items) allIds.add(it.id);
+        if (!page.hasMore) break;
+      }
+      expect(allIds.size).toBe(120);
+    });
   });
 
   describe('waive_checklist_item', () => {
@@ -322,8 +351,9 @@ describe('compliance-tools', () => {
       // workspace + 規格文件路徑
       expect(text).toContain(feRoot);
       expect(text).toContain('/specs/SPEC_WA05.md');
-      // reviewer prompt：讀規格 → get_spec_checklist → 逐項驗證（logic 必驗）→ 證據 → save_compliance_review
-      expect(text).toContain(`get_spec_checklist(taskId="task-1")`);
+      // reviewer prompt：讀規格 → get_spec_checklist（分頁看完全部）→ 逐項驗證（logic 必驗）→ 證據 → save_compliance_review
+      expect(text).toContain(`get_spec_checklist(taskId="task-1", limit=50, offset=0)`);
+      expect(text).toContain('hasMore=false');
       expect(text).toContain('logic');
       expect(text).toContain('不可跳過');
       expect(text).toContain('evidence');

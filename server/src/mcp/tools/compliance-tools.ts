@@ -147,40 +147,52 @@ export function registerComplianceTools(server: McpServer): void {
   // ── get_spec_checklist ────────────────────────────────────
   server.tool(
     'get_spec_checklist',
-    '取得任務的規格檢查表（含 waived 項目）與最新一次 run_spec_compliance 的比對摘要（無 run 則為 null）。',
+    '取得任務的規格檢查表（含 waived 項目）與最新一次 run_spec_compliance 的比對摘要（無 run 則為 null）。**檢查表可能很大，回應分頁：用 limit/offset 逐頁取，直到 hasMore=false 才算看完全部項目**（AI 規格回對必須看過每一項，含 logic 類）。',
     {
       taskId: z.string().describe('任務 ID'),
+      limit: z.number().int().positive().max(200).optional().describe('每頁最多幾項（預設 50、上限 200）'),
+      offset: z.number().int().min(0).optional().describe('略過項數，用於分頁（預設 0）'),
     },
     { title: 'Get Spec Checklist', readOnlyHint: true, openWorldHint: false },
-    async ({ taskId }) => {
+    async ({ taskId, limit, offset }) => {
       const db = getMcpDb();
       const task = db.prepare('SELECT id FROM tasks WHERE id = ?').get(taskId) as { id: string } | undefined;
       if (!task) {
         return { content: [{ type: 'text' as const, text: `Error: Task "${taskId}" not found` }], isError: true };
       }
 
-      const rows = db.prepare('SELECT * FROM spec_checklist_items WHERE task_id = ? ORDER BY created_at ASC, rowid ASC')
-        .all(taskId) as ChecklistRow[];
+      const effLimit = limit ?? 50;
+      const effOffset = offset ?? 0;
+
+      const total = (db.prepare('SELECT COUNT(*) as c FROM spec_checklist_items WHERE task_id = ?').get(taskId) as { c: number }).c;
+      const rows = db.prepare('SELECT * FROM spec_checklist_items WHERE task_id = ? ORDER BY created_at ASC, rowid ASC LIMIT ? OFFSET ?')
+        .all(taskId, effLimit, effOffset) as ChecklistRow[];
       const run = getLatestRun(db, taskId);
+      const hasMore = effOffset + rows.length < total;
+
+      const text = JSON.stringify({
+        taskId,
+        total,
+        count: rows.length,
+        offset: effOffset,
+        hasMore,
+        items: rows.map(rowToItem),
+        latestRun: run ? {
+          id: run.id,
+          runAt: run.run_at,
+          source: run.source,
+          total: run.total,
+          matched: run.matched,
+          missing: run.missing,
+          manual: run.manual,
+          waived: run.waived,
+        } : null,
+      }, null, 2);
 
       return {
         content: [{
           type: 'text' as const,
-          text: truncateResponse(JSON.stringify({
-            taskId,
-            count: rows.length,
-            items: rows.map(rowToItem),
-            latestRun: run ? {
-              id: run.id,
-              runAt: run.run_at,
-              source: run.source,
-              total: run.total,
-              matched: run.matched,
-              missing: run.missing,
-              manual: run.manual,
-              waived: run.waived,
-            } : null,
-          }, null, 2)),
+          text: truncateResponse(text, `檢查表共 ${total} 項，本頁 offset=${effOffset}、count=${rows.length}${hasMore ? '、hasMore=true → 用 offset 續取下一頁' : ''}。若單頁仍被截斷，改用更小的 limit 重取。`),
         }],
       };
     },
@@ -487,7 +499,7 @@ ${orchestratorNote}
 ## 審查流程（強制，依序執行）
 
 1. **取得完整 BUG 現場**：上列任務標題/描述是起點；呼叫 get_asana_task_comments(taskId="${taskId}") 讀回報討論串、fetch_task_attachments(projectId="${task.project_id}", taskId="${taskId}") 取附件截圖並用 Read tool 看圖。**BUG 原文是你判定的唯一依據，不是任何人的轉述。**
-2. **取得檢查表**：呼叫 get_spec_checklist(taskId="${taskId}") 取得全部待驗項目（含 itemId）。
+2. **取得檢查表（必須看完全部）**：呼叫 get_spec_checklist(taskId="${taskId}", limit=50, offset=0) 取得項目（含 itemId）。**檢查表可能很大且會分頁**——回應裡 hasMore=true 就用遞增的 offset（0、50、100…）繼續呼叫，直到 hasMore=false，把每一頁的項目都收集齊。**save_compliance_review 必須涵蓋所有非 waived 項目（含 logic 類），漏收任何一頁就會被退回。**
 3. **逐項在實際程式碼中驗證**（一項都不可跳過）：
    - **logic（修復後預期行為）→ 讀實際的程式碼修改（diff / 相關檔案），追完整程式碼流程確認該行為真的達成，不可只憑檔名、函式名或 implementer 的說法猜。環境允許時用 Playwright 實測頁面行為更好（非必要）**
    - ui_text → 在程式碼中找到該文字的**渲染處**（不是只出現在註解/測試），確認與 BUG 原文要求逐字一致
@@ -511,7 +523,7 @@ ${orchestratorNote}
 ## 審查流程（強制，依序執行）
 
 1. **讀規格原文**：用 Read tool 完整讀取上列規格文件（SA/SD）。這是你判定的唯一依據，不是任何人的轉述。
-2. **取得檢查表**：呼叫 get_spec_checklist(taskId="${taskId}") 取得全部待驗項目（含 itemId）。
+2. **取得檢查表（必須看完全部）**：呼叫 get_spec_checklist(taskId="${taskId}", limit=50, offset=0) 取得項目（含 itemId）。**檢查表可能很大且會分頁**——回應裡 hasMore=true 就用遞增的 offset（0、50、100…）繼續呼叫，直到 hasMore=false，把每一頁的項目都收集齊。**save_compliance_review 必須涵蓋所有非 waived 項目（含 logic 類），漏收任何一頁就會被退回。**
 3. **逐項在實際程式碼中驗證**（一項都不可跳過）：
    - ui_text → 在程式碼中找到該文字的**渲染處**（不是只出現在註解/測試），確認與規格逐字一致
    - api → 確認 path、method、參數確實**串接**（前端有呼叫、後端有 handler），不是只出現字串
