@@ -409,10 +409,7 @@ export function TaskList({ selectedModel, onViewChange }: TaskListProps) {
                     svnBrowserEditCallback.current = onSelect;
                     setShowSvnBrowserForEdit(type);
                   }}
-                  onViewAgents={onViewChange ? (taskId) => {
-                    useProjectStore.getState().setAgentsFilterTaskId(taskId);
-                    onViewChange('agents');
-                  } : undefined}
+                  onViewAgents={undefined /* Agents 頁已隱藏，任務卡不再顯示「看 agent」鈕 */}
                 />
               ));
               return (

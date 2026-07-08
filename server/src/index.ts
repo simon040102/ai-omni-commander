@@ -26,7 +26,14 @@ import { TaskClassifier } from './orchestrator/TaskClassifier.js';
 import { CodeReviewAgent } from './review/CodeReviewAgent.js';
 import { ReviewTrigger } from './review/ReviewTrigger.js';
 import { RetryHandler } from './review/RetryHandler.js';
-import { SvnSpecService } from './svn/SvnSpecService.js';
+import { SvnSpecService, extractFunctionCode } from './svn/SvnSpecService.js';
+
+/** 任務功能代碼：parent_name 優先（Asana 母任務常帶 DF08_… 代碼），退回 title。 */
+function taskFunctionCode(parentName: unknown, title: unknown): string | null {
+  const p = typeof parentName === 'string' ? extractFunctionCode(parentName) : null;
+  if (p) return p;
+  return typeof title === 'string' ? extractFunctionCode(title) : null;
+}
 import { SaFlowAnalyzer } from './documents/SaFlowAnalyzer.js';
 import { listProjects } from './db/queries/projects.js';
 import { getTask } from './db/queries/tasks.js';
@@ -716,7 +723,7 @@ async function main() {
     try {
       const rows = db.prepare(`
         SELECT g.id, g.task_id, g.project_id, g.category, g.description, g.status,
-               g.resolution_note, g.created_at, g.resolved_at, t.title as task_title
+               g.resolution_note, g.created_at, g.resolved_at, t.title as task_title, t.parent_name as task_parent_name
         FROM spec_gaps g LEFT JOIN tasks t ON t.id = g.task_id
         WHERE g.project_id = ?
         ORDER BY g.status ASC, g.created_at DESC
@@ -727,6 +734,7 @@ async function main() {
           id: r['id'],
           taskId: r['task_id'],
           taskTitle: r['task_title'],
+          functionCode: taskFunctionCode(r['task_parent_name'], r['task_title']),
           category: r['category'],
           description: r['description'],
           status: r['status'],
@@ -774,13 +782,13 @@ async function main() {
     if (!projectId) { res.status(400).json({ error: 'Missing projectId' }); return; }
     try {
       const rows = db.prepare(`
-        SELECT c.task_id, t.title as task_title, t.status as task_status, COUNT(*) as item_count,
+        SELECT c.task_id, t.title as task_title, t.parent_name as task_parent_name, t.status as task_status, COUNT(*) as item_count,
                SUM(CASE WHEN c.waived = 1 THEN 1 ELSE 0 END) as waived_count
         FROM spec_checklist_items c LEFT JOIN tasks t ON t.id = c.task_id
         WHERE c.project_id = ?
         GROUP BY c.task_id
         ORDER BY MAX(c.created_at) DESC
-      `).all(projectId) as Array<{ task_id: string; task_title: string | null; task_status: string | null; item_count: number; waived_count: number }>;
+      `).all(projectId) as Array<{ task_id: string; task_title: string | null; task_parent_name: string | null; task_status: string | null; item_count: number; waived_count: number }>;
       const latestRunStmt = db.prepare(
         'SELECT id, run_at, source, total, matched, missing, manual, waived FROM spec_compliance_runs WHERE task_id = ? ORDER BY run_at DESC, rowid DESC LIMIT 1'
       );
@@ -795,6 +803,7 @@ async function main() {
           return {
             taskId: r.task_id,
             taskTitle: r.task_title,
+            functionCode: taskFunctionCode(r.task_parent_name, r.task_title),
             taskStatus: r.task_status,
             itemCount: r.item_count,
             waivedCount: r.waived_count,

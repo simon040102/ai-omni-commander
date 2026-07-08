@@ -12,6 +12,7 @@ import { DbSchemaExplorer } from './components/db/DbSchemaExplorer';
 import { ProjectSettings } from './components/settings/ProjectSettings';
 import { GlobalSettings } from './components/settings/GlobalSettings';
 import { MockupView } from './components/mockup/MockupView';
+import { SpecGovernanceView } from './components/dashboard/SpecGovernanceView';
 import { useThemeStore } from './stores/themeStore';
 
 export function App() {
@@ -49,6 +50,8 @@ export function App() {
             return <GlobalSettings />;
           case 'mockup':
             return <MockupView />;
+          case 'spec-governance':
+            return <SpecGovernanceView />;
           default:
             return <ProjectList onViewChange={onViewChange} />;
         }

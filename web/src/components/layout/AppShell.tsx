@@ -19,7 +19,7 @@ function DisconnectBanner() {
   );
 }
 
-export type View = 'home' | 'setup' | 'new-task' | 'tasks' | 'agents' | 'events' | 'db-explorer' | 'internal-db' | 'settings' | 'global-settings' | 'mockup';
+export type View = 'home' | 'setup' | 'new-task' | 'tasks' | 'agents' | 'events' | 'db-explorer' | 'internal-db' | 'settings' | 'global-settings' | 'mockup' | 'spec-governance';
 
 interface AppShellProps {
   children: (view: View, onViewChange: (v: View) => void) => React.ReactNode;

@@ -245,7 +245,7 @@ ${quickTask.useWorkspaceSkills ? '請先讀取工作目錄中的 CLAUDE.md 和 .
       timestamp: new Date().toISOString(),
       payload: { projectId },
     });
-    onViewChange('agents');
+    onViewChange('tasks'); // Agents 頁已隱藏，啟動後回任務列表
   };
 
   const runningCount = quickAgents.filter(a => a.status === 'running').length;

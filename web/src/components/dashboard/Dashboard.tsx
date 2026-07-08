@@ -5,7 +5,6 @@ import { useToastStore } from '../../stores/toastStore';
 import { TaskList } from './TaskList';
 import { AsanaSyncSettings } from './AsanaSyncSettings';
 import { PlanPanel } from './PlanPanel';
-import { SpecGovernanceSection } from './SpecGovernanceSection';
 import { IconPlay, IconGrid, IconRefresh, IconLightning } from '../ui/Icons';
 import { parseServerDate } from '../../lib/datetime';
 import type { View } from '../layout/AppShell';
@@ -182,9 +181,6 @@ export function Dashboard({ onViewChange }: DashboardProps) {
           )}
         </button>
       )}
-
-      {/* ─── Spec governance (待補規格 / 規格回對 / 專案筆記) ─── */}
-      <SpecGovernanceSection />
 
       {/* ─── Task list ─── */}
       <TaskList selectedModel={selectedModel} onViewChange={onViewChange} />

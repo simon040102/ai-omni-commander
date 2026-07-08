@@ -29,16 +29,16 @@ export function CollapsibleSection({ title, badges = [], defaultExpanded = false
     <div className="bg-card border border-border rounded-lg flex-shrink-0">
       <button
         onClick={() => setUserToggled(!expanded)}
-        className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-muted/30 rounded-lg transition-colors"
+        className="w-full flex items-center gap-2.5 px-4 py-3 text-left hover:bg-muted/30 rounded-lg transition-colors"
       >
         {expanded
-          ? <IconChevronDown className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
-          : <IconChevronRight className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />}
-        <span className="text-xs font-semibold text-foreground">{title}</span>
+          ? <IconChevronDown className="w-4 h-4 text-muted-foreground flex-shrink-0" />
+          : <IconChevronRight className="w-4 h-4 text-muted-foreground flex-shrink-0" />}
+        <span className="text-sm font-semibold text-foreground">{title}</span>
         {badges.map(b => (
           <span
             key={b.label}
-            className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold ${
+            className={`px-2 py-0.5 rounded-full text-xs font-bold ${
               b.tone === 'red' && b.count > 0
                 ? 'bg-red-500/20 text-red-400'
                 : 'bg-muted text-muted-foreground'
@@ -48,7 +48,7 @@ export function CollapsibleSection({ title, badges = [], defaultExpanded = false
           </span>
         ))}
       </button>
-      {expanded && <div className="px-2 pb-2 space-y-2">{children}</div>}
+      {expanded && <div className="px-4 pb-3 space-y-3">{children}</div>}
     </div>
   );
 }

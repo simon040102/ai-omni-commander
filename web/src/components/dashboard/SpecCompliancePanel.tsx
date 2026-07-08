@@ -17,6 +17,7 @@ export interface ComplianceRunSummary {
 export interface ComplianceTaskSummary {
   taskId: string;
   taskTitle: string | null;
+  functionCode: string | null;
   taskStatus: string | null;
   itemCount: number;
   waivedCount: number;
@@ -70,7 +71,7 @@ interface SpecCompliancePanelProps {
 /**
  * 規格回對面板 — spec checklist items saved by MCP save_spec_checklist and
  * compliance runs from run_spec_compliance.
- * Summary data is fetched by SpecGovernanceSection (usePanelData) and passed in;
+ * Summary data is fetched by SpecGovernanceView (usePanelData) and passed in;
  * the per-task detail is fetched on demand here.
  */
 export function SpecCompliancePanel({ taskSummaries, loading, error, refetch }: SpecCompliancePanelProps) {
@@ -96,7 +97,7 @@ export function SpecCompliancePanel({ taskSummaries, loading, error, refetch }: 
   }, [selectedTaskId, fetchDetail]);
 
   // Refresh the open detail when a checklist is saved/waived or a run completes elsewhere
-  // (summary refetch is handled by SpecGovernanceSection's usePanelData)
+  // (summary refetch is handled by SpecGovernanceView's usePanelData)
   useEffect(() => {
     const handler = () => {
       if (selectedTaskId) void fetchDetail(selectedTaskId);
@@ -166,31 +167,27 @@ export function SpecCompliancePanel({ taskSummaries, loading, error, refetch }: 
     : [];
 
   return (
-    <div className="px-1 py-1">
-      <div className="flex items-center gap-2 mb-1">
-        <span className="text-xs font-semibold text-foreground">規格回對</span>
-      </div>
-
+    <div>
       {error ? (
         <button
           onClick={() => void refetch()}
-          className="text-[11px] text-muted-foreground/70 hover:text-foreground py-1 transition-colors"
+          className="text-xs text-muted-foreground/70 hover:text-foreground py-2 transition-colors"
         >
           載入失敗（重試）
         </button>
       ) : loading && taskSummaries.length === 0 ? (
-        <p className="text-[11px] text-muted-foreground/60 py-1 animate-pulse">載入中…</p>
+        <p className="text-xs text-muted-foreground/60 py-2 animate-pulse">載入中…</p>
       ) : taskSummaries.length === 0 ? (
-        <p className="text-[11px] text-muted-foreground py-1">尚無資料</p>
+        <p className="text-xs text-muted-foreground py-2">尚無資料</p>
       ) : (
         <ul className="divide-y divide-border/50">
           {taskSummaries.map(t => (
             <li key={t.taskId}>
               <button
                 onClick={() => setSelectedTaskId(prev => prev === t.taskId ? null : t.taskId)}
-                className="w-full py-1.5 flex items-center gap-2 text-left hover:bg-muted/30 rounded transition-colors"
+                className="w-full py-2.5 flex items-center gap-2 text-left hover:bg-muted/30 rounded transition-colors"
               >
-                <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium flex-shrink-0 ${
+                <span className={`px-2 py-0.5 rounded text-xs font-medium flex-shrink-0 ${
                   !t.latestRun ? 'bg-muted text-muted-foreground'
                     : t.latestRun.missing > 0 ? 'bg-red-500/15 text-red-400'
                       : 'bg-green-500/15 text-green-400'
@@ -198,7 +195,7 @@ export function SpecCompliancePanel({ taskSummaries, loading, error, refetch }: 
                   {scoreLabel(t.latestRun, t.itemCount)}
                 </span>
                 {t.latestRun && (
-                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium flex-shrink-0 ${
+                  <span className={`px-2 py-0.5 rounded text-xs font-medium flex-shrink-0 ${
                     t.latestRun.source === 'ai_review'
                       ? 'bg-blue-500/15 text-blue-400'
                       : 'bg-muted text-muted-foreground'
@@ -207,10 +204,10 @@ export function SpecCompliancePanel({ taskSummaries, loading, error, refetch }: 
                   </span>
                 )}
                 {t.latestRun && !t.hasAiReviewRun && (
-                  <span className="text-[10px] text-amber-400 flex-shrink-0">尚未 AI 回對（結案閘門未解鎖）</span>
+                  <span className="text-xs text-amber-400 flex-shrink-0">尚未 AI 回對（結案閘門未解鎖）</span>
                 )}
-                <span className="text-xs text-foreground truncate flex-1">{t.taskTitle || t.taskId}</span>
-                <span className="text-[10px] text-muted-foreground flex-shrink-0">{selectedTaskId === t.taskId ? '收合' : '展開'}</span>
+                <span className="text-sm text-foreground truncate flex-1">{t.taskTitle || t.taskId}</span>
+                <span className="text-xs text-muted-foreground flex-shrink-0">{selectedTaskId === t.taskId ? '收合' : '展開'}</span>
               </button>
 
               {/* detail */}
