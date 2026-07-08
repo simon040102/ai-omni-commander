@@ -2,6 +2,8 @@
 
 A dual-mode AI collaborative development system. Originally orchestrated multiple Claude Code CLI instances (agents) directly; now operates as an **MCP Server** that provides task management and execution context to external Claude Code sessions.
 
+> 架構細節（系統圖、Monorepo 逐檔說明、Key Flows、Document Handling、Skills 清單）見 **ARCHITECTURE.md**。本檔只放行為規則。
+
 ## 互動式任務執行（必讀）
 
 當使用者提到專案、任務、執行開發等話題時，遵循以下對話式流程。**不要一次倒出 MCP raw JSON，要整理成易讀的格式。**
@@ -28,19 +30,9 @@ A dual-mode AI collaborative development system. Originally orchestrated multipl
 **Bug 修復：**
 1. SM27 共用_查詢工程專案 — 計劃部門查詢欄位失效
 2. SM26_使用者帳號維護 — 主部門點選儲存_職稱無儲存
-3. DM05_簽呈類別維護作業 — 刪除跳窗文字錯誤
 
 **公文表單（DF）：**
 4. DF01 收文單 — 前端 / 串接
-5. DF02 展延單 — 前端 / 串接
-...
-
-**流程管理（PM）：**
-12. PM0301 簽核流程 — 前端 / 串接
-...
-
-**其他：**
-30. PS01 代理人設定作業 — 前端 / 串接
 ...
 
 選一個任務，或直接告訴我你要做什麼。
@@ -54,10 +46,13 @@ A dual-mode AI collaborative development system. Originally orchestrated multipl
 - **絕對不要輸出 raw JSON**
 
 ### 選擇任務後
+
+> **任務軌道**：`get_execution_plan` 會自動判軌——taskType=bug 且無 SA/SD 規格文件 → **light 軌**（輕量修復流程：跳過 Flow-Gated 流程圖閘門，規格檢查表改抽 BUG 原文），否則 **full 軌**（規格驅動流程，現狀）。light 軌不用做步驟 4 的 SA/SD 齊全檢查；輕的是工序不是標準，AI 回對 missing=0 才可標 completed 照舊。可用 `track="full"` / `track="light"` 明確覆寫。
+
 1. 先問：「要做**前端**、**後端**、還是**都做**？」
 2. 取得任務詳情 `get_task(taskId)`
 3. 自動查找：SVN 文件 `get_documents()`（定點查欄位名／API 路徑／訊息文字可用 `search_documents`）、Axure 原型 `find_axure_snapshot(projectId, code)`
-4. **檢查規格文件是否齊全**：
+4. **檢查規格文件是否齊全**（只適用 **full 軌**——bug 無規格會自動走 light 軌，直接跳過此檢查）：
    - 前端任務 → 必須有 **SA 文件**（系統分析規格）+ **SD 文件**（系統設計規格），沒有就告知使用者並詢問是否提供
    - 後端任務 → 必須有 **SD 文件**（系統設計規格），沒有就告知使用者並詢問是否提供
    - 都做 → SA + SD 都要有
@@ -72,6 +67,7 @@ A dual-mode AI collaborative development system. Originally orchestrated multipl
      請提供 SA 文件路徑，或說「跳過」強制執行。
      ```
    - **跳過時必須用 `report_output` 記錄**：`[SKIP] 使用者跳過規格檢查：缺少 {缺少的文件類型} 文件`
+   - （可選）SA/SD 都齊時可先 `check_spec_consistency(taskId)` 檢查規格自身一致性——規格自相矛盾時實作永遠無法 100% 回對，矛盾先解決再開工
    - 任務若已是 in_progress（接手舊任務）→ 先 `resume_task(taskId)` 恢復脈絡再判斷
 5. 告知使用者找到什麼，同時問：「有沒有額外文件？沒有的話說『執行』」
 6. 使用者說「執行」才派 subagent（前端 → cwd=frontendPath，後端 → cwd=backendPath，都做 → 派兩個 subagent）
@@ -114,79 +110,15 @@ A dual-mode AI collaborative development system. Originally orchestrated multipl
 在開發過程中主動使用這些 skill 來確保品質。
 ```
 
-#### 2. 確實閱讀規格文件
+#### 2. get_execution_plan 已自動注入的規範（orchestrator 不需手動注入）
 
-> 此區塊已內建於 get_execution_plan（ExecutionPipeline 自動注入所有 role），orchestrator 不需手動注入。
-
-subagent prompt 中必須加入：
-```
-## 規格文件閱讀（強制，寫 code 之前必須完成）
-1. 用 Read tool 完整讀取 SA 文件 — 不是掃過去，是逐項讀每個欄位名稱、按鈕文字、訊息文字、操作流程
-2. 用 Read tool 完整讀取 SD 文件 — 逐個 API 讀清楚 path、method、每個參數名和型別、response 結構
-3. 如果有 Axure HTML — 用 Read tool 讀取，對照 SA 確認 UI 結構
-4. 讀完後，在 report_output 摘要你理解的重點（欄位清單、API 清單、特殊邏輯）
-5. 開發過程中遇到任何文字、欄位名、API 路徑，回頭查規格確認，不要憑印象寫
-```
+以下規範全文已由 `get_execution_plan` 自動注入 subagent prompt（真相來源：`server/src/orchestrator/ExecutionPipeline.ts` 的 buildTaskPrompt 系列）：
+- **規格文件閱讀**（所有 role）：逐項完整讀 SA/SD/Axure，report_output 摘要理解重點
+- **規格遵循最高原則**（所有 role）：規格沒寫的不做、規格寫的照做；不確定就 report_spec_gap / [NEEDS_CLARIFICATION]
+- **後端效能分析**（backend role）：寫 code 前分析資料表/WHERE/N+1/資料流，禁 findAll()
+- **後端安全檢查**（backend role）：@Param 綁定、權限驗證、參數驗證、response/log 不外洩
 
 **⚠ 嚴禁在 prompt 中手動摘要規格內容。** prompt 只放規格文件的完整路徑，讓 subagent 自己用 Read tool 讀取原始文件。手動摘要容易打錯字或遺漏細節（如「儲存」寫成「存儲」），subagent 會照著錯的摘要實作而不會核對原始文件。
-
-#### 2a. 嚴禁自行編造（最高原則）
-
-> 此區塊已內建於 get_execution_plan（ExecutionPipeline 自動注入所有 role），orchestrator 不需手動注入。
-
-subagent prompt 中必須包含以下指令：
-```
-## 規格遵循（最高原則 — 違反此規則等同任務失敗）
-
-**所有實作都必須有規格依據。規格沒寫的東西，不做。規格寫的東西，照做。**
-
-具體規則：
-1. 欄位名稱、按鈕文字、訊息文字 → 必須從 SA/SD 文件逐字抄，不可以自己翻譯或改寫
-2. API 路徑、參數名、型別 → 必須從 SD 文件抄，不可以自己命名
-3. SQL 欄位名 → 必須從 DB schema 或 Entity @Column 確認，不可以猜
-4. UI 元件選擇（checkbox/radio/select）→ 必須從 SA 或 Axure 確認，不可以自己決定
-5. 查詢邏輯（WHERE 條件、JOIN、排序）→ 必須照 SD 規格的 SQL/規則實作，不可以簡化或替代
-6. DDL 欄位 → 必須讀 Entity 的 @Column name + MetaData.java 確認，不可以猜
-
-如果規格不清楚或有矛盾：
-- 用 report_output 說明你不確定的地方
-- 不要自己做決定，標記 [NEEDS_CLARIFICATION] 繼續做其他部分
-- 寧可不做也不要做錯
-```
-
-#### 2b. 後端 subagent 必須先做效能分析
-
-> 此區塊已內建於 get_execution_plan（ExecutionPipeline 對 backend role 自動注入），orchestrator 不需手動注入。
-
-後端 subagent 的 prompt 中必須包含：
-```
-## 效能分析（強制 — 寫 code 之前必須完成，用 report_output 記錄）
-
-寫任何 Service 方法前，先完成以下分析：
-
-1. 列出涉及的所有資料表 + 估計資料量（不知道就問使用者）
-2. 對每個 DB 查詢寫出 WHERE 條件（對應 SD 的哪條規則）+ 預期回傳筆數
-3. 寫完後檢查每個迴圈裡有沒有 DB 查詢（N+1 問題）
-4. 從 Controller 到 DB 走一遍完整資料流：總共打幾次 DB？最大查詢回幾筆？
-
-⚠ 禁止 findAll() + Java 記憶體過濾。Legacy 表（NaNa）可能有幾十萬筆。
-```
-
-#### 2c. 安全弱點檢查
-
-> 此區塊已內建於 get_execution_plan（ExecutionPipeline 對 backend role 自動注入），orchestrator 不需手動注入。
-
-後端 subagent 的 prompt 中必須包含：
-```
-## 安全檢查（完成實作後逐項確認）
-
-- SQL 參數用 @Param 綁定，禁止字串拼接
-- API 驗證當前使用者只能操作自己的資料
-- Controller 參數有長度限制和格式驗證
-- response 不回傳密碼、token、內部 ID
-- 批次操作有上限（如一次最多 100 筆）
-- log 不印密碼、token、個資
-```
 
 #### 3. 讀取 Workspace 規範
 subagent 的 prompt 必須包含：
@@ -249,10 +181,16 @@ subagent 完成開發後，必須在標記 completed 之前：
 2. 如果有 lint/typecheck 指令，也要跑
 3. build 失敗 → 修復後再試，最多 3 次
 4. 最終失敗 → `update_task_status(taskId, "failed", "build 失敗：錯誤訊息")`
+5. 跑 `run_spec_compliance(taskId)` 做程式預檢（抓文字/路徑錯字並修掉）——預檢僅 advisory，不解鎖完成閘門
+6. 通知 orchestrator 派**獨立 AI 回對 agent**（implementer 不可自評）：`get_compliance_review_plan(taskId)` → reviewer 逐項驗證 → `save_compliance_review`，最新 AI 回對 missing=0 才可標 completed
 
 ### subagent 完成後的 orchestrator 驗證（我自己要做）
 
 subagent 回報完成後，**我（orchestrator）必須自己驗證**，不能直接信 subagent 的結果：
+
+#### 通用（前端/後端都要）— 規格回對兩步流程
+0a. **程式預檢**：`run_spec_compliance(taskId)` 用程式比對 checklist 與程式碼，抓文字/路徑錯字（advisory，不解鎖完成閘門；有正當理由的項目用 `waive_checklist_item` 豁免並附理由）
+0b. **AI 回對（完成閘門依據）**：`get_compliance_review_plan(taskId)` 取得派工計畫 → 派**獨立的 AI 審查 subagent**（絕不可由寫 code 的 implementer 自評）讀規格原文 + checklist + 實際程式碼逐項判定（含 logic 項目，matched 必附 file+line 證據）→ `save_compliance_review` 寫回。**最新 AI 回對 missing=0 才可標 completed**；missing>0 → 交回 implementer 修正後重新派 AI 回對
 
 #### 後端任務
 1. **靜態檢查**：grep ServiceImpl 有沒有 `findAll()`
@@ -274,32 +212,9 @@ subagent 回報完成後，**我（orchestrator）必須自己驗證**，不能�
 列出任務時，內部記住每個編號對應的 taskId。使用者回覆編號時，用對應的 taskId 取得任務詳情。
 如果同功能有前端+串接兩個任務（如 DF01），使用者選了後再問「要做前端還是串接？」來決定具體 taskId。
 
-## MCP Architecture (v5 — current)
+## MCP Server (v5 — current)
 
-```
-┌─ Web UI (React + Vite :5174) ────┐
-│  Project mgmt / Task mgmt        │
-│  Document upload / Agent monitor  │
-│        │ WebSocket                │
-│        ▼                          │
-├─ Web Server (Express :3457) ─────┤     ┌─ MCP Server (stdio) ───────┐
-│  REST API + WebSocket             │     │  Spawned by Claude Code     │
-│  /api/execution-plan/:taskId      │     │  via .mcp.json              │
-│  /api/mcp-notify (POST)           │     │        │                    │
-│        │                          │     │        ▼                    │
-│   SQLite (data/omni.db) ◄─────────╋─────╋── SQLite (same omni.db)    │
-│        ▲                          │     │                             │
-│        │  HTTP notify             │     │  POST /api/mcp-notify ───►  │
-│        └──────────────────────────╋─────╋── on each MCP write op      │
-└───────────────────────────────────┘     └─────────────────────────────┘
-
-Claude Code / Claude Desktop
-  ├─ .mcp.json → spawns MCP Server process
-  ├─ get_execution_plan(taskId) → full prompt with superpowers, docs, strategy
-  ├─ Agent tool → subagent in workspace executes the plan
-  ├─ report_output() / report_milestone() → syncs to Web UI Agents view
-  └─ update_task_status() → marks task complete
-```
+MCP Server（stdio，由 Claude Code 經 .mcp.json spawn）與 Web Server（Express :3457）共用同一個 SQLite（`data/omni.db`），MCP 每次寫入操作會 POST `/api/mcp-notify` 讓 Web UI 即時更新。架構圖、entry point 檔案清單與 Execution Flow 見 **ARCHITECTURE.md**。
 
 ### 跨專案載入（重要）
 
@@ -313,284 +228,45 @@ Claude Code / Claude Desktop
   ```
 - 新增程式碼時**嚴禁**在 MCP process 內用 `process.cwd()` 解析路徑，一律走 `getDataDir()` / `resolveFromRepoRoot()`
 
-### MCP Server Entry Point
-- `server/src/mcp-entry.ts` — stdio transport, spawned by Claude Code
-- `server/src/mcp/McpServer.ts` — registers all 45 tools + start_task prompt + server instructions
-- `server/src/mcp/tools/` — tool implementations (task, document, project, progress, workspace)
-- `server/src/mcp/db.ts` — standalone SQLite connection for MCP process
-- `server/src/mcp/notify.ts` — HTTP POST to Web Server for real-time UI updates
+### MCP Tools (52 total)
 
-### MCP Tools (45 total)
-| Tool | Purpose |
-|------|---------|
-| `get_task` | Fetch task details (documents excluded by default; use `includeDocuments=true` to include) |
-| `list_pending_tasks` | List tasks with sourceRef. Filters: `taskType`, `label`, `keyword`, `section`, `tag`, `statuses` |
-| `get_execution_plan` | Full execution prompt (superpowers + docs + strategy + completion criteria) |
-| `update_task_status` | Update task status (in_progress/completed/failed); completed gated by flow gate B |
-| `update_task` | Update task fields (whitelist: title/label/taskType/tags/section; status excluded) |
-| `next_task` | Recommend next executable task (unblocked deps; bug first, then created_at) + alternatives |
-| `get_task_outputs` | Fetch historical report_output/milestone records for a task (context recovery for new sessions) |
-| `resume_task` | One-shot context recovery: task core + flow-gate progress + recent outputs + open spec gaps + last verification + dependencies + project notes + nextSteps |
-| `add_task_dependency` | Add task dependency (guards: same project, no self-dep, no duplicate, no cycle) |
-| `remove_task_dependency` | Remove a task dependency |
-| `create_task` | Create task in project |
-| `get_documents` | List documents for project/task |
-| `read_document` | Read document content |
-| `search_documents` | Full-text search across project spec documents (filename + line + ±2-line snippet) |
-| `find_axure_snapshot` | Find Axure prototype HTML by function code under `docs/axure-snapshots/{projectId}/` |
-| `fetch_svn_specs` | Auto-fetch SA/SD spec documents from SVN by task parent_name |
-| `fetch_task_attachments` | Download Asana task attachments (e.g. bug screenshots) |
-| `list_projects` | List all projects |
-| `get_project` | Get project details with task stats |
-| `create_project` | Create new project |
-| `update_project` | Update project settings |
-| `set_extra_prompt` | Set per-project frontend/backend extra prompt |
-| `set_global_config` | Set global config (SVN credentials, Asana PAT) |
-| `report_output` | Push execution output to Web UI terminal |
-| `report_milestone` | Report progress milestone |
-| `report_spec_gap` | Record a spec gap (規格未定義的欄位/API/邏輯) — structured [NEEDS_CLARIFICATION] |
-| `list_spec_gaps` | List spec gaps by project/task/status (規格缺少/待補清單) |
-| `resolve_spec_gap` | Mark a spec gap resolved (after the user supplies the spec/value) |
-| `check_spec_changes` | Compare recorded spec versions (task_spec_versions) against SVN last-modified; changed files auto-create a `spec_changed` spec gap |
-| `save_project_note` | Save a project experience note (前人踩坑教訓) — auto-injected into future execution plans |
-| `list_project_notes` | List project notes (active by default; `includeArchived=true` for all) |
-| `archive_project_note` | Archive a project note (active=0, no physical delete) |
-| `get_verification_plan` | Acceptance checklist by task label (backend: findAll/DDL/API smoke/seed SQL; frontend: tsc/Playwright) |
-| `report_verification_result` | Report checklist results → agent_outputs + milestone「驗收：X/Y 通過」 |
-| `report_verification_evidence` | Upload verification evidence file (screenshot/report) → documents (doc_type=verification) + task binding + milestone |
-| `save_task_flow` | Save a flow diagram (spec/plan/code/mindmap) for Flow-Gated Development |
-| `report_flow_check` | Report flow gate A/B comparison result |
-| `get_task_flows` | List saved flow diagrams for a task |
-| `save_sa_flow` | Save Mermaid SA flow diagram to cache |
-| `get_skill_gen_plan` | Get prompt for CLAUDE.md/.claude/skills generation |
-| `sync_asana_tasks` | Sync Asana tasks into local DB (5-min dedupe; `force=true` to override) |
-| `list_asana_projects` | List Asana workspace projects (to find project GID) |
-| `get_asana_task_comments` | Fetch Asana task comments (accepts omni UUID or Asana GID) |
-| `query_external_db` | Query a project's external database (read-only) |
-| `health_check` | Diagnose DB / Web Server / Asana PAT / SVN CLI health |
+完整用法見各工具 description 與 server instructions（連線時自動注入）。分組一覽：
 
-### MCP Prompts (1)
-| Prompt | Purpose |
-|--------|---------|
-| `start_task` | Standard task workflow: get_execution_plan → in_progress → execute (specs via tools, gaps via report_spec_gap) → report → verification → completed/failed. `taskId` optional (locates via list_pending_tasks/next_task when omitted). |
+- **任務 / 執行計畫**：`get_task`, `list_pending_tasks`, `get_execution_plan`, `update_task_status`, `update_task`, `next_task`, `get_task_outputs`, `resume_task`, `add_task_dependency`, `remove_task_dependency`, `create_task`
+- **文件 / 規格**：`get_documents`, `read_document`, `search_documents`, `find_axure_snapshot`, `fetch_svn_specs`, `fetch_task_attachments`
+- **專案 / 設定**：`list_projects`, `get_project`, `create_project`, `update_project`, `set_extra_prompt`, `set_global_config`
+- **規格缺口**：`report_spec_gap`, `list_spec_gaps`, `resolve_spec_gap`, `check_spec_changes`, `check_spec_consistency`
+- **規格回對（checklist / compliance）**：`save_spec_checklist`, `get_spec_checklist`, `waive_checklist_item`, `run_spec_compliance`, `get_compliance_review_plan`, `save_compliance_review`
+- **驗收**：`get_verification_plan`, `report_verification_result`, `report_verification_evidence`
+- **專案筆記**：`save_project_note`, `list_project_notes`, `archive_project_note`
+- **流程圖（Flow-Gated）**：`save_task_flow`, `report_flow_check`, `get_task_flows`, `save_sa_flow`
+- **回報**：`report_output`, `report_milestone`
+- **Asana / 其他**：`sync_asana_tasks`, `list_asana_projects`, `get_asana_task_comments`, `get_skill_gen_plan`, `query_external_db`, `health_check`
 
-### Execution Flow
-1. Web UI: user clicks Execute → shows MCP instruction modal
-2. User pastes instruction into Claude Code
-3. Claude Code calls `get_execution_plan(taskId)` → gets full prompt from Web Server API
-4. Claude Code uses Agent tool to spawn subagent with the prompt
-5. Subagent calls `report_output` / `report_milestone` → Web UI updates in real-time
-6. Subagent completes → `update_task_status("completed")` → Web UI reflects
+特殊行為註記（行為規則）：
+- **`update_task_status` 完成閘門**：`completed` 受 flow gate B + AI 規格回對閘門（最新 ai_review run missing=0）管制；`skipFlowGate=true` + `skipReason` 可覆寫兩個閘門，**限使用者明確同意**，會記 `[SKIP]` 供稽核
+- **`fetch_svn_specs` 雙來源**：從 SVN **加上**專案設定的本地 `specFolders` 合併撈取；git 資料夾先安全 `git pull --ff-only`（dirty → 跳過 pull + 警告）
+- **`get_execution_plan` 自動判軌**：full / light 軌（見「選擇任務後」的任務軌道說明），並自動注入規格閱讀／規格遵循／後端效能／後端安全四項規範
 
-## Architecture Overview
+MCP Prompt：`start_task` — 標準任務工作流（get_execution_plan → in_progress → 執行 → 回報 → 驗收 → completed/failed；`taskId` 可省略，會用 list_pending_tasks/next_task 定位）。
 
-```
-┌─ web/ (React + Vite) ───────────┐     WebSocket      ┌─ server/ (Node.js + Express) ──────────┐
-│ Zustand stores ◄──────────────── │ ◄──────────────────►│ WebSocketServer ► MessageRouter        │
-│ Dashboard / Terminal / Setup     │                     │           │                              │
-└──────────────────────────────────┘                     │     MasterOrchestrator                   │
-                                                         │     ├─ SpecModeHandler (spec mode)       │
-                                                         │     └─ CreativeModeHandler (creative)    │
-                                                         │           │                              │
-                                                         │     AgentManager                         │
-                                                         │     ├─ AgentProcess (Claude CLI child)   │
-                                                         │     └─ AgentProcess (Claude CLI child)   │
-                                                         │           │                              │
-                                                         │     EventBus (agent.* / task.* / etc.)   │
-                                                         │     SQLite DB (persistence)              │
-                                                         └─────────────────────────────────────────┘
+### 本地資料夾規格來源（specFolders — 與 SVN 並存）
+
+專案級設定 `config_json.specFolders`（ProjectSettings 的「規格資料夾」區塊編輯）：
+
+```json
+{ "specFolders": [ { "path": "D:\\specs\\tvedi-docs", "gitPull": true }, { "path": "\\\\nas\\share\\規格", "gitPull": false } ] }
 ```
 
-## Monorepo Structure
-
-### `shared/` — Shared TypeScript types & constants
-
-| File | Purpose |
-|------|---------|
-| `agent-types.ts` | `AgentRole`, `AgentStatus`, `Agent`, `AgentSpawnConfig`, `AgentStartConfig`, `AgentRoleConfig`, `AgentOutputEvent` |
-| `project-types.ts` | `Project`, `ProjectMode`, `ProjectStatus`, `Workspace`, `DocType` |
-| `task-types.ts` | `Task`, `TaskStatus`, `DependencyEdge`, `TaskSummary` |
-| `ws-protocol.ts` | All WebSocket message interfaces (client→server and server→client) |
-| `event-types.ts` | `BusEvent`, `EventTypes` constants for the internal event bus |
-| `claude-stream.ts` | Types for Claude Code `--output-format stream-json` messages |
-| `contracts.ts` | API contract and DB schema types |
-
-### `server/` — Backend (Node.js + Express + WebSocket)
-
-| File / Dir | Purpose |
-|-----------|---------|
-| `index.ts` | Entry point. Creates Express app, HTTP server, WebSocket server, wires EventBus→WS broadcast |
-| `config.ts` | Configuration from env vars (`PORT`, `CLAUDE_PATH`, `DB_PATH`, etc.) |
-
-#### `server/src/agent/` — Agent lifecycle
-| File | Purpose |
-|------|---------|
-| `AgentManager.ts` | Manages all agent processes. `startAgent()` creates DB record + spawns `AgentProcess`. Handles completion, errors, markers (`[NEEDS_HUMAN]`, `[ENTITY_CHANGED]`). Auto-completes project when all agents finish. |
-| `AgentProcess.ts` | Wraps a single Claude Code CLI child process. `spawn()` launches `claude --print --output-format stream-json --input-format stream-json`. `sendInput()` sends follow-up instructions via stdin. |
-| `AgentRoles.ts` | Defines system prompts and allowed tools for each role (`master`, `architect`, `backend`, `frontend`, `devops`, `testing`, `review`). |
-| `StreamParser.ts` | Parses newline-delimited JSON from Claude's stdout into typed `ClaudeStreamMessage` events. |
-
-#### `server/src/orchestrator/` — Execution orchestration
-| File | Purpose |
-|------|---------|
-| `MasterOrchestrator.ts` | Routes between Spec and Creative modes. Entry point: `start(projectId)`. |
-| `SpecModeHandler.ts` | **Spec mode workflow**: Gets uploaded documents, routes them by type (SA/SD) to workspace agents. Frontend gets SA+SD, Backend gets SD only. Each agent's `cwd` is set to its workspace path so it auto-discovers CLAUDE.md/.claude/ skills. |
-| `CreativeModeHandler.ts` | **Creative mode**: Architect agent interviews user, generates SA/SD, then hands off to execution. |
-| `TaskDispatcher.ts` | Legacy task queue (used by creative mode). Respects dependency graphs. |
-| `DependencyGraph.ts` | Topological sort for task dependencies. |
-| `FullstackController.ts` | **Fullstack mode**: 4-phase execution for `fullstack` label tasks. Phase 1: FE+BE parallel agents. Phase 2: wait both. Phase 3a: coordinator analyzes reports. Phase 3b: Playwright integration test (optional). Phase 4: fix agents if needed. Uses `skipTaskStatusUpdate` to prevent subagents from marking task completed. |
-
-#### `server/src/db/` — SQLite persistence
-| File | Purpose |
-|------|---------|
-| `connection.ts` | Creates/opens SQLite DB via `better-sqlite3`. |
-| `schema.ts` | Table definitions: `projects`, `agents`, `tasks`, `task_dependencies`, `documents`, `events`, `agent_outputs`, `interventions`. |
-| `queries/projects.ts` | CRUD for projects table. |
-| `queries/agents.ts` | CRUD for agents table. `getAgentsByProject()` used for completion detection. |
-| `queries/tasks.ts` | CRUD for tasks + dependencies. |
-| `queries/events.ts` | Event logging, agent output persistence, interventions. `getAgentOutputs()` loads historical terminal output. |
-
-#### `server/src/documents/` — Document handling
-| File | Purpose |
-|------|---------|
-| `DocumentParser.ts` | Saves uploaded files (PDF/text/markdown) to disk. Parses text content. Stores metadata in `documents` table with `doc_type` (SA/SD/other). |
-
-#### `server/src/eventbus/` — Internal event system
-| File | Purpose |
-|------|---------|
-| `EventBus.ts` | Pub/sub with wildcard support (e.g., `agent.*`). |
-| `ContextSync.ts` | Manages `.ai_context/` directory for API contracts and DB schema files. |
-| `ContractWatcher.ts` | Watches `.ai_context/api-contracts/` for changes, emits contract update events. |
-
-#### `server/src/websocket/` — WebSocket layer
-| File | Purpose |
-|------|---------|
-| `WebSocketServer.ts` | WS server. Handles client connections, message routing, `send()`, `broadcast()`. Supports `initialStateProvider` and `postConnectionHandler`. |
-| `MessageRouter.ts` | Registers all WS message handlers. Key handlers: `project.create`, `project.uploadDocument`, `project.startExecution`, `agent.command`, `agent.action`, `project.getState`. On new connection: sends `projects.list` + full state for executing projects + historical agent outputs. |
-
-#### `server/src/review/` — Code review
-| File | Purpose |
-|------|---------|
-| `CodeReviewAgent.ts` | Spawns a read-only review agent after tasks complete. |
-| `ReviewTrigger.ts` | Listens for task completion events to trigger reviews. |
-
-### `web/` — Frontend (React + Vite + Tailwind + Zustand)
-
-#### `web/src/stores/` — State management (Zustand)
-| File | Purpose |
-|------|---------|
-| `projectStore.ts` | Projects, agents, tasks, dependencies, interventions. `addOrUpdateAgent()` upsert. |
-| `agentStore.ts` | Agent terminal outputs. `appendOutput()` for streaming, `setOutputsBulk()` for historical load. |
-| `wsStore.ts` | WebSocket connection state + client reference. |
-| `toastStore.ts` | Toast notification queue. |
-
-#### `web/src/hooks/`
-| File | Purpose |
-|------|---------|
-| `useWebSocket.ts` | Connects to WS, dispatches all incoming messages to stores. Handles `projects.list`, `project.state`, `project.agentOutputs`, `agent.output`, `agent.started`, `agent.completed`, `agent.statusChange`, `task.statusChange`, `intervention.request`, `interview.*`, `error`. |
-
-#### `web/src/components/layout/`
-| File | Purpose |
-|------|---------|
-| `AppShell.tsx` | Main layout. View switcher (setup/dashboard/tasks/events). Auto-switches to dashboard when agents start. |
-| `Header.tsx` | Top bar with project name, mode badge, status, connection indicator. |
-| `Sidebar.tsx` | Navigation, project list, status summary. Clicking a project sends `project.getState` to load its full state. |
-
-#### `web/src/components/dashboard/`
-| File | Purpose |
-|------|---------|
-| `Dashboard.tsx` | Main monitoring view. Project stats (elapsed time, agent count, cost, turns). Agent summary cards. "New Execution" panel for iterative workflow (upload new docs + re-execute). |
-| `DualTerminal.tsx` | Multi-terminal view. Groups agents by role. Supports focus mode (click agent card → full-width terminal). |
-| `TerminalOutput.tsx` | Single agent terminal. Shows streaming output with syntax coloring by type (text/tool_use/tool_result/error/system). Input field for sending instructions to running agents. |
-| `StepTracker.tsx` | Visual step progress (Setup → Planning → Developing → Testing → Completed). |
-| `InterventionBell.tsx` | Notification bell for human intervention requests with approval/reject dialog. |
-
-#### `web/src/components/project/`
-| File | Purpose |
-|------|---------|
-| `ProjectSetup.tsx` | Multi-step project creation: mode selection → workspace config → document upload/interview → execution. |
-| `ModeSelector.tsx` | Choose Spec or Creative mode. |
-| `DocumentUpload.tsx` | Drag-and-drop file upload + paste area. Auto-detects SA/SD from filename. Doc type toggle per file. |
-| `FolderPicker.tsx` | Server-side directory browser for selecting workspace paths. |
-| `InterviewChat.tsx` | Creative mode interview UI. |
-
-#### `server/src/svn/` — SVN integration
-| File | Purpose |
-|------|---------|
-| `SvnSpecService.ts` | Fetches spec documents from SVN for tasks. Uses root code extraction (e.g., `OV0101` → `OV`) to find the correct SVN folder, then recursively searches for matching .docx/.pdf files. Caches downloads in `data/uploads/{projectId}/`. |
-
-#### `server/src/asana/` — Asana integration
-| File | Purpose |
-|------|---------|
-| `AsanaMcpClient.ts` | MCP-based Asana API client. |
-| `AsanaSyncService.ts` | Syncs Asana tasks to local DB. Stores `parent_name` (e.g., `OV0101`) for SVN spec matching. |
-
-### `web/src/components/agents/`
-| File | Purpose |
-|------|---------|
-| `AgentsView.tsx` | Manage agents per project. Add new agents (pre-generates `agentId` client-side, passes to both upload and `agent.add` messages so files land in per-agent folder). Delete confirmation with z-index fix. |
-| `ActiveAgents.tsx` | Shows running agents summary. |
-| `ReviewBadge.tsx` | Badge indicating review status. |
-
-### `web/src/components/settings/`
-| File | Purpose |
-|------|---------|
-| `GlobalSettings.tsx` | Global settings page: SVN credentials, Asana PAT. |
-| `ProjectSettings.tsx` | Per-project settings: SVN spec paths (frontend/backend), Asana project link. |
-
-### `web/src/components/asana/`
-| File | Purpose |
-|------|---------|
-| `AsanaTaskPanel.tsx` | Displays Asana tasks with sync status. |
-
-## Key Flows
-
-### Spec Mode (primary flow)
-1. User creates project with workspaces (label + path)
-2. User uploads SA/SD documents with type tags
-3. User clicks "Start Execution"
-4. `SpecModeHandler.execute()`:
-   - Routes documents by type: Frontend gets SA+SD, Backend gets SD
-   - For each workspace: spawns an agent with `cwd` = workspace path
-   - Agent prompt includes document content/PDF paths (DOCX → Markdown path via Read tool)
-   - Each agent reads its workspace's CLAUDE.md/.claude/ and follows those skills
-5. Agents work autonomously. Output streams via EventBus → WebSocket → frontend terminal
-6. When all agents complete, project status auto-transitions to `completed`
-
-### Iterative Execution
-After a project completes, the Dashboard shows a "New Execution" panel:
-- Upload additional SA/SD documents
-- Click "Start Execution" to spawn new agents with ALL documents (old + new)
-- Old agent outputs remain visible; new agents get new IDs
-
-### Send Instruction to Running Agent
-- Terminal input → `agent.command` WS message → `AgentManager.sendInputToAgent()` → `AgentProcess.sendInput()` → writes JSON to Claude's stdin (requires `--input-format stream-json`)
-- Feedback message `[USER INSTRUCTION]` appears in terminal output
-
-### Adding an Agent (AgentsView)
-1. Client pre-generates `agentId = crypto.randomUUID()` before any network calls
-2. Upload WS message (`project.uploadDocument`) includes `agentId` → files saved to `uploads/{projectId}/{agentId}/`
-3. Add WS message (`agent.add`) includes same `agentId` → `createAgent({ id: agentId })`
-4. On delete: `deleteByAgent(agentId, projectId)` cleans up only that agent's folder
-
-## Document Handling
-
-### Upload Directory Structure
-```
-data/uploads/{projectId}/{agentId}/   ← per-agent folder (AgentsView uploads)
-data/uploads/{projectId}/             ← project-level (SVN downloads, SpecMode uploads)
-```
-
-### DOCX → Markdown Conversion
-`.docx` files are converted to `.md` at upload time (both manual upload and SVN fetch):
-1. `mammoth.convertToHtml()` with image extraction callback → images saved as `{docId}-img-N.{ext}`
-2. `turndown` + `turndown-plugin-gfm` converts HTML → Markdown (strips `<p>` inside `<td>`/`<th>` before conversion for correct GFM tables)
-3. Saves `{docId}-{basename}.md` alongside original `.docx`
-4. `parsed_text` in DB = `[Document saved at: /abs/path/to/file.md]`
-5. `SpecModeHandler.getDocumentContext()` detects this pattern → tells agent to use Read tool
-
-### PDF Handling
-PDF file paths are passed in the prompt; agents use Claude's Read tool to read them natively (supports images).
+- 抓取時（ExecutionPipeline / MCP `fetch_svn_specs`）與 SVN 結果**合併**：功能代碼比對邏輯與 SVN 相同（root code + 檔名/路徑段命中 + 中文名 fallback + `0_共用` fallback），docx→md 轉換、documents（`source='folder'`，`source_url`=絕對路徑）、task_documents 綁定、task_spec_versions（`file_ref`=絕對路徑、`last_modified`=git 檔案 commit 日期或 mtime ISO）全部同構
+- docType 由檔名慣例推斷（含 SA/SD token 或「需求規格/系統分析/系統設計」字樣；預設 SD）
+- `check_spec_changes` 支援本地 file_ref：先 prepareFolder（安全 pull）→ 重算版本 → 比對；資料夾已移除設定或檔案不存在 → 列 unknown（絕不視為「沒變」）
+- 三態呈現：有檔案+有警告（pull 失敗/dirty/部分來源失敗）→ 文件區塊列警告；全失敗 → `[SPEC_FETCH_ERROR]` banner（與 SVN error 同路徑）
+- **git pull 安全鐵律**（`server/src/documents/FolderSpecSource.ts`，純函式核心，Web/MCP 兩 process 共用）：
+  - git 只允許 `status --porcelain` / `rev-parse HEAD` / `log -1 --format=%cI -- <file>` / `pull --ff-only` 四種操作（白名單守衛），**絕不寫入、絕不 stash/reset**
+  - working tree dirty → 跳過 pull + 警告；pull 逾時 15s / 失敗 → best-effort 用現有內容 + 明確警告
+  - git 指令一律 spawn 陣列參數（不過 shell）
+- 設定驗證（WS `project.update` + MCP `update_project`，`validateSpecFolders`）：path 必須是**絕對路徑**（MCP 跨專案載入，嚴禁相對路徑）、`gitPull` boolean、**與該專案 frontendPath/backendPath 相同或互為父子一律拒絕**（防誤 pull 程式碼 workspace）；路徑不存在只警告不拒絕
 
 ## Development
 
@@ -606,35 +282,15 @@ cd web && pnpm dev
 
 # TypeScript check
 npx tsc --build shared/tsconfig.json server/tsconfig.json
+
+# 完整驗證（改完 code 必跑）：vitest + tsc --build + vite build
+pnpm verify
 ```
 
 - Server runs on port 3457 (configurable via `PORT` env var)
 - Vite dev server runs on port 5174 and proxies `/omni-ws` and `/api` to server
 - SQLite database: `data/omni.db` (persists across restarts)
 - Claude CLI path: configurable via `CLAUDE_PATH` env var (default: `claude`)
-
-## Available Skills (`.claude/skills/`)
-
-Superpowers skill framework is installed. Key skills:
-
-| Skill | Purpose |
-|-------|---------|
-| `brainstorming` | Visual brainstorming companion with local server |
-| `dispatching-parallel-agents` | Launch multiple subagents in parallel |
-| `executing-plans` | Execute a written plan step by step |
-| `finishing-a-development-branch` | Checklist for completing a feature branch |
-| `receiving-code-review` | Process and respond to code review feedback |
-| `requesting-code-review` | Request structured code review from a subagent |
-| `subagent-driven-development` | Spec → implement → review via subagents |
-| `systematic-debugging` | Root cause analysis with structured debugging |
-| `test-driven-development` | TDD cycle with anti-patterns guide |
-| `using-git-worktrees` | Parallel development with git worktrees |
-| `verification-before-completion` | Checklist before marking work done |
-| `writing-plans` | Create structured implementation plans |
-| `writing-skills` | Best practices for writing Claude skills |
-| `using-superpowers` | Overview of all available skills |
-
-Use `/brainstorming`, `/systematic-debugging`, etc. to invoke.
 
 ## Important Implementation Details
 
