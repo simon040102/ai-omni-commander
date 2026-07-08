@@ -5,9 +5,9 @@ import { useToastStore } from '../../stores/toastStore';
 import { TaskList } from './TaskList';
 import { AsanaSyncSettings } from './AsanaSyncSettings';
 import { PlanPanel } from './PlanPanel';
-import { SpecGapsPanel } from './SpecGapsPanel';
-import { ProjectNotesPanel } from './ProjectNotesPanel';
+import { SpecGovernanceSection } from './SpecGovernanceSection';
 import { IconPlay, IconGrid, IconRefresh, IconLightning } from '../ui/Icons';
+import { parseServerDate } from '../../lib/datetime';
 import type { View } from '../layout/AppShell';
 
 interface DashboardProps {
@@ -87,9 +87,9 @@ export function Dashboard({ onViewChange }: DashboardProps) {
           <div className="w-20 h-20 mx-auto mb-6 rounded-2xl bg-muted/50 flex items-center justify-center">
             <IconGrid className="w-10 h-10 text-muted-foreground/40" />
           </div>
-          <h3 className="text-lg font-semibold text-foreground mb-2">No Project Selected</h3>
+          <h3 className="text-lg font-semibold text-foreground mb-2">尚未選擇專案</h3>
           <p className="text-sm text-muted-foreground mb-6">
-            Select a project from the sidebar to manage tasks.
+            請從側邊欄選擇專案以管理任務。
           </p>
         </div>
       </div>
@@ -108,7 +108,7 @@ export function Dashboard({ onViewChange }: DashboardProps) {
           value={adHocInput}
           onChange={(e) => setAdHocInput(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter' && adHocInput.trim()) handleAdHocExecute(); }}
-          placeholder="Quick task... (press Enter)"
+          placeholder="快速任務…（按 Enter 執行）"
           className="flex-1 bg-transparent text-xs outline-none placeholder:text-muted-foreground/50"
         />
         <div className="flex items-center gap-1.5 flex-shrink-0">
@@ -174,7 +174,7 @@ export function Dashboard({ onViewChange }: DashboardProps) {
           onClick={() => setShowPlanPanel(true)}
           className="flex items-center gap-2 px-3 py-1.5 bg-muted/50 hover:bg-muted border border-border rounded-lg text-sm transition-colors flex-shrink-0"
         >
-          <span className="font-medium">Show Plans</span>
+          <span className="font-medium">顯示計劃</span>
           {plans.filter(p => p.status === 'pending').length > 0 && (
             <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-yellow-500/20 text-yellow-400 animate-pulse">
               {plans.filter(p => p.status === 'pending').length}
@@ -183,11 +183,8 @@ export function Dashboard({ onViewChange }: DashboardProps) {
         </button>
       )}
 
-      {/* ─── Spec gaps (待補規格) ─── */}
-      <SpecGapsPanel />
-
-      {/* ─── Project notes (專案筆記) ─── */}
-      <ProjectNotesPanel />
+      {/* ─── Spec governance (待補規格 / 規格回對 / 專案筆記) ─── */}
+      <SpecGovernanceSection />
 
       {/* ─── Task list ─── */}
       <TaskList selectedModel={selectedModel} onViewChange={onViewChange} />
@@ -201,17 +198,17 @@ export function Dashboard({ onViewChange }: DashboardProps) {
             className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium bg-orange-500/10 text-orange-400 border border-orange-500/20 rounded-lg hover:bg-orange-500/20 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
           >
             <IconRefresh className={`w-3 h-3 ${isSyncing ? 'animate-spin' : ''}`} />
-            {isSyncing ? 'Syncing...' : 'Sync Now'}
+            {isSyncing ? '同步中…' : '立即同步'}
           </button>
           <button
             onClick={() => setShowSyncSettings(true)}
             className="px-2.5 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-muted rounded-lg transition-colors"
           >
-            Sync Settings
+            同步設定
           </button>
           {lastSyncAt && (
             <span className="text-[9px] text-muted-foreground ml-auto">
-              Last sync: {new Date(lastSyncAt).toLocaleTimeString()}
+              上次同步：{parseServerDate(lastSyncAt).toLocaleTimeString()}
             </span>
           )}
         </div>
@@ -225,19 +222,19 @@ export function Dashboard({ onViewChange }: DashboardProps) {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setAdHocMcpCommand(null)}>
           <div className="bg-card border border-border rounded-xl shadow-2xl w-[680px] max-w-[90vw] p-6" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold">Execute via MCP</h3>
+              <h3 className="text-lg font-semibold">透過 MCP 執行</h3>
               <button onClick={() => setAdHocMcpCommand(null)} className="p-1 rounded hover:bg-muted transition-colors text-muted-foreground">&times;</button>
             </div>
-            <p className="text-sm text-muted-foreground mb-3">Copy this instruction and paste it into Claude Code:</p>
+            <p className="text-sm text-muted-foreground mb-3">複製以下指令並貼到 Claude Code：</p>
             <div className="relative">
               <pre className="bg-muted/50 border border-border rounded-lg p-4 text-sm text-foreground whitespace-pre-wrap font-mono leading-relaxed select-all">{adHocMcpCommand}</pre>
               <button
-                onClick={() => { navigator.clipboard.writeText(adHocMcpCommand); addToast({ type: 'success', title: 'Copied!' }); }}
+                onClick={() => { navigator.clipboard.writeText(adHocMcpCommand); addToast({ type: 'success', title: '已複製' }); }}
                 className="absolute top-2 right-2 px-3 py-1.5 rounded-md bg-primary text-primary-foreground text-xs font-medium hover:opacity-90 transition-opacity"
-              >Copy</button>
+              >複製</button>
             </div>
             <div className="mt-4 flex justify-end">
-              <button onClick={() => setAdHocMcpCommand(null)} className="px-4 py-2 rounded-lg bg-muted text-muted-foreground hover:bg-muted/80 text-sm transition-colors">Close</button>
+              <button onClick={() => setAdHocMcpCommand(null)} className="px-4 py-2 rounded-lg bg-muted text-muted-foreground hover:bg-muted/80 text-sm transition-colors">關閉</button>
             </div>
           </div>
         </div>

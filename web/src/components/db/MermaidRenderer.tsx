@@ -4,7 +4,6 @@
  * Supports: scroll=zoom at cursor, drag=pan, dblclick=fit
  */
 import { useEffect, useRef, useState, useCallback } from 'react';
-import mermaid from 'mermaid';
 
 interface MermaidRendererProps {
   content: string;
@@ -31,6 +30,10 @@ export default function MermaidRenderer({ content, height = '60vh', filename = '
     const render = async () => {
       setRendering(true);
       try {
+        // Dynamic import: keeps mermaid (~500KB+) out of the main bundle,
+        // loaded on first diagram render (loading state already shown via `rendering`).
+        const { default: mermaid } = await import('mermaid');
+        if (cancelled) return;
         let cleaned = content.trim();
         if (cleaned.startsWith('```mermaid')) {
           cleaned = cleaned.replace(/^```mermaid\n/, '').replace(/\n```$/, '');

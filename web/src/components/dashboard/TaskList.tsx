@@ -10,32 +10,32 @@ import type { TestOptions } from '@omni/shared';
 import type { View } from '../layout/AppShell';
 
 const TASK_TYPE_COLORS: Record<TaskType, string> = {
-  bug: 'bg-red-500/100/20 text-red-400',
-  feature: 'bg-blue-500/100/20 text-blue-400',
+  bug: 'bg-red-500/20 text-red-400',
+  feature: 'bg-blue-500/20 text-blue-400',
   refactor: 'bg-purple-500/20 text-purple-400',
   testing: 'bg-teal-500/15 text-teal-400',
   other: 'bg-muted text-muted-foreground',
 };
 
 const LABEL_COLORS: Record<string, string> = {
-  frontend: 'bg-blue-500/100/15 text-blue-400',
+  frontend: 'bg-blue-500/15 text-blue-400',
   backend: 'bg-purple-500/15 text-purple-400',
   fullstack: 'bg-violet-500/15 text-violet-400',
   devops: 'bg-green-500/15 text-green-400',
   testing: 'bg-teal-500/15 text-teal-400',
   review: 'bg-gray-500/15 text-gray-400',
-  architect: 'bg-orange-500/100/15 text-orange-400',
+  architect: 'bg-orange-500/15 text-orange-400',
 };
 
 const STATUS_STYLES: Record<string, string> = {
   pending: 'bg-gray-500/15 text-gray-400 border-gray-500/30',
   in_progress: 'bg-green-500/15 text-green-400 border-green-500/30',
-  completed: 'bg-blue-500/100/15 text-blue-400 border-blue-500/30',
-  failed: 'bg-red-500/100/15 text-red-400 border-red-500/30',
+  completed: 'bg-blue-500/15 text-blue-400 border-blue-500/30',
+  failed: 'bg-red-500/15 text-red-400 border-red-500/30',
   blocked: 'bg-yellow-500/15 text-yellow-400 border-yellow-500/30',
   queued: 'bg-gray-500/15 text-gray-400 border-gray-500/30',
   assigned: 'bg-cyan-500/15 text-cyan-400 border-cyan-500/30',
-  needs_review: 'bg-orange-500/100/15 text-orange-400 border-orange-500/30',
+  needs_review: 'bg-orange-500/15 text-orange-400 border-orange-500/30',
   needs_intervention: 'bg-yellow-500/15 text-yellow-400 border-yellow-500/30',
 };
 
@@ -154,7 +154,7 @@ export function TaskList({ selectedModel, onViewChange }: TaskListProps) {
       },
     });
 
-    addToast({ type: 'success', title: 'Task created', message: newTitle.trim() });
+    addToast({ type: 'success', title: '已建立任務', message: newTitle.trim() });
     setNewTitle('');
     setNewDescription('');
     setNewSpecUrl('');
@@ -222,7 +222,7 @@ export function TaskList({ selectedModel, onViewChange }: TaskListProps) {
       payload: { projectId: currentProjectId, taskId },
     });
 
-    addToast({ type: 'success', title: 'Task deleted' });
+    addToast({ type: 'success', title: '已刪除任務' });
   }, [currentProjectId, client, addToast]);
 
   const handleClearAsanaTasks = useCallback(() => {
@@ -235,7 +235,7 @@ export function TaskList({ selectedModel, onViewChange }: TaskListProps) {
       payload: { projectId: currentProjectId, source: 'asana' },
     });
 
-    addToast({ type: 'success', title: 'All Asana tasks cleared' });
+    addToast({ type: 'success', title: '已清除所有 Asana 任務' });
     setConfirmClearAsana(false);
   }, [currentProjectId, client, addToast]);
 
@@ -277,7 +277,7 @@ export function TaskList({ selectedModel, onViewChange }: TaskListProps) {
           ...(executionRunId ? { executionRunId } : {}),
         },
       });
-      addToast({ type: 'success', title: 'Image uploaded', message: file.name });
+      addToast({ type: 'success', title: '已上傳圖片', message: file.name });
     };
     reader.readAsDataURL(file);
   }, [currentProjectId, client, addToast]);
@@ -338,7 +338,7 @@ export function TaskList({ selectedModel, onViewChange }: TaskListProps) {
                   <span className="text-[9px] text-muted-foreground">Clear {asanaTaskCount} Asana tasks?</span>
                   <button
                     onClick={handleClearAsanaTasks}
-                    className="text-[9px] text-red-400 hover:text-red-300 font-semibold px-1.5 py-0.5 bg-red-500/100/20 rounded"
+                    className="text-[9px] text-red-400 hover:text-red-300 font-semibold px-1.5 py-0.5 bg-red-500/20 rounded"
                   >
                     Yes
                   </button>
@@ -363,7 +363,7 @@ export function TaskList({ selectedModel, onViewChange }: TaskListProps) {
             {hasAsana && (
               <button
                 onClick={() => setShowImportDrawer(true)}
-                className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-medium bg-orange-500/100/15 text-orange-400 hover:bg-orange-500/100/25 transition-colors"
+                className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-medium bg-orange-500/15 text-orange-400 hover:bg-orange-500/25 transition-colors"
               >
                 <IconAsana className="w-3 h-3" />
                 Import from Asana
@@ -483,7 +483,7 @@ export function TaskList({ selectedModel, onViewChange }: TaskListProps) {
                       const ext = file.type.split('/')[1] || 'png';
                       const named = new File([file], `screenshot-${Date.now()}.${ext}`, { type: file.type });
                       setStagedFiles(prev => [...prev, { file: named, docType: 'image' }]);
-                      addToast({ type: 'info', title: 'Image staged', message: named.name });
+                      addToast({ type: 'info', title: '已暫存圖片', message: named.name });
                     }
                     return;
                   }
@@ -728,7 +728,7 @@ export function TaskList({ selectedModel, onViewChange }: TaskListProps) {
                           ));
                         }}
                         className={`px-1.5 py-0.5 rounded text-[9px] font-medium cursor-pointer hover:opacity-80 transition-opacity ${
-                          sf.docType === 'SA' ? 'bg-blue-500/100/15 text-blue-400' :
+                          sf.docType === 'SA' ? 'bg-blue-500/15 text-blue-400' :
                           sf.docType === 'SD' ? 'bg-purple-500/15 text-purple-400' :
                           'bg-green-500/15 text-green-400'
                         }`}
@@ -813,7 +813,7 @@ export function TaskList({ selectedModel, onViewChange }: TaskListProps) {
                 <button
                   onClick={() => {
                     navigator.clipboard.writeText(mcpCommand);
-                    addToast({ type: 'success', title: 'Copied!', message: 'MCP command copied to clipboard' });
+                    addToast({ type: 'success', title: '已複製', message: 'MCP 指令已複製到剪貼簿' });
                   }}
                   className="absolute top-2 right-2 px-3 py-1.5 rounded-md bg-primary text-primary-foreground text-xs font-medium hover:opacity-90 transition-opacity"
                 >
@@ -1400,7 +1400,7 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
               {svnPreviewFiles.map((f, i) => (
                 <div key={i} className="flex items-center gap-2.5 text-sm group">
                   <span className={`px-2 py-0.5 rounded text-[10px] font-medium flex-shrink-0 ${
-                    f.svnRoot === 'frontend' ? 'bg-blue-500/100/15 text-blue-400' : 'bg-orange-500/100/15 text-orange-400'
+                    f.svnRoot === 'frontend' ? 'bg-blue-500/15 text-blue-400' : 'bg-orange-500/15 text-orange-400'
                   }`}>
                     {f.svnRoot === 'frontend' ? '前端' : '後端'}
                   </span>
@@ -1431,7 +1431,7 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
               {localUploadedFiles.map((f, i) => (
                 <div key={`upload-${i}`} className="flex items-center gap-2.5 text-sm group">
                   <span className={`px-2 py-0.5 rounded text-[10px] font-medium flex-shrink-0 ${
-                    f.docType === 'SA' ? 'bg-blue-500/100/15 text-blue-400' : 'bg-orange-500/100/15 text-orange-400'
+                    f.docType === 'SA' ? 'bg-blue-500/15 text-blue-400' : 'bg-orange-500/15 text-orange-400'
                   }`}>
                     {f.docType === 'SA' ? '前端' : '後端'}
                   </span>
@@ -1456,7 +1456,7 @@ function TaskExpandedDetail({ task, onUpdate, onUploadDoc, onUploadImage, hasSvn
               {localUploadedFiles.map((f, i) => (
                 <div key={`upload-${i}`} className="flex items-center gap-2.5 text-sm group">
                   <span className={`px-2 py-0.5 rounded text-[10px] font-medium flex-shrink-0 ${
-                    f.docType === 'SA' ? 'bg-blue-500/100/15 text-blue-400' : 'bg-orange-500/100/15 text-orange-400'
+                    f.docType === 'SA' ? 'bg-blue-500/15 text-blue-400' : 'bg-orange-500/15 text-orange-400'
                   }`}>
                     {f.docType === 'SA' ? '前端' : '後端'}
                   </span>

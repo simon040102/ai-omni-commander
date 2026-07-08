@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { useProjectStore } from '../../stores/projectStore';
 import { useToastStore } from '../../stores/toastStore';
+import { parseServerDate } from '../../lib/datetime';
 
-interface ProjectNote {
+export interface ProjectNote {
   id: string;
   projectId: string;
   category: string | null;
@@ -12,39 +13,26 @@ interface ProjectNote {
   updatedAt: string;
 }
 
+interface ProjectNotesPanelProps {
+  notes: ProjectNote[];
+  loading: boolean;
+  error: boolean;
+  refetch: () => Promise<void>;
+}
+
 /**
  * 專案筆記 — experience notes (前人踩坑教訓) saved via MCP save_project_note or this panel.
- * Refetches on project change and on the omni:project-note event (project.noteSaved WS message).
+ * Data is fetched by SpecGovernanceSection (usePanelData) and passed in.
  */
-export function ProjectNotesPanel() {
+export function ProjectNotesPanel({ notes, loading, error, refetch }: ProjectNotesPanelProps) {
   const currentProjectId = useProjectStore(s => s.currentProjectId);
   const addToast = useToastStore(s => s.addToast);
-  const [notes, setNotes] = useState<ProjectNote[]>([]);
   const [showArchived, setShowArchived] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [content, setContent] = useState('');
   const [category, setCategory] = useState('');
   const [saving, setSaving] = useState(false);
   const [archivingId, setArchivingId] = useState<string | null>(null);
-
-  const fetchNotes = useCallback(async () => {
-    if (!currentProjectId) { setNotes([]); return; }
-    try {
-      const res = await fetch(`/api/project-notes/${encodeURIComponent(currentProjectId)}`);
-      if (!res.ok) return;
-      const data = await res.json() as { notes: ProjectNote[] };
-      setNotes(data.notes || []);
-    } catch { /* server unreachable — keep last known state */ }
-  }, [currentProjectId]);
-
-  useEffect(() => { void fetchNotes(); }, [fetchNotes]);
-
-  // Refetch when a note is saved/archived elsewhere (MCP → WS → useWebSocket dispatches this)
-  useEffect(() => {
-    const handler = () => { void fetchNotes(); };
-    window.addEventListener('omni:project-note', handler);
-    return () => window.removeEventListener('omni:project-note', handler);
-  }, [fetchNotes]);
 
   const handleSave = useCallback(async () => {
     if (!currentProjectId || !content.trim()) return;
@@ -59,7 +47,7 @@ export function ProjectNotesPanel() {
         setContent('');
         setCategory('');
         setShowForm(false);
-        await fetchNotes();
+        await refetch();
       } else {
         addToast({ type: 'error', title: '筆記儲存失敗', message: `HTTP ${res.status}` });
       }
@@ -68,7 +56,7 @@ export function ProjectNotesPanel() {
     } finally {
       setSaving(false);
     }
-  }, [currentProjectId, content, category, addToast, fetchNotes]);
+  }, [currentProjectId, content, category, addToast, refetch]);
 
   const handleArchive = useCallback(async (noteId: string) => {
     setArchivingId(noteId);
@@ -79,7 +67,7 @@ export function ProjectNotesPanel() {
         body: JSON.stringify({}),
       });
       if (res.ok) {
-        await fetchNotes();
+        await refetch();
       } else {
         addToast({ type: 'error', title: '封存失敗', message: `HTTP ${res.status}` });
       }
@@ -88,23 +76,16 @@ export function ProjectNotesPanel() {
     } finally {
       setArchivingId(null);
     }
-  }, [addToast, fetchNotes]);
-
-  if (!currentProjectId) return null;
+  }, [addToast, refetch]);
 
   const activeNotes = notes.filter(n => n.active);
   const archivedNotes = notes.filter(n => !n.active);
   const visible = showArchived ? notes : activeNotes;
 
   return (
-    <div className="bg-card border border-border rounded-lg px-3 py-2 flex-shrink-0">
+    <div className="px-1 py-1">
       <div className="flex items-center gap-2 mb-1">
         <span className="text-xs font-semibold text-foreground">專案筆記</span>
-        {activeNotes.length > 0 && (
-          <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-sky-500/20 text-sky-400">
-            {activeNotes.length}
-          </span>
-        )}
         <button
           onClick={() => setShowForm(v => !v)}
           className="text-[10px] text-muted-foreground hover:text-foreground transition-colors"
@@ -149,8 +130,17 @@ export function ProjectNotesPanel() {
         </div>
       )}
 
-      {visible.length === 0 ? (
-        <p className="text-[11px] text-muted-foreground py-1">還沒有專案筆記。</p>
+      {error ? (
+        <button
+          onClick={() => void refetch()}
+          className="text-[11px] text-muted-foreground/70 hover:text-foreground py-1 transition-colors"
+        >
+          載入失敗（重試）
+        </button>
+      ) : loading && notes.length === 0 ? (
+        <p className="text-[11px] text-muted-foreground/60 py-1 animate-pulse">載入中…</p>
+      ) : visible.length === 0 ? (
+        <p className="text-[11px] text-muted-foreground py-1">尚無資料</p>
       ) : (
         <ul className="divide-y divide-border/50">
           {visible.map(note => (
@@ -167,7 +157,7 @@ export function ProjectNotesPanel() {
                   {note.content}
                 </p>
                 <p className="text-[10px] text-muted-foreground mt-0.5">
-                  {new Date(note.createdAt.endsWith('Z') ? note.createdAt : note.createdAt + 'Z').toLocaleString()}
+                  {parseServerDate(note.createdAt).toLocaleString()}
                 </p>
               </div>
               {note.active && (

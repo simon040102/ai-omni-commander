@@ -39,7 +39,7 @@ export function ProjectSetup({ onViewChange }: ProjectSetupProps) {
         const task = JSON.parse(stored);
         if (task.name) setName(task.name.slice(0, 50));
         sessionStorage.removeItem('asana_import_task');
-        addToast({ type: 'info', title: 'Asana Task Imported', message: `Task: ${task.name}` });
+        addToast({ type: 'info', title: '已匯入 Asana 任務', message: `任務：${task.name}` });
       } catch { /* ignore */ }
     }
   }, [addToast]);
@@ -131,7 +131,7 @@ export function ProjectSetup({ onViewChange }: ProjectSetupProps) {
       }
     }
 
-    addToast({ type: 'success', title: 'Project created', message: `"${name}"` });
+    addToast({ type: 'success', title: '已建立專案', message: `"${name}"` });
     onViewChange('tasks');
   }, [name, frontendPath, backendPath, asanaProjectGid, client, isValid, setCurrentProject, addToast, onViewChange]);
 

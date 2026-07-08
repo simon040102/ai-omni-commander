@@ -20,9 +20,14 @@ export const useToastStore = create<ToastState>((set) => ({
   addToast: (toast) => {
     const id = crypto.randomUUID();
     set((state) => {
-      const newToasts = [...state.toasts, { ...toast, id }];
-      // Keep only the latest 3 toasts
-      return { toasts: newToasts.slice(-3) };
+      const all = [...state.toasts, { ...toast, id }];
+      // Persistent toasts (duration: 0) are never pushed out by transient ones;
+      // only cap the transient toasts at the latest 3.
+      const persistent = all.filter((t) => t.duration === 0);
+      const transient = all.filter((t) => t.duration !== 0).slice(-3);
+      // Preserve original insertion order
+      const capped = new Set([...persistent, ...transient]);
+      return { toasts: all.filter((t) => capped.has(t)) };
     });
 
     // Auto-remove after duration (default 5s)

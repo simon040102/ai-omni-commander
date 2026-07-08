@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { IconX } from '../ui/Icons';
 import MermaidRenderer from '../db/MermaidRenderer';
+import { parseServerDate } from '../../lib/datetime';
 
 interface SaFlowModalProps {
   projectId: string;
@@ -70,7 +71,7 @@ export function SaFlowModal({ projectId, taskId, onClose }: SaFlowModalProps) {
             )}
             {selected && (
               <span className="text-xs text-muted-foreground">
-                {selected.filename} · {new Date(selected.generatedAt).toLocaleDateString('zh-TW')}
+                {selected.filename} · {parseServerDate(selected.generatedAt).toLocaleDateString('zh-TW')}
               </span>
             )}
           </div>

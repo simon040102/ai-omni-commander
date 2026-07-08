@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
-import { useProjectStore } from '../../stores/projectStore';
+import { useCallback, useState } from 'react';
 import { useToastStore } from '../../stores/toastStore';
+import { parseServerDate } from '../../lib/datetime';
 
-interface SpecGap {
+export interface SpecGap {
   id: string;
   taskId: string;
   taskTitle: string | null;
@@ -22,37 +22,24 @@ const CATEGORY_LABELS: Record<string, string> = {
   logic_unclear: '邏輯不明',
   other: '其他',
   spec_changed: '規格已變更',
+  sa_sd_mismatch: 'SA/SD 矛盾',
 };
+
+interface SpecGapsPanelProps {
+  gaps: SpecGap[];
+  loading: boolean;
+  error: boolean;
+  refetch: () => Promise<void>;
+}
 
 /**
  * 待補規格清單 — spec gaps reported by MCP report_spec_gap.
- * Refetches on project change and on the omni:spec-gap event (task.specGap WS message).
+ * Data is fetched by SpecGovernanceSection (usePanelData) and passed in.
  */
-export function SpecGapsPanel() {
-  const currentProjectId = useProjectStore(s => s.currentProjectId);
+export function SpecGapsPanel({ gaps, loading, error, refetch }: SpecGapsPanelProps) {
   const addToast = useToastStore(s => s.addToast);
-  const [gaps, setGaps] = useState<SpecGap[]>([]);
   const [showResolved, setShowResolved] = useState(false);
   const [resolvingId, setResolvingId] = useState<string | null>(null);
-
-  const fetchGaps = useCallback(async () => {
-    if (!currentProjectId) { setGaps([]); return; }
-    try {
-      const res = await fetch(`/api/spec-gaps/${encodeURIComponent(currentProjectId)}`);
-      if (!res.ok) return;
-      const data = await res.json() as { gaps: SpecGap[] };
-      setGaps(data.gaps || []);
-    } catch { /* server unreachable — keep last known state */ }
-  }, [currentProjectId]);
-
-  useEffect(() => { void fetchGaps(); }, [fetchGaps]);
-
-  // Refetch when a gap is reported/resolved elsewhere (MCP → WS → useWebSocket dispatches this)
-  useEffect(() => {
-    const handler = () => { void fetchGaps(); };
-    window.addEventListener('omni:spec-gap', handler);
-    return () => window.removeEventListener('omni:spec-gap', handler);
-  }, [fetchGaps]);
 
   const handleResolve = useCallback(async (gapId: string) => {
     setResolvingId(gapId);
@@ -64,7 +51,7 @@ export function SpecGapsPanel() {
       });
       if (res.ok) {
         addToast({ type: 'success', title: '已標記解決' });
-        await fetchGaps();
+        await refetch();
       } else {
         addToast({ type: 'error', title: '標記失敗', message: `HTTP ${res.status}` });
       }
@@ -73,23 +60,16 @@ export function SpecGapsPanel() {
     } finally {
       setResolvingId(null);
     }
-  }, [addToast, fetchGaps]);
+  }, [addToast, refetch]);
 
   const openGaps = gaps.filter(g => g.status === 'open');
   const resolvedGaps = gaps.filter(g => g.status === 'resolved');
-  if (gaps.length === 0) return null;
-
   const visible = showResolved ? gaps : openGaps;
 
   return (
-    <div className="bg-card border border-border rounded-lg px-3 py-2 flex-shrink-0">
+    <div className="px-1 py-1">
       <div className="flex items-center gap-2 mb-1">
         <span className="text-xs font-semibold text-foreground">待補規格</span>
-        {openGaps.length > 0 && (
-          <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/20 text-amber-400">
-            {openGaps.length}
-          </span>
-        )}
         {resolvedGaps.length > 0 && (
           <button
             onClick={() => setShowResolved(v => !v)}
@@ -99,8 +79,17 @@ export function SpecGapsPanel() {
           </button>
         )}
       </div>
-      {visible.length === 0 ? (
-        <p className="text-[11px] text-muted-foreground py-1">沒有待補的規格缺口。</p>
+      {error ? (
+        <button
+          onClick={() => void refetch()}
+          className="text-[11px] text-muted-foreground/70 hover:text-foreground py-1 transition-colors"
+        >
+          載入失敗（重試）
+        </button>
+      ) : loading && gaps.length === 0 ? (
+        <p className="text-[11px] text-muted-foreground/60 py-1 animate-pulse">載入中…</p>
+      ) : visible.length === 0 ? (
+        <p className="text-[11px] text-muted-foreground py-1">尚無資料</p>
       ) : (
         <ul className="divide-y divide-border/50">
           {visible.map(gap => (
@@ -117,7 +106,7 @@ export function SpecGapsPanel() {
                 <p className="text-[10px] text-muted-foreground mt-0.5">
                   {gap.taskTitle || gap.taskId}
                   {' · '}
-                  {new Date(gap.createdAt.endsWith('Z') ? gap.createdAt : gap.createdAt + 'Z').toLocaleString()}
+                  {parseServerDate(gap.createdAt).toLocaleString()}
                   {gap.status === 'resolved' && gap.resolutionNote ? ` · ${gap.resolutionNote}` : ''}
                 </p>
               </div>

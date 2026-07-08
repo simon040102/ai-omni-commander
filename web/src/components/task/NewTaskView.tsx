@@ -1,7 +1,6 @@
 import { useState, useCallback, useMemo } from 'react';
 import { useWsStore } from '../../stores/wsStore';
 import { useProjectStore } from '../../stores/projectStore';
-import { useAgentStore } from '../../stores/agentStore';
 import { useToastStore } from '../../stores/toastStore';
 import { ModeSelector } from '../project/ModeSelector';
 import type { TaskMode } from '../project/ModeSelector';
@@ -9,6 +8,7 @@ import { QuickModeSetup } from '../project/QuickModeSetup';
 import { FolderPicker } from '../project/FolderPicker';
 import { TerminalOutput } from '../dashboard/TerminalOutput';
 import { IconPlay, IconChevronDown, IconChevronRight, IconTrash } from '../ui/Icons';
+import { parseServerDate } from '../../lib/datetime';
 import type { View } from '../layout/AppShell';
 import type { DocType } from '@omni/shared';
 
@@ -51,7 +51,6 @@ export function NewTaskView({ onViewChange }: NewTaskViewProps) {
   const addToast = useToastStore(s => s.addToast);
   const projects = useProjectStore(s => s.projects);
   const allAgents = useProjectStore(s => s.agents);
-  const agentOutputs = useAgentStore(s => s.outputs);
 
   const [mode, setMode] = useState<TaskMode>('quick');
   const [model, setModel] = useState('sonnet');
@@ -70,8 +69,8 @@ export function NewTaskView({ onViewChange }: NewTaskViewProps) {
     return [...projects]
       .filter(p => p.name.startsWith('Quick-'))
       .sort((a, b) => {
-        const dateA = new Date(a.createdAt.endsWith('Z') ? a.createdAt : a.createdAt + 'Z').getTime();
-        const dateB = new Date(b.createdAt.endsWith('Z') ? b.createdAt : b.createdAt + 'Z').getTime();
+        const dateA = parseServerDate(a.createdAt).getTime();
+        const dateB = parseServerDate(b.createdAt).getTime();
         return dateB - dateA;
       });
   }, [projects]);
@@ -203,7 +202,7 @@ ${quickTask.useWorkspaceSkills ? '請先讀取工作目錄中的 CLAUDE.md 和 .
       body: JSON.stringify({ path: specWorkspacePath.trim() }),
     }).catch(() => {});
 
-    addToast({ type: 'success', title: 'Spec execution started', message: `"${projectName}"` });
+    addToast({ type: 'success', title: '已開始 Spec 執行', message: `"${projectName}"` });
     setShowForm(false);
   }, [client, specWorkspacePath, specDocuments, model, generateProjectName, addToast]);
 
@@ -215,7 +214,7 @@ ${quickTask.useWorkspaceSkills ? '請先讀取工作目錄中的 CLAUDE.md 和 .
       payload: { projectId },
     });
     setConfirmDeleteId(null);
-    addToast({ type: 'success', title: 'Quick Run deleted' });
+    addToast({ type: 'success', title: '已刪除 Quick Run' });
   }, [client, addToast]);
 
   const handleSendCommand = useCallback((agentId: string, command: string) => {
@@ -403,7 +402,7 @@ ${quickTask.useWorkspaceSkills ? '請先讀取工作目錄中的 CLAUDE.md 和 .
                   }`} />
                   <span className="text-sm font-medium truncate flex-1">{project.name}</span>
                   <span className="text-[10px] text-muted-foreground flex-shrink-0">
-                    {new Date(project.createdAt.endsWith('Z') ? project.createdAt : project.createdAt + 'Z').toLocaleString('zh-TW', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                    {parseServerDate(project.createdAt).toLocaleString('zh-TW', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
                   </span>
                   <button
                     onClick={() => handleGoToProject(project.id)}
@@ -431,7 +430,6 @@ ${quickTask.useWorkspaceSkills ? '請先讀取工作目錄中的 CLAUDE.md 和 .
                   <div className="border-t border-border/50">
                     {agents.map(agent => {
                       const isExpanded = expandedAgentId === agent.id;
-                      const outputs = agentOutputs[agent.id] || [];
 
                       return (
                         <div key={agent.id}>
@@ -459,16 +457,13 @@ ${quickTask.useWorkspaceSkills ? '請先讀取工作目錄中的 CLAUDE.md 和 .
                             <div className="border-t border-border/30">
                               <div className="h-[300px]">
                                 <TerminalOutput
-                                  outputs={outputs}
                                   title={agent.title || agent.role}
                                   role={agent.role}
                                   status={agent.status}
                                   agentId={agent.id}
                                   model={agent.model}
-                                  totalInputTokens={agent.totalInputTokens}
-                                  totalOutputTokens={agent.totalOutputTokens}
-                                  onSendCommand={(cmd) => handleSendCommand(agent.id, cmd)}
-                                  onAction={(agentId, action) => handleAgentAction(agentId, action)}
+                                  onSendCommand={handleSendCommand}
+                                  onAction={handleAgentAction}
                                   compact
                                 />
                               </div>
@@ -514,7 +509,7 @@ ${quickTask.useWorkspaceSkills ? '請先讀取工作目錄中的 CLAUDE.md 和 .
             <div className="relative">
               <pre className="bg-muted/50 border border-border rounded-lg p-4 text-sm text-foreground whitespace-pre-wrap font-mono leading-relaxed select-all max-h-[50vh] overflow-y-auto">{mcpCommand}</pre>
               <button
-                onClick={() => { navigator.clipboard.writeText(mcpCommand); addToast({ type: 'success', title: 'Copied!' }); }}
+                onClick={() => { navigator.clipboard.writeText(mcpCommand); addToast({ type: 'success', title: '已複製' }); }}
                 className="absolute top-2 right-2 px-3 py-1.5 rounded-md bg-primary text-primary-foreground text-xs font-medium hover:opacity-90 transition-opacity"
               >Copy</button>
             </div>

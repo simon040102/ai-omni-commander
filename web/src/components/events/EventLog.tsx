@@ -1,5 +1,6 @@
 import { useAgentStore, type AgentOutput } from '../../stores/agentStore';
 import { useProjectStore } from '../../stores/projectStore';
+import { parseServerDate } from '../../lib/datetime';
 import { IconClock } from '../ui/Icons';
 
 export function EventLog() {
@@ -27,7 +28,7 @@ export function EventLog() {
   }
 
   // Sort by timestamp descending
-  allEvents.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+  allEvents.sort((a, b) => parseServerDate(b.timestamp).getTime() - parseServerDate(a.timestamp).getTime());
 
   // Take latest 200
   const recent = allEvents.slice(0, 200);
@@ -57,7 +58,7 @@ export function EventLog() {
             {recent.map((event, i) => (
               <div key={i} className="flex items-start gap-3 px-2 py-1.5 hover:bg-muted/50 rounded text-xs">
                 <span className="text-muted-foreground whitespace-nowrap font-mono">
-                  {new Date(event.timestamp).toLocaleTimeString()}
+                  {parseServerDate(event.timestamp).toLocaleTimeString()}
                 </span>
                 <span className={`px-1.5 py-0.5 rounded whitespace-nowrap ${
                   event.agentRole === 'backend' ? 'bg-purple-500/15 text-purple-400' :

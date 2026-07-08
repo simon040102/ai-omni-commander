@@ -53,6 +53,25 @@ interface AgentsViewProps {
   onViewChange: (view: View) => void;
 }
 
+/** Per-agent tool-use count — isolated subscription so AgentsView doesn't re-render on every output */
+function ToolCount({ agentId }: { agentId: string }) {
+  const count = useAgentStore(s => {
+    const outs = s.outputs[agentId];
+    if (!outs) return 0;
+    let n = 0;
+    for (const o of outs) if (o.streamType === 'tool_use') n++;
+    return n;
+  });
+  return <>{count} tools</>;
+}
+
+/** Per-agent progress ring — isolated subscription (agent.progress messages are frequent while running) */
+function AgentProgressRing({ agentId, size, strokeWidth }: { agentId: string; size: number; strokeWidth: number }) {
+  const ap = useAgentStore(s => s.progress[agentId]);
+  if (!ap) return null;
+  return <ProgressRing percentage={ap.percentage} size={size} strokeWidth={strokeWidth} phase={ap.currentPhase} />;
+}
+
 type RightPanel = { mode: 'terminal'; agentId: string } | { mode: 'group-terminal'; agentIds: string[]; taskTitle: string } | { mode: 'add-agent' } | { mode: 'empty' };
 
 export function AgentsView({ onViewChange }: AgentsViewProps) {
@@ -60,8 +79,6 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
   const projects = useProjectStore(s => s.projects);
   const allAgents = useProjectStore(s => s.agents);
   const tasks = useProjectStore(s => s.tasks);
-  const outputs = useAgentStore(s => s.outputs);
-  const progress = useAgentStore(s => s.progress);
   const client = useWsStore(s => s.client);
   const addToast = useToastStore(s => s.addToast);
   const agentsFilterTaskId = useProjectStore(s => s.agentsFilterTaskId);
@@ -183,7 +200,7 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
         });
       }
     }
-    addToast({ type: 'warning', title: 'Stopping all agents...' });
+    addToast({ type: 'warning', title: '正在停止所有 Agent…' });
   }, [agents, client, currentProjectId, addToast]);
 
   const handleDeleteAgent = useCallback((agentId: string) => {
@@ -193,7 +210,7 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
       timestamp: new Date().toISOString(),
       payload: { agentId },
     });
-    addToast({ type: 'success', title: 'Agent removed' });
+    addToast({ type: 'success', title: '已移除 Agent' });
   }, [client, addToast]);
 
   const handleSendCommand = useCallback((agentId: string, command: string) => {
@@ -267,7 +284,7 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
         mockupFiles: addAgentMockupFiles.length > 0 ? addAgentMockupFiles : undefined,
       },
     });
-    addToast({ type: 'info', title: 'Agent added', message: `Starting ${addAgentRole} agent (${addAgentModel})...` });
+    addToast({ type: 'info', title: '已新增 Agent', message: `正在啟動 ${addAgentRole} Agent（${addAgentModel}）…` });
     setRightPanel({ mode: 'empty' }); // will auto-select the new agent when it appears
     setAddAgentPrompt('');
     setAddAgentWorkDir('');
@@ -284,9 +301,9 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
           <div className="w-20 h-20 mx-auto mb-6 rounded-2xl bg-muted/50 flex items-center justify-center">
             <IconGrid className="w-10 h-10 text-muted-foreground/40" />
           </div>
-          <h3 className="text-lg font-semibold text-foreground mb-2">No Project Selected</h3>
+          <h3 className="text-lg font-semibold text-foreground mb-2">尚未選擇專案</h3>
           <p className="text-sm text-muted-foreground mb-6">
-            Select a project from the sidebar to manage its agents.
+            請從側邊欄選擇專案以管理其 Agent。
           </p>
         </div>
       </div>
@@ -449,7 +466,6 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
                     >
                       <div className="flex-1 min-h-0">
                         <TerminalOutput
-                          outputs={outputs[agent.id] || []}
                           title={`${agent.role.charAt(0).toUpperCase() + agent.role.slice(1)} Agent${ct?.title ? ` — ${ct.title}` : ''}`}
                           role={agent.role}
                           status={agent.status}
@@ -457,8 +473,6 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
                           projectId={currentProjectId ?? undefined}
                           taskId={agent.currentTaskId || undefined}
                           model={agent.model}
-                          totalInputTokens={agent.totalInputTokens}
-                          totalOutputTokens={agent.totalOutputTokens}
                           onSendCommand={handleSendCommand}
                           onAction={handleAgentAction}
                           compact
@@ -549,15 +563,12 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
                         </div>
                         <div className="flex-1 min-h-0">
                           <TerminalOutput
-                            outputs={outputs[agent.id] || []}
                             title={`${agent.role.charAt(0).toUpperCase() + agent.role.slice(1)} Agent${agent.title ? ` — ${agent.title}` : ''}`}
                             role={agent.role}
                             status={agent.status}
                             agentId={agent.id}
                             projectId={currentProjectId ?? undefined}
                             model={agent.model}
-                            totalInputTokens={agent.totalInputTokens}
-                            totalOutputTokens={agent.totalOutputTokens}
                             onSendCommand={handleSendCommand}
                             onAction={handleAgentAction}
                             compact
@@ -612,9 +623,6 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
               const renderAgentCard = (agent: typeof agents[0], compact: boolean) => {
                 const isSelected = selectedAgentId === agent.id;
                 const ct = agent.currentTaskId ? tasks.find(t => t.id === agent.currentTaskId) : null;
-                const outs = outputs[agent.id] || [];
-                const tc = outs.filter(o => o.streamType === 'tool_use').length;
-                const ap = progress[agent.id];
                 return (
                   <div
                     key={agent.id}
@@ -631,9 +639,9 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
                       <span className={`text-[10px] font-bold capitalize px-1 py-0.5 rounded ${ROLE_BG[agent.role] || 'bg-muted text-muted-foreground'}`}>
                         {agent.role}
                       </span>
-                      <span className="ml-auto text-[9px] text-muted-foreground">{tc} tools</span>
-                      {ap && agent.status === 'running' && (
-                        <ProgressRing percentage={ap.percentage} size={28} strokeWidth={2.5} phase={ap.currentPhase} />
+                      <span className="ml-auto text-[9px] text-muted-foreground"><ToolCount agentId={agent.id} /></span>
+                      {agent.status === 'running' && (
+                        <AgentProgressRing agentId={agent.id} size={28} strokeWidth={2.5} />
                       )}
                     </div>
                     {!compact && (
@@ -701,9 +709,6 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
                   {standalone.map(agent => {
                     const isSelected = selectedAgentId === agent.id;
                     const ct = agent.currentTaskId ? tasks.find(t => t.id === agent.currentTaskId) : null;
-                    const outs = outputs[agent.id] || [];
-                    const tc = outs.filter(o => o.streamType === 'tool_use').length;
-                    const ap = progress[agent.id];
                     const canResume = agent.status === 'error' && agent.sessionId && agent.role !== 'axure';
                     return (
                       <div
@@ -719,8 +724,8 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
                             agent.status === 'running' ? 'bg-green-500 animate-breathe' : agent.status === 'error' ? 'bg-red-500' : 'bg-gray-500'
                           }`} />
                           <div className="ml-auto flex items-center gap-1.5">
-                            <span className="text-[9px] text-muted-foreground">{tc} tools</span>
-                            {ap && agent.status === 'running' && <ProgressRing percentage={ap.percentage} size={36} strokeWidth={3} phase={ap.currentPhase} />}
+                            <span className="text-[9px] text-muted-foreground"><ToolCount agentId={agent.id} /></span>
+                            {agent.status === 'running' && <AgentProgressRing agentId={agent.id} size={36} strokeWidth={3} />}
                           </div>
                         </div>
                         <div className="flex items-center justify-between">
@@ -740,7 +745,7 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
                         </div>
                         {canResume && (
                           <button
-                            onClick={e => { e.stopPropagation(); client?.send({ type: 'agent.resume', id: crypto.randomUUID(), timestamp: new Date().toISOString(), payload: { agentId: agent.id } }); addToast({ type: 'info', title: 'Resuming agent...' }); }}
+                            onClick={e => { e.stopPropagation(); client?.send({ type: 'agent.resume', id: crypto.randomUUID(), timestamp: new Date().toISOString(), payload: { agentId: agent.id } }); addToast({ type: 'info', title: '正在恢復 Agent…' }); }}
                             className="flex items-center gap-1 px-2 py-1 text-[10px] font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20 rounded hover:bg-amber-500/20 transition-colors mt-1"
                           ><IconPlay className="w-3 h-3" />Resume</button>
                         )}
@@ -788,7 +793,6 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
                     <div key={agent.id} className="min-h-0 min-w-0 flex flex-col rounded-lg overflow-hidden border border-transparent" style={span2 ? { gridColumn: '1 / -1' } : undefined}>
                       <div className="flex-1 min-h-0">
                         <TerminalOutput
-                          outputs={outputs[agent.id] || []}
                           title={`${agent.role.charAt(0).toUpperCase() + agent.role.slice(1)} Agent${ct?.title ? ` — ${ct.title}` : ''}`}
                           role={agent.role}
                           status={agent.status}
@@ -796,8 +800,6 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
                           projectId={currentProjectId ?? undefined}
                           taskId={agent.currentTaskId || undefined}
                           model={agent.model}
-                          totalInputTokens={agent.totalInputTokens}
-                          totalOutputTokens={agent.totalOutputTokens}
                           onSendCommand={handleSendCommand}
                           onAction={handleAgentAction}
                           compact
@@ -812,15 +814,12 @@ export function AgentsView({ onViewChange }: AgentsViewProps) {
           : rightPanel.mode === 'terminal' && selectedAgent ? (
             <TerminalOutput
               key={selectedAgent.id}
-              outputs={outputs[selectedAgent.id] || []}
               title={`${(selectedAgent.role || 'unknown').charAt(0).toUpperCase() + (selectedAgent.role || 'unknown').slice(1)} Agent${selectedAgent.title ? ` — ${selectedAgent.title}` : ''}`}
               role={selectedAgent.role}
               status={selectedAgent.status}
               agentId={selectedAgent.id}
               projectId={currentProjectId ?? undefined}
               model={selectedAgent.model}
-              totalInputTokens={selectedAgent.totalInputTokens}
-              totalOutputTokens={selectedAgent.totalOutputTokens}
               onSendCommand={handleSendCommand}
               onAction={handleAgentAction}
             />

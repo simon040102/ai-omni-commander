@@ -81,7 +81,7 @@ export function GlobalSettings() {
         payload: { pat: asanaPat.trim() },
       });
     }
-    addToast({ type: 'success', title: 'Global settings saved' });
+    addToast({ type: 'success', title: '已儲存全域設定' });
   }, [client, svnUsername, svnPassword, asanaPat, addToast]);
 
   const handleTestSvn = useCallback(() => {

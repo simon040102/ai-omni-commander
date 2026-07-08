@@ -1,6 +1,7 @@
 import { useMemo, useState, useRef, useCallback } from 'react';
 import { useProjectStore } from '../../stores/projectStore';
 import { useWsStore } from '../../stores/wsStore';
+import { parseServerDate } from '../../lib/datetime';
 import {
   IconPlus, IconGrid, IconClock, IconLightning,
   IconPanelLeft,
@@ -88,8 +89,8 @@ export function Sidebar({ currentView, onViewChange, pinned, onTogglePin }: Side
 
   const projects = useMemo(() => {
     return [...rawProjects].sort((a, b) => {
-      const dateA = new Date(a.createdAt.endsWith('Z') ? a.createdAt : a.createdAt + 'Z').getTime();
-      const dateB = new Date(b.createdAt.endsWith('Z') ? b.createdAt : b.createdAt + 'Z').getTime();
+      const dateA = parseServerDate(a.createdAt).getTime();
+      const dateB = parseServerDate(b.createdAt).getTime();
       return dateB - dateA;
     });
   }, [rawProjects]);

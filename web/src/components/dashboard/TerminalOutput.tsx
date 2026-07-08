@@ -4,7 +4,6 @@ import DOMPurify from 'dompurify';
 import type { AgentOutput } from '../../stores/agentStore';
 import { useAgentStore } from '../../stores/agentStore';
 import { IconSearch, IconStop, IconRefresh, IconSend, IconChevronDown, IconChevronRight, IconX } from '../ui/Icons';
-import { FlowPanel } from './FlowPanel';
 import { SaFlowModal } from './SaFlowModal';
 import { useWsStore } from '../../stores/wsStore';
 
@@ -148,50 +147,50 @@ const STREAM_COLORS: Record<string, string> = {
   system: 'text-yellow-600 dark:text-yellow-400',
 };
 
+/** Max rendered rows before collapsing to the tail (older rows behind「顯示全部」) */
+const MAX_RENDERED_ROWS = 300;
+
+const EMPTY_OUTPUTS: AgentOutput[] = [];
+
 interface TerminalOutputProps {
-  outputs: AgentOutput[];
   title: string;
   role?: string;
   status?: string;
-  agentId?: string;
+  agentId: string;
   projectId?: string;
   taskId?: string;
   model?: string;
-  totalInputTokens?: number;
-  totalOutputTokens?: number;
   onSendCommand?: (agentId: string, command: string) => void;
   onAction?: (agentId: string, action: 'stop' | 'restart') => void;
   /** Compact mode for grid view — hides some header info */
   compact?: boolean;
 }
 
-export function TerminalOutput({ outputs, title, role, status, agentId, projectId, taskId, model, totalInputTokens, totalOutputTokens, onSendCommand, onAction, compact }: TerminalOutputProps) {
+export const TerminalOutput = memo(function TerminalOutput({ title, role, status, agentId, projectId, taskId, model, onSendCommand, onAction, compact }: TerminalOutputProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const autoScrollRef = useRef(true);
   const [isAutoScroll, setIsAutoScroll] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [showSearch, setShowSearch] = useState(false);
   const [filterType, setFilterType] = useState<string | null>(null);
-  const [showFlow, setShowFlow] = useState(false);
   const [showSaFlow, setShowSaFlow] = useState(false);
   const [reportContent, setReportContent] = useState<string | null>(null);
   const [showReport, setShowReport] = useState(false);
+  const [showAllRows, setShowAllRows] = useState(false);
 
-  // Use store for command input to persist across project switches
-  const commandInputs = useAgentStore((s) => s.commandInputs);
+  // Per-agent subscriptions — only this agent's slice triggers re-renders
+  const outputs = useAgentStore((s) => s.outputs[agentId]) ?? EMPTY_OUTPUTS;
   const setCommandInput = useAgentStore((s) => s.setCommandInput);
-  const commandInput = agentId ? (commandInputs[agentId] ?? '') : '';
+  const commandInput = useAgentStore((s) => s.commandInputs[agentId]) ?? '';
 
-  // Get streaming buffer for real-time display
-  const streamingBuffers = useAgentStore((s) => s.streamingBuffers);
-  const streamingBuffer = agentId ? streamingBuffers[agentId] : undefined;
-
-  // Get flow plan for this agent
-  const flowPlans = useAgentStore((s) => s.flowPlans);
-  const flowPlan = agentId ? (flowPlans[agentId] ?? null) : null;
+  // Get streaming buffer for real-time display (per-agent)
+  const streamingBuffer = useAgentStore((s) => s.streamingBuffers[agentId]);
 
   // Get context usage for this agent
-  const contextUsage = useAgentStore((s) => agentId ? s.contextUsage[agentId] : undefined);
+  const contextUsage = useAgentStore((s) => s.contextUsage[agentId]);
+
+  // WS connection state — reactive so the input enables/disables on reconnect
+  const wsConnected = useWsStore((s) => s.connected);
 
   // Pasted files state
   const [pastedFiles, setPastedFiles] = useState<PastedFile[]>([]);
@@ -301,17 +300,18 @@ export function TerminalOutput({ outputs, title, role, status, agentId, projectI
         }
       }
     }
-  }, []);
+  }, [projectId, taskId]);
 
   const removePastedFile = useCallback((id: string) => {
     setPastedFiles(prev => prev.filter(f => f.id !== id));
   }, []);
 
+  // Follow output while streaming too (buffer grows without outputs.length changing)
   useEffect(() => {
     if (autoScrollRef.current && scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [outputs.length]);
+  }, [outputs.length, streamingBuffer?.text, streamingBuffer?.thinking]);
 
   const handleScroll = () => {
     if (!scrollRef.current) return;
@@ -343,6 +343,12 @@ export function TerminalOutput({ outputs, title, role, status, agentId, projectI
     }
     return result;
   }, [outputs, filterType, searchQuery]);
+
+  // Render cap: long sessions only render the tail to keep DOM/React work bounded
+  const hiddenCount = !showAllRows && filteredOutputs.length > MAX_RENDERED_ROWS
+    ? filteredOutputs.length - MAX_RENDERED_ROWS
+    : 0;
+  const visibleOutputs = hiddenCount > 0 ? filteredOutputs.slice(-MAX_RENDERED_ROWS) : filteredOutputs;
 
   const toolCount = outputs.filter(o => o.streamType === 'tool_use').length;
   const errorCount = outputs.filter(o => o.streamType === 'error').length;
@@ -510,10 +516,18 @@ export function TerminalOutput({ outputs, title, role, status, agentId, projectI
                searchQuery ? 'No matches found.' : 'No output for this filter.'}
             </div>
           ) : (
-            filteredOutputs.map((output, i) => {
-              // Use timestamp + index as stable key to preserve component state
-              const stableKey = `${output.timestamp}-${i}`;
-              const isLastItem = i === filteredOutputs.length - 1;
+            <>
+            {hiddenCount > 0 && (
+              <button
+                onClick={() => setShowAllRows(true)}
+                className="block w-full text-center text-[11px] text-muted-foreground hover:text-foreground py-1.5 mb-1 rounded bg-muted/40 hover:bg-muted transition-colors"
+              >
+                顯示全部（已隱藏前 {hiddenCount} 行）
+              </button>
+            )}
+            {visibleOutputs.map((output, i) => {
+              // Store-assigned monotonic id — stable across trims (fallback for legacy entries)
+              const stableKey = output.id ?? `${output.timestamp}-${i}`;
 
               // Check if this is a thinking block - always collapsed by default
               const isThinking = output.streamType === 'system' && output.content.startsWith('[thinking]');
@@ -565,19 +579,17 @@ export function TerminalOutput({ outputs, title, role, status, agentId, projectI
                   )}
                 </div>
               );
-            })
+            })}
+            </>
           )}
-          {/* Real-time streaming content */}
+          {/* Real-time streaming content — rendered as plain text while streaming;
+              markdown is parsed once on flush (avoids full marked.parse per chunk) */}
           {streamingBuffer?.thinking && (
             <StreamingThinkingBlock content={streamingBuffer.thinking} />
           )}
           {streamingBuffer?.text && (
             <div className="text-foreground leading-5 whitespace-pre-wrap break-all">
-              {hasMarkdown(streamingBuffer.text) ? (
-                <><MarkdownContent content={streamingBuffer.text} /><span className="animate-pulse text-primary">▌</span></>
-              ) : (
-                <>{streamingBuffer.text}<span className="animate-pulse text-primary">▌</span></>
-              )}
+              {streamingBuffer.text}<span className="animate-pulse text-primary">▌</span>
             </div>
           )}
           {/* Working indicator when running but no visible streaming text */}
@@ -604,16 +616,6 @@ export function TerminalOutput({ outputs, title, role, status, agentId, projectI
           </button>
         )}
       </div>
-      {/* Flow panel (right side) */}
-      {showFlow && (
-        <FlowPanel
-          plan={flowPlan}
-          agentStatus={status}
-          onReRun={agentId && onSendCommand ? (stepN, stepLabel) => {
-            onSendCommand(agentId, `Please re-run from step ${stepN}: "${stepLabel}". Treat all previous steps as incomplete and resume the task from this step onwards. Output [STEP:${stepN}] to mark it active, then continue to completion.`);
-          } : undefined}
-        />
-      )}
       </div>
 
       {/* Command input — hidden for external MCP agents (not interactive) */}
@@ -621,7 +623,6 @@ export function TerminalOutput({ outputs, title, role, status, agentId, projectI
         // Axure agents use Playwright MCP which can't survive session resume —
         // only allow input while actively running; use UI buttons for restart.
         const isAxure = role === 'axure';
-        const wsConnected = useWsStore.getState().connected;
         const canSend = wsConnected && (isAxure
           ? (status === 'running' || status === 'starting')
           : (status === 'running' || status === 'starting' || status === 'stopped'));
@@ -771,4 +772,4 @@ export function TerminalOutput({ outputs, title, role, status, agentId, projectI
       )}
     </div>
   );
-}
+});
