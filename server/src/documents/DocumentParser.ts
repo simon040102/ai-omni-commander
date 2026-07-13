@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import mammoth from 'mammoth';
 import type { DocType } from '@omni/shared';
 import { genId } from '../utils/uuid.js';
@@ -232,10 +233,11 @@ export class DocumentParser {
 
     const db = getDb();
     db.prepare(`
-      INSERT INTO documents (id, project_id, filename, file_path, file_type, doc_type, parsed_text, source, source_url, svn_last_modified)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO documents (id, project_id, filename, file_path, file_type, doc_type, parsed_text, source, source_url, svn_last_modified, content_hash)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(id, projectId, filename, filePath, 'binary', docType, textContent,
-      source, opts?.sourceUrl || null, opts?.svnLastModified || null);
+      source, opts?.sourceUrl || null, opts?.svnLastModified || null,
+      createHash('sha256').update(buffer).digest('hex'));
 
     logger.info({ id, filename, filePath, source }, 'Document saved from buffer');
 
@@ -244,14 +246,24 @@ export class DocumentParser {
 
   /** Find a document by its SVN source URL */
   findBySourceUrl(projectId: string, sourceUrl: string): {
-    id: string; filename: string; filePath: string; svnLastModified: string | null;
+    id: string; filename: string; filePath: string; svnLastModified: string | null; contentHash: string | null;
   } | null {
     const db = getDb();
     const row = db.prepare(
-      "SELECT id, filename, file_path, svn_last_modified FROM documents WHERE project_id = ? AND source_url = ?"
-    ).get(projectId, sourceUrl) as { id: string; filename: string; file_path: string; svn_last_modified: string | null } | undefined;
+      "SELECT id, filename, file_path, svn_last_modified, content_hash FROM documents WHERE project_id = ? AND source_url = ?"
+    ).get(projectId, sourceUrl) as { id: string; filename: string; file_path: string; svn_last_modified: string | null; content_hash: string | null } | undefined;
     if (!row) return null;
-    return { id: row.id, filename: row.filename, filePath: row.file_path, svnLastModified: row.svn_last_modified };
+    return { id: row.id, filename: row.filename, filePath: row.file_path, svnLastModified: row.svn_last_modified, contentHash: row.content_hash };
+  }
+
+  /**
+   * Bump only the version (svn_last_modified) of a cached document — used when
+   * the dedupe decision is 'bump_version' (content hash identical, no rewrite).
+   */
+  updateDocumentVersion(documentId: string, version: string): void {
+    const db = getDb();
+    db.prepare('UPDATE documents SET svn_last_modified = ? WHERE id = ?').run(version, documentId);
+    logger.info({ documentId, version }, 'Document version bumped (content unchanged)');
   }
 
   /** Update SVN last modified date and re-save file content */
@@ -275,8 +287,8 @@ export class DocumentParser {
     }
 
     db.prepare(
-      "UPDATE documents SET svn_last_modified = ?, parsed_text = ?, created_at = datetime('now') WHERE id = ?"
-    ).run(svnLastModified, text, documentId);
+      "UPDATE documents SET svn_last_modified = ?, parsed_text = ?, content_hash = ?, created_at = datetime('now') WHERE id = ?"
+    ).run(svnLastModified, text, createHash('sha256').update(buffer).digest('hex'), documentId);
 
     logger.info({ documentId, svnLastModified }, 'SVN document updated');
   }

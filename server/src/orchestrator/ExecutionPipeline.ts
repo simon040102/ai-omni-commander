@@ -112,7 +112,7 @@ export class ExecutionPipeline {
         attempted = true;
         try {
           const svnIds = await this.svnSpecService.fetchSpecsForTask(
-            task.projectId, taskId, functionCode, projectConfig.svnConfig, roleLabel,
+            task.projectId, taskId, functionCode, projectConfig.svnConfig, roleLabel, task.title,
           );
           docIds.push(...svnIds);
           logger.info({ taskId, functionCode, source: task.parentName ? 'parentName' : 'title', docCount: svnIds.length }, 'Fetched SVN specs');
@@ -140,7 +140,7 @@ export class ExecutionPipeline {
         attempted = true;
         try {
           const r = await this.svnSpecService.fetchFolderSpecsForTask(
-            task.projectId, taskId, functionCode, specFolders, roleLabel,
+            task.projectId, taskId, functionCode, specFolders, roleLabel, task.title,
           );
           docIds.push(...r.docIds);
           warnings.push(...r.warnings);

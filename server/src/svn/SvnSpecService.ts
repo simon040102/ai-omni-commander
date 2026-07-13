@@ -1,11 +1,13 @@
 import { spawn, spawnSync } from 'node:child_process';
 import path from 'node:path';
 import fs from 'node:fs';
+import { createHash } from 'node:crypto';
 import iconv from 'iconv-lite';
 import mammoth from 'mammoth';
 import type { SvnConfig, SvnCredentials, DocType, SpecFolderConfig } from '@omni/shared';
 import type { DocumentParser } from '../documents/DocumentParser.js';
 import { prepareFolder, findSpecFiles, getFileVersion } from '../documents/FolderSpecSource.js';
+import { extractChineseNames, decideDedupe, classifyPrepareResult, type ExistingDocInfo } from '../documents/SpecFetchPolicy.js';
 import { bindDocumentToTask, getDocumentsForTask } from '../db/queries/taskDocuments.js';
 import { recordTaskSpecVersion } from '../db/queries/taskSpecVersions.js';
 import { getSvnCredentials } from '../db/queries/globalConfig.js';
@@ -140,6 +142,7 @@ export class SvnSpecService {
     parentName: string,
     svnConfig: SvnConfig,
     taskLabel: string,
+    taskTitle?: string,
   ): Promise<string[]> {
     // Note: we do NOT short-circuit here even if SVN docs are already bound —
     // execution always checks SVN for the latest version (svnLastModified cache handles no-op re-downloads).
@@ -161,6 +164,9 @@ export class SvnSpecService {
       logger.warn({ parentName, functionCode }, 'Could not extract root code from parent name');
       return [];
     }
+
+    // Chinese-name fallback (shared policy — same behavior as MCP fetch_svn_specs)
+    const chineseNames = extractChineseNames(parentName, taskTitle);
 
     // Collect matched files from all SVN roots, tracking which root each came from
     const allMatchedFiles: Array<{ fileUrl: string; isFrontendRoot: boolean }> = [];
@@ -190,8 +196,8 @@ export class SvnSpecService {
           allFiles = topItems;
         }
 
-        // Step 2: Find matching files by function code
-        const matchedFiles = this.findMatchingFiles(allFiles, functionCode);
+        // Step 2: Find matching files by function code (with Chinese-name fallback)
+        const matchedFiles = this.findMatchingFiles(allFiles, functionCode, chineseNames);
 
         if (matchedFiles.length === 0 && matchedFolder) {
           logger.info({ parentName, searchUrl }, 'No matching files found, trying 0_共用/ fallback');
@@ -279,8 +285,10 @@ export class SvnSpecService {
     parentName: string,
     specFolders: SpecFolderConfig[],
     _taskLabel: string,
+    taskTitle?: string,
   ): Promise<{ docIds: string[]; warnings: string[]; errors: string[] }> {
     const functionCode = extractFunctionCode(parentName) || parentName;
+    const chineseNames = extractChineseNames(parentName, taskTitle);
     const subFolder = `${functionCode}_${taskId.slice(0, 8)}`;
     const docIds: string[] = [];
     const warnings: string[] = [];
@@ -288,15 +296,16 @@ export class SvnSpecService {
 
     for (const folder of specFolders) {
       const prep = await prepareFolder(folder);
-      warnings.push(...prep.warnings.map(w => `${folder.path}: ${w}`));
+      const issues = classifyPrepareResult(folder.path, prep);
+      warnings.push(...issues.warnings);
       if (!prep.ok) {
-        errors.push(prep.error || `規格資料夾無法使用：${folder.path}`);
+        errors.push(...issues.errors);
         continue;
       }
 
       let files;
       try {
-        files = findSpecFiles(folder.path, functionCode);
+        files = findSpecFiles(folder.path, functionCode, chineseNames);
       } catch (err) {
         errors.push(`${folder.path}: 掃描失敗：${firstLine((err as Error).message)}`);
         continue;
@@ -311,23 +320,40 @@ export class SvnSpecService {
           const sourceRef = file.filePath.replace(/\\/g, '/');
           const filename = path.basename(file.filePath);
 
-          // Dedupe: same file (source_url) + same version → just re-bind
           const cached = this.documentParser.findBySourceUrl(projectId, sourceRef);
-          if (cached && cached.svnLastModified === version && fs.existsSync(cached.filePath)) {
-            bindDocumentToTask(taskId, cached.id);
+          const existing: ExistingDocInfo | null = cached
+            ? { version: cached.svnLastModified, contentHash: cached.contentHash, fileExists: fs.existsSync(cached.filePath) }
+            : null;
+
+          // Stage 1 — version unchanged & file on disk → just re-bind (no read)
+          if (decideDedupe(existing, version, null) === 'skip') {
+            bindDocumentToTask(taskId, cached!.id);
             recordTaskSpecVersion(taskId, sourceRef, version);
-            docIds.push(cached.id);
+            docIds.push(cached!.id);
             continue;
           }
 
+          // Stage 2 — read content, decide by content hash
           const buffer = fs.readFileSync(file.filePath);
+          const newHash = createHash('sha256').update(buffer).digest('hex');
+          const decision = decideDedupe(existing, version, newHash);
+
+          if (decision === 'bump_version') {
+            // Content identical → just refresh version and bind
+            this.documentParser.updateDocumentVersion(cached!.id, version);
+            bindDocumentToTask(taskId, cached!.id);
+            recordTaskSpecVersion(taskId, sourceRef, version);
+            docIds.push(cached!.id);
+            continue;
+          }
+
           const parsedText = await this.extractText(file.filePath, filename);
 
-          if (cached) {
-            await this.documentParser.updateSvnDocument(cached.id, buffer, version, parsedText || undefined);
-            bindDocumentToTask(taskId, cached.id);
+          if (decision === 'update') {
+            await this.documentParser.updateSvnDocument(cached!.id, buffer, version, parsedText || undefined);
+            bindDocumentToTask(taskId, cached!.id);
             recordTaskSpecVersion(taskId, sourceRef, version);
-            docIds.push(cached.id);
+            docIds.push(cached!.id);
             continue;
           }
 
@@ -431,6 +457,9 @@ export class SvnSpecService {
 
     // Check if already cached in documents table
     const cached = this.documentParser.findBySourceUrl(projectId, fileUrl);
+    const existing: ExistingDocInfo | null = cached
+      ? { version: cached.svnLastModified, contentHash: cached.contentHash, fileExists: fs.existsSync(cached.filePath) }
+      : null;
 
     // Get SVN last modified date
     let svnLastModified: string | null = null;
@@ -440,16 +469,15 @@ export class SvnSpecService {
       logger.warn({ err, fileUrl }, 'Failed to get SVN info');
     }
 
-    // If cached and still up to date AND file exists on disk, just bind to task
-    if (cached && svnLastModified && cached.svnLastModified === svnLastModified) {
-      if (fs.existsSync(cached.filePath)) {
-        logger.info({ fileUrl, docId: cached.id }, 'Using cached SVN document');
-        bindDocumentToTask(taskId, cached.id);
-        if (svnLastModified) recordTaskSpecVersion(taskId, fileUrl, svnLastModified);
-        return cached.id;
-      }
-      // File missing on disk — treat as cache miss, fall through to re-download
-      logger.warn({ fileUrl, docId: cached.id, filePath: cached.filePath }, 'Cached SVN document file missing on disk, re-downloading');
+    // Stage 1 — version unchanged & file on disk → just bind to task (no download)
+    if (decideDedupe(existing, svnLastModified, null) === 'skip') {
+      logger.info({ fileUrl, docId: cached!.id }, 'Using cached SVN document');
+      bindDocumentToTask(taskId, cached!.id);
+      if (svnLastModified) recordTaskSpecVersion(taskId, fileUrl, svnLastModified);
+      return cached!.id;
+    }
+    if (existing && !existing.fileExists) {
+      logger.warn({ fileUrl, docId: cached!.id, filePath: cached!.filePath }, 'Cached SVN document file missing on disk, re-downloading');
     }
 
     // Download the file via svn export
@@ -461,20 +489,31 @@ export class SvnSpecService {
       return null;
     }
 
-    // If cached but outdated, update it
-    if (cached) {
-      const buffer = fs.readFileSync(localPath);
+    // Stage 2 — decide by content hash (identical content → bump version only)
+    const buffer = fs.readFileSync(localPath);
+    const newHash = createHash('sha256').update(buffer).digest('hex');
+    const decision = decideDedupe(existing, svnLastModified, newHash);
+
+    if (decision === 'bump_version') {
+      logger.info({ fileUrl, docId: cached!.id }, 'SVN document content unchanged — bumping version only');
+      this.documentParser.updateDocumentVersion(cached!.id, svnLastModified || '');
+      bindDocumentToTask(taskId, cached!.id);
+      if (svnLastModified) recordTaskSpecVersion(taskId, fileUrl, svnLastModified);
+      try { fs.unlinkSync(localPath); } catch { /* ignore */ }
+      return cached!.id;
+    }
+
+    if (decision === 'update') {
       const parsedText = await this.extractText(localPath, filename);
-      await this.documentParser.updateSvnDocument(cached.id, buffer, svnLastModified || '', parsedText || undefined);
-      bindDocumentToTask(taskId, cached.id);
+      await this.documentParser.updateSvnDocument(cached!.id, buffer, svnLastModified || '', parsedText || undefined);
+      bindDocumentToTask(taskId, cached!.id);
       if (svnLastModified) recordTaskSpecVersion(taskId, fileUrl, svnLastModified);
       // Clean up temp file
       try { fs.unlinkSync(localPath); } catch { /* ignore */ }
-      return cached.id;
+      return cached!.id;
     }
 
     // New file — save original binary to documents (keep .docx for images support)
-    const buffer = fs.readFileSync(localPath);
     const parsedText = await this.extractText(localPath, filename);
 
     // Prefix filename with [SA] or [SD] so agent can distinguish doc types on disk
@@ -764,8 +803,10 @@ export class SvnSpecService {
    * Strategy: match if filename or any parent directory CONTAINS the code (not just startsWith).
    * Use word-boundary-like matching: code must be preceded by non-alphanumeric or start of string,
    * to avoid "OV02" matching "OV020x" files (but "SPEC_OV02_" is fine).
+   * chineseNames (optional): filename containing the Chinese function name also matches —
+   * fallback when Asana parent has no function code (same behavior as MCP fetch_svn_specs).
    */
-  private findMatchingFiles(allFiles: string[], parentName: string): string[] {
+  private findMatchingFiles(allFiles: string[], parentName: string, chineseNames?: string[]): string[] {
     const code = parentName.toUpperCase();
     // Regex: code preceded by non-alphanumeric (or start) and followed by non-digit (or end)
     // This ensures OV02 matches "SPEC_OV02_xxx" but not "OV020_xxx"
@@ -794,6 +835,14 @@ export class SvnSpecService {
       if (parts.length > 1) {
         const parentDir = parts[0]!;
         if (codePattern.test(parentDir)) {
+          matched.push(file);
+          continue;
+        }
+      }
+
+      // Match: filename contains the Chinese function name (fallback)
+      if (chineseNames && chineseNames.length > 0) {
+        if (chineseNames.some(cn => cn && basename.includes(cn))) {
           matched.push(file);
           continue;
         }

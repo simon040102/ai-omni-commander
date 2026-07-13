@@ -5,6 +5,7 @@ import os from 'node:os';
 import express from 'express';
 import { getConfig, reloadAsanaPat } from './config.js';
 import { getDb } from './db/connection.js';
+import { backupDatabase } from './db/backup.js';
 import { getProject } from './db/queries/projects.js';
 import { EventBus } from './eventbus/EventBus.js';
 import { ContextSync } from './eventbus/ContextSync.js';
@@ -75,6 +76,9 @@ async function main() {
   // 1. Initialize database
   const db = getDb();
   logger.info({ dbPath: config.dbPath }, 'Database initialized');
+
+  // 1b. Auto-backup DB on startup (best-effort — failure never blocks startup)
+  await backupDatabase(db, path.dirname(config.dbPath));
 
   // Migrate existing project paths to recent_paths (one-time on startup)
   migrateProjectPathsToRecent();

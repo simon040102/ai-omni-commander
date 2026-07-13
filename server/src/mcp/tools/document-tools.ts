@@ -17,6 +17,9 @@ import {
   prepareFolder, findSpecFiles, getFileVersion, readSpecFolders, filterSafeSpecFolders,
   type FolderSpecFile, type SpecFolderConfig,
 } from '../../documents/FolderSpecSource.js';
+import {
+  extractChineseNames, decideDedupe, classifyPrepareResult, type ExistingDocInfo,
+} from '../../documents/SpecFetchPolicy.js';
 
 interface DocumentRow {
   id: string;
@@ -324,21 +327,18 @@ export function registerDocumentTools(server: McpServer): void {
       }
 
       // Extract Chinese names for fallback matching (e.g. "收文單" from "收文單_前端" or "DF01_收文單")
-      // — shared by both SVN and folder matching
-      const chineseNames: string[] = [];
-      {
-        const cnSearchText = task.parent_name || task.title;
-        const cnMatch = cnSearchText.replace(/^[A-Za-z0-9]+[_\s]*/g, '').replace(/[_\s]*(前端|後端|串接)$/g, '');
-        if (cnMatch && /[一-鿿]/.test(cnMatch)) chineseNames.push(cnMatch);
-        if (task.title) {
-          const titleCn = task.title.replace(/^[A-Za-z0-9]+[_\s]*/g, '').replace(/[_\s]*(前端|後端|串接)$/g, '');
-          if (titleCn && /[一-鿿]/.test(titleCn) && !chineseNames.includes(titleCn)) chineseNames.push(titleCn);
-        }
-      }
+      // — shared policy function, same behavior as the Web-side SvnSpecService
+      const chineseNames = extractChineseNames(task.parent_name, task.title);
 
       // Detect svn binary and NTLM mode
       const svnPath = detectSvnBinary();
       let ntlmMode = false;
+
+      // Issue buckets（與 Web 端 SvnSpecService 同分級）：
+      // errors = 來源完全不可用（資料夾不存在／掃描失敗／檔案處理失敗）；
+      // warnings = best-effort 仍繼續（pull 失敗／dirty／重疊被跳過）。
+      const sourceErrors: string[] = [];
+      const sourceWarnings: string[] = [...folderGuardWarnings];
 
       // 6. Search SVN for matching files
       const frontendRoot = svnConfig.frontendSpecPath ? normalizeSvnUrl(svnConfig.frontendSpecPath) : null;
@@ -388,8 +388,9 @@ export function registerDocumentTools(server: McpServer): void {
             const encodedFile = file.replace(/[^\x00-\x7F]/g, c => encodeURIComponent(c));
             allMatchedFiles.push({ fileUrl: `${searchUrl}/${encodedFile}`, isFrontendRoot });
           }
-        } catch {
-          // Skip failed SVN roots
+        } catch (err) {
+          // Root unusable → error-level（與 Web 端 fetchSpecsForTask 的 errors 一致）
+          sourceErrors.push(`${svnRoot}: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
 
@@ -402,7 +403,6 @@ export function registerDocumentTools(server: McpServer): void {
       fs.mkdirSync(targetDir, { recursive: true });
 
       const results: Array<{ docType: string; filename: string; mdPath?: string; source: 'svn' | 'folder' }> = [];
-      const sourceWarnings: string[] = [...folderGuardWarnings];
 
       for (const { fileUrl, isFrontendRoot } of allMatchedFiles) {
         try {
@@ -413,6 +413,9 @@ export function registerDocumentTools(server: McpServer): void {
           const existing = db.prepare(
             "SELECT id, file_path, svn_last_modified, content_hash FROM documents WHERE project_id = ? AND source_url = ?"
           ).get(projectId, fileUrl) as { id: string; file_path: string; svn_last_modified: string | null; content_hash: string | null } | undefined;
+          const existingInfo: ExistingDocInfo | null = existing
+            ? { version: existing.svn_last_modified, contentHash: existing.content_hash, fileExists: fs.existsSync(existing.file_path) }
+            : null;
 
           // Step 1: Check SVN last modified date (no download needed)
           let svnLastModified: string | null = null;
@@ -429,11 +432,11 @@ export function registerDocumentTools(server: McpServer): void {
             `).run(taskId, fileUrl, svnLastModified);
           };
 
-          // If cached, date unchanged, and file exists → skip (no download)
-          if (existing && svnLastModified && existing.svn_last_modified === svnLastModified && fs.existsSync(existing.file_path)) {
+          // Stage 1 dedupe — date unchanged and file exists → skip (no download)
+          if (decideDedupe(existingInfo, svnLastModified, null) === 'skip') {
             db.prepare(
               'INSERT OR IGNORE INTO task_documents (task_id, document_id) VALUES (?, ?)'
-            ).run(taskId, existing.id);
+            ).run(taskId, existing!.id);
             recordSpecVersion();
             results.push({ docType, filename, source: 'svn' });
             continue;
@@ -445,55 +448,57 @@ export function registerDocumentTools(server: McpServer): void {
           svnExport(svnPath, fileUrl, tempPath, credentials, ntlmMode);
 
           if (!fs.existsSync(tempPath)) {
+            sourceErrors.push(`${filename}: SVN export 未產生檔案`);
             continue;
           }
 
           const buffer = fs.readFileSync(tempPath);
           const newHash = createHash('sha256').update(buffer).digest('hex');
+          const decision = decideDedupe(existingInfo, svnLastModified, newHash);
 
-          // Step 3: Compare hash — if content identical, just update date and bind
-          if (existing && existing.content_hash === newHash && fs.existsSync(existing.file_path)) {
+          // Stage 2 dedupe — content identical → just update date and bind
+          if (decision === 'bump_version') {
             db.prepare(
               "UPDATE documents SET svn_last_modified = ? WHERE id = ?"
-            ).run(svnLastModified || '', existing.id);
+            ).run(svnLastModified || '', existing!.id);
             db.prepare(
               'INSERT OR IGNORE INTO task_documents (task_id, document_id) VALUES (?, ?)'
-            ).run(taskId, existing.id);
+            ).run(taskId, existing!.id);
             recordSpecVersion();
             try { fs.unlinkSync(tempPath); } catch { /* ignore */ }
             results.push({ docType, filename, source: 'svn' });
             continue;
           }
 
-          // Step 4: Content changed or new → process file
-          if (existing) {
-            fs.writeFileSync(existing.file_path, buffer);
+          // Content changed or cached file missing → overwrite existing document
+          if (decision === 'update') {
+            fs.writeFileSync(existing!.file_path, buffer);
 
             let parsedText: string;
             if (filename.toLowerCase().endsWith('.docx')) {
               try {
-                const mdPath = await convertDocxToMarkdown(buffer, existing.id, targetDir, filename);
+                const mdPath = await convertDocxToMarkdown(buffer, existing!.id, targetDir, filename);
                 parsedText = `[Document saved at: ${mdPath.replace(/\\/g, '/')}]`;
                 results.push({ docType, filename, mdPath, source: 'svn' });
               } catch {
-                parsedText = `[DOCX file saved at: ${existing.file_path}]`;
+                parsedText = `[DOCX file saved at: ${existing!.file_path}]`;
                 results.push({ docType, filename, source: 'svn' });
               }
             } else if (filename.toLowerCase().endsWith('.pdf')) {
-              parsedText = `[PDF file - use Read tool to view: ${existing.file_path}]`;
+              parsedText = `[PDF file - use Read tool to view: ${existing!.file_path}]`;
               results.push({ docType, filename, source: 'svn' });
             } else {
-              parsedText = fs.readFileSync(existing.file_path, 'utf-8');
+              parsedText = fs.readFileSync(existing!.file_path, 'utf-8');
               results.push({ docType, filename, source: 'svn' });
             }
 
             db.prepare(
               "UPDATE documents SET svn_last_modified = ?, content_hash = ?, parsed_text = ?, created_at = datetime('now') WHERE id = ?"
-            ).run(svnLastModified || '', newHash, parsedText, existing.id);
+            ).run(svnLastModified || '', newHash, parsedText, existing!.id);
 
             db.prepare(
               'INSERT OR IGNORE INTO task_documents (task_id, document_id) VALUES (?, ?)'
-            ).run(taskId, existing.id);
+            ).run(taskId, existing!.id);
             recordSpecVersion();
 
             try { fs.unlinkSync(tempPath); } catch { /* ignore */ }
@@ -538,17 +543,21 @@ export function registerDocumentTools(server: McpServer): void {
           recordSpecVersion();
 
           try { fs.unlinkSync(tempPath); } catch { /* ignore */ }
-        } catch {
-          // Skip failed files
+        } catch (err) {
+          // File-level failure → error-level（與 Web 端一致）
+          const filename = decodeURIComponent(fileUrl.split('/').pop() || fileUrl);
+          sourceErrors.push(`${filename}: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
 
       // 7b. Local spec folders（與 SVN 並存）— prepare (safe git pull --ff-only) → match → copy/convert
       for (const folder of specFolders) {
         const prep = await prepareFolder(folder);
-        sourceWarnings.push(...prep.warnings.map(w => `${folder.path}: ${w}`));
+        // 統一歸類（與 Web 端一致）：資料夾完全不可用 → error；pull 失敗/dirty → warning
+        const issues = classifyPrepareResult(folder.path, prep);
+        sourceWarnings.push(...issues.warnings);
         if (!prep.ok) {
-          sourceWarnings.push(prep.error || `規格資料夾無法使用：${folder.path}`);
+          sourceErrors.push(...issues.errors);
           continue;
         }
 
@@ -556,7 +565,7 @@ export function registerDocumentTools(server: McpServer): void {
         try {
           folderFiles = findSpecFiles(folder.path, functionCode, chineseNames);
         } catch (err) {
-          sourceWarnings.push(`${folder.path}: 掃描失敗：${err instanceof Error ? err.message : String(err)}`);
+          sourceErrors.push(`${folder.path}: 掃描失敗：${err instanceof Error ? err.message : String(err)}`);
           continue;
         }
 
@@ -577,10 +586,13 @@ export function registerDocumentTools(server: McpServer): void {
             const existing = db.prepare(
               'SELECT id, file_path, svn_last_modified, content_hash FROM documents WHERE project_id = ? AND source_url = ?'
             ).get(projectId, fileRef) as { id: string; file_path: string; svn_last_modified: string | null; content_hash: string | null } | undefined;
+            const existingInfo: ExistingDocInfo | null = existing
+              ? { version: existing.svn_last_modified, contentHash: existing.content_hash, fileExists: fs.existsSync(existing.file_path) }
+              : null;
 
-            // Dedupe: same file + same version → just bind
-            if (existing && existing.svn_last_modified === version && fs.existsSync(existing.file_path)) {
-              db.prepare('INSERT OR IGNORE INTO task_documents (task_id, document_id) VALUES (?, ?)').run(taskId, existing.id);
+            // Stage 1 dedupe — same file + same version → just bind (no read)
+            if (decideDedupe(existingInfo, version, null) === 'skip') {
+              db.prepare('INSERT OR IGNORE INTO task_documents (task_id, document_id) VALUES (?, ?)').run(taskId, existing!.id);
               recordSpecVersion();
               results.push({ docType, filename, source: 'folder' });
               continue;
@@ -588,24 +600,25 @@ export function registerDocumentTools(server: McpServer): void {
 
             const buffer = fs.readFileSync(file.filePath);
             const newHash = createHash('sha256').update(buffer).digest('hex');
+            const decision = decideDedupe(existingInfo, version, newHash);
 
-            // Content identical → just refresh version and bind
-            if (existing && existing.content_hash === newHash && fs.existsSync(existing.file_path)) {
-              db.prepare('UPDATE documents SET svn_last_modified = ? WHERE id = ?').run(version, existing.id);
-              db.prepare('INSERT OR IGNORE INTO task_documents (task_id, document_id) VALUES (?, ?)').run(taskId, existing.id);
+            // Stage 2 dedupe — content identical → just refresh version and bind
+            if (decision === 'bump_version') {
+              db.prepare('UPDATE documents SET svn_last_modified = ? WHERE id = ?').run(version, existing!.id);
+              db.prepare('INSERT OR IGNORE INTO task_documents (task_id, document_id) VALUES (?, ?)').run(taskId, existing!.id);
               recordSpecVersion();
               results.push({ docType, filename, source: 'folder' });
               continue;
             }
 
-            if (existing) {
-              // Content changed → overwrite cached copy and re-parse
-              fs.writeFileSync(existing.file_path, buffer);
-              const parsed = await buildFolderParsedText(buffer, existing.id, targetDir, filename, existing.file_path);
+            if (decision === 'update') {
+              // Content changed or cached copy missing → overwrite and re-parse
+              fs.writeFileSync(existing!.file_path, buffer);
+              const parsed = await buildFolderParsedText(buffer, existing!.id, targetDir, filename, existing!.file_path);
               db.prepare(
                 "UPDATE documents SET svn_last_modified = ?, content_hash = ?, parsed_text = ?, created_at = datetime('now') WHERE id = ?"
-              ).run(version, newHash, parsed.parsedText, existing.id);
-              db.prepare('INSERT OR IGNORE INTO task_documents (task_id, document_id) VALUES (?, ?)').run(taskId, existing.id);
+              ).run(version, newHash, parsed.parsedText, existing!.id);
+              db.prepare('INSERT OR IGNORE INTO task_documents (task_id, document_id) VALUES (?, ?)').run(taskId, existing!.id);
               recordSpecVersion();
               results.push({ docType, filename, ...(parsed.mdPath && { mdPath: parsed.mdPath }), source: 'folder' });
               continue;
@@ -627,20 +640,25 @@ export function registerDocumentTools(server: McpServer): void {
             recordSpecVersion();
             results.push({ docType, filename, ...(parsed.mdPath && { mdPath: parsed.mdPath }), source: 'folder' });
           } catch (err) {
-            sourceWarnings.push(`${file.relPath}: ${err instanceof Error ? err.message : String(err)}`);
+            // File-level failure → error-level（與 Web 端一致）
+            sourceErrors.push(`${file.relPath}: ${err instanceof Error ? err.message : String(err)}`);
           }
         }
       }
 
-      // 8. Format result
+      // 8. Format result — 兩級呈現：Errors（來源不可用/檔案失敗）與 Warnings（best-effort 繼續）
+      const errorBlock = sourceErrors.length > 0
+        ? `\n\nErrors:\n${sourceErrors.map(e => `- ✖ ${e}`).join('\n')}`
+        : '';
       const warningBlock = sourceWarnings.length > 0
         ? `\n\nWarnings:\n${sourceWarnings.map(w => `- ⚠ ${w}`).join('\n')}`
         : '';
+      const issueBlock = errorBlock + warningBlock;
 
       if (results.length === 0) {
         if (allMatchedFiles.length > 0) {
           return {
-            content: [{ type: 'text' as const, text: `Found ${allMatchedFiles.length} matching files in SVN but all failed to download.${warningBlock}` }],
+            content: [{ type: 'text' as const, text: `Found ${allMatchedFiles.length} matching files in SVN but all failed to download.${issueBlock}` }],
             isError: true,
           };
         }
@@ -648,8 +666,8 @@ export function registerDocumentTools(server: McpServer): void {
         if (svnRoots.length > 0) searched.push(`SVN roots: ${svnRoots.join(', ')}`);
         if (specFolders.length > 0) searched.push(`Spec folders: ${specFolders.map(f => f.path).join(', ')}`);
         return {
-          content: [{ type: 'text' as const, text: `No spec files found for "${functionCode}" (rootCode: ${rootCode}).\nSearched ${searched.join(' | ')}${warningBlock}` }],
-          ...(sourceWarnings.length > 0 && { isError: true }),
+          content: [{ type: 'text' as const, text: `No spec files found for "${functionCode}" (rootCode: ${rootCode}).\nSearched ${searched.join(' | ')}${issueBlock}` }],
+          ...((sourceErrors.length > 0 || sourceWarnings.length > 0) && { isError: true }),
         };
       }
 
@@ -661,7 +679,7 @@ export function registerDocumentTools(server: McpServer): void {
       return {
         content: [{
           type: 'text' as const,
-          text: `Found ${results.length} spec files for ${functionCode}:\n${lines.join('\n')}\n\nFiles saved to ${targetDir.replace(/\\/g, '/')}${warningBlock}`,
+          text: `Found ${results.length} spec files for ${functionCode}:\n${lines.join('\n')}\n\nFiles saved to ${targetDir.replace(/\\/g, '/')}${issueBlock}`,
         }],
       };
     },

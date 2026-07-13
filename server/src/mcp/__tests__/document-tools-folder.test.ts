@@ -139,14 +139,67 @@ describe('fetch_svn_specs — folder source', () => {
     expect(result.content[0].text).toContain('no spec sources configured');
   });
 
-  it('folder does not exist → warning surfaced, marked as error when nothing was found', async () => {
+  it('folder does not exist → classified as error-level (Errors section), isError when nothing found', async () => {
     seedProjectWithFolders(testDb, 'proj-f5', [{ path: path.join(tmpBase, 'missing-folder'), gitPull: true }]);
     seedTask(testDb, 'task-f5', 'proj-f5', 'WA05');
 
     const result = await callTool(server, 'fetch_svn_specs', { projectId: 'proj-f5', taskId: 'task-f5' });
     expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain('Warnings:');
-    expect(result.content[0].text).toContain('不存在');
+    const text = result.content[0].text as string;
+    // 完全不可用的資料夾 → Errors 區塊（與 Web 端 errors 同級），不是 Warnings
+    expect(text).toContain('Errors:');
+    expect(text).toContain('不存在');
+    expect(text).not.toContain('Warnings:');
+  });
+
+  it('matches by Chinese-name fallback when the filename has no function code (aligned with Web side)', async () => {
+    const cnDir = path.join(tmpBase, 'cn-specs');
+    fs.mkdirSync(cnDir, { recursive: true });
+    fs.writeFileSync(path.join(cnDir, '收文單作業規格.md'), '# 收文單規格', 'utf-8');
+
+    seedProjectWithFolders(testDb, 'proj-f7', [{ path: cnDir, gitPull: false }]);
+    testDb.prepare(`INSERT INTO tasks (id, project_id, title, label, task_type, parent_name) VALUES (?, ?, ?, ?, ?, ?)`).run(
+      'task-f7', 'proj-f7', 'DF01_收文單_前端', 'frontend', 'feature', 'DF01_收文單',
+    );
+
+    const result = await callTool(server, 'fetch_svn_specs', { projectId: 'proj-f7', taskId: 'task-f7' });
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0].text).toContain('收文單作業規格.md');
+
+    const doc = testDb.prepare("SELECT * FROM documents WHERE project_id = 'proj-f7'").get() as any;
+    expect(doc).toBeTruthy();
+    expect(doc.source).toBe('folder');
+  });
+
+  it('content unchanged but mtime changed → bump_version: one row, version refreshed (aligned with Web side)', async () => {
+    const bumpDir = path.join(tmpBase, 'bump-specs');
+    fs.mkdirSync(bumpDir, { recursive: true });
+    const bumpFile = path.join(bumpDir, 'SPEC_WA07_列印作業.md');
+    fs.writeFileSync(bumpFile, '# WA07 規格', 'utf-8');
+
+    seedProjectWithFolders(testDb, 'proj-f8', [{ path: bumpDir, gitPull: false }]);
+    seedTask(testDb, 'task-f8', 'proj-f8', 'WA07');
+
+    await callTool(server, 'fetch_svn_specs', { projectId: 'proj-f8', taskId: 'task-f8' });
+    const before = testDb.prepare("SELECT id, svn_last_modified, parsed_text FROM documents WHERE project_id = 'proj-f8'").get() as any;
+
+    // Touch mtime only — content identical
+    const future = new Date(Date.now() + 60_000);
+    fs.utimesSync(bumpFile, future, future);
+    const newVersion = fs.statSync(bumpFile).mtime.toISOString();
+    expect(newVersion).not.toBe(before.svn_last_modified);
+
+    const result2 = await callTool(server, 'fetch_svn_specs', { projectId: 'proj-f8', taskId: 'task-f8' });
+    expect(result2.isError).toBeUndefined();
+
+    const rows = testDb.prepare("SELECT id, svn_last_modified, parsed_text FROM documents WHERE project_id = 'proj-f8'").all() as any[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe(before.id);                  // same document (no re-insert)
+    expect(rows[0].svn_last_modified).toBe(newVersion);  // version bumped
+    expect(rows[0].parsed_text).toBe(before.parsed_text); // content untouched
+
+    const tsv = testDb.prepare("SELECT last_modified FROM task_spec_versions WHERE task_id = 'task-f8'").get() as any;
+    expect(tsv.last_modified).toBe(newVersion);
   });
 
   it('no matching files for the function code → "No spec files found" listing spec folders', async () => {
