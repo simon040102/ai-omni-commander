@@ -82,7 +82,7 @@ export function registerDbTools(server: McpServer): void {
     '查詢專案綁定的外部資料庫。可列出所有表、查表結構、或執行唯讀 SELECT。建議連線帳號本身設為唯讀（db_datareader），程式面的 SELECT 檢查僅為輔助防線。',
     {
       projectId: z.string().describe('專案 ID'),
-      connectionLabel: z.string().describe('DB 連線標籤（如 TYL_DOC、NaNa）'),
+      connectionLabel: z.string().describe('DB 連線標籤（專案設定 dbConnections 裡的 label）'),
       action: z.enum(['list_tables', 'describe_table', 'select']).describe('操作類型'),
       tableName: z.string().optional().describe('表名（describe_table 時必填）'),
       sql: z.string().optional().describe('SELECT SQL（select 時必填，只允許單一 SELECT 敘述）'),

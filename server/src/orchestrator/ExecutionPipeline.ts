@@ -32,27 +32,29 @@ const logger = createChildLogger('ExecutionPipeline');
 export type ExecutionTrack = 'light' | 'full';
 
 /**
- * 效能分析（後端限定，強制）— 逐字取自專案 CLAUDE.md「#### 2b. 後端 subagent 必須先做效能分析」。
+ * 效能分析（後端限定，強制）— 通用版（stack 中性）。
+ * 專案特有的技術棧慣例（如特定 legacy 表、ORM 類別名）放在該專案的
+ * backendExtraPrompt / 專案筆記，會自動注入，不寫死在這裡。
  */
 const BACKEND_PERFORMANCE_SECTION = `## 效能分析（強制 — 寫 code 之前必須完成，用 report_output 記錄）
 
-寫任何 Service 方法前，先完成以下分析：
+寫任何資料存取邏輯前，先完成以下分析：
 
 1. 列出涉及的所有資料表 + 估計資料量（不知道就問使用者）
-2. 對每個 DB 查詢寫出 WHERE 條件（對應 SD 的哪條規則）+ 預期回傳筆數
+2. 對每個 DB 查詢寫出過濾條件（對應 SD 的哪條規則）+ 預期回傳筆數
 3. 寫完後檢查每個迴圈裡有沒有 DB 查詢（N+1 問題）
-4. 從 Controller 到 DB 走一遍完整資料流：總共打幾次 DB？最大查詢回幾筆？
+4. 從進入點到 DB 走一遍完整資料流：總共打幾次 DB？最大查詢回幾筆？
 
-⚠ 禁止 findAll() + Java 記憶體過濾。Legacy 表（NaNa）可能有幾十萬筆。`;
+⚠ 禁止「撈全表回程式記憶體再過濾」——過濾/分頁一律下推到查詢層。Legacy 大表可能有數十萬筆。`;
 
 /**
- * 安全弱點檢查（後端限定）— 逐字取自專案 CLAUDE.md「#### 2c. 安全弱點檢查」。
+ * 安全弱點檢查（後端限定）— 通用版（stack 中性）。
  */
 const BACKEND_SECURITY_SECTION = `## 安全檢查（完成實作後逐項確認）
 
-- SQL 參數用 @Param 綁定，禁止字串拼接
+- SQL 一律參數綁定（prepared statement / ORM 參數），禁止字串拼接
 - API 驗證當前使用者只能操作自己的資料
-- Controller 參數有長度限制和格式驗證
+- 進入點參數有長度限制和格式驗證
 - response 不回傳密碼、token、內部 ID
 - 批次操作有上限（如一次最多 100 筆）
 - log 不印密碼、token、個資`;
@@ -1191,10 +1193,10 @@ ${this.buildCompletionCriteria(role, testOptions, reportTaskId ?? realTaskId, ta
 具體規則：
 1. 欄位名稱、按鈕文字、訊息文字 → 必須從 SA/SD 文件逐字抄，不可以自己翻譯或改寫
 2. API 路徑、參數名、型別 → 必須從 SD 文件抄，不可以自己命名
-3. SQL 欄位名 → 必須從 DB schema 或 Entity @Column 確認，不可以猜
+3. SQL 欄位名 → 必須從 DB schema 或 ORM 欄位定義（Entity/Model 對應）確認，不可以猜
 4. UI 元件選擇（checkbox/radio/select）→ 必須從 SA 或 Axure 確認，不可以自己決定
 5. 查詢邏輯（WHERE 條件、JOIN、排序）→ 必須照 SD 規格的 SQL/規則實作，不可以簡化或替代
-6. DDL 欄位 → 必須讀 Entity 的 @Column name + MetaData.java 確認，不可以猜
+6. DDL 欄位 → 必須與 ORM/模型定義逐欄對照確認（含系統共用欄位，如建立/修改時間），不可以猜
 
 如果規格不清楚、未定義或有矛盾：
 - 呼叫 mcp__omni-commander__report_spec_gap(${tidComma}category=..., description=...) 記錄缺口（category: sa_missing/sd_missing/field_undefined/api_undefined/logic_unclear/other）

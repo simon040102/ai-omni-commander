@@ -341,16 +341,20 @@ describe('ExecutionPipeline', () => {
       expect(plan.prompt).toContain('mcp__omni-commander__report_verification_evidence(taskId="t-fe", filePath=...)');
     });
 
-    it('backend plan 含效能分析 + 安全檢查 + findAll 禁令 + 驗收工具接線', async () => {
+    it('backend plan 含效能分析 + 安全檢查 + 撈全表禁令（stack 中性） + 驗收工具接線', async () => {
       createTask('p-be', 't-be', 'backend', 'feature');
 
       const plan = await pipeline.buildExecutionPlan('t-be');
 
       expect(plan.prompt).toContain('## 效能分析（強制 — 寫 code 之前必須完成，用 report_output 記錄）');
       expect(plan.prompt).toContain('N+1 問題');
-      expect(plan.prompt).toContain('⚠ 禁止 findAll() + Java 記憶體過濾');
+      expect(plan.prompt).toContain('⚠ 禁止「撈全表回程式記憶體再過濾」');
       expect(plan.prompt).toContain('## 安全檢查（完成實作後逐項確認）');
-      expect(plan.prompt).toContain('SQL 參數用 @Param 綁定，禁止字串拼接');
+      expect(plan.prompt).toContain('SQL 一律參數綁定（prepared statement / ORM 參數），禁止字串拼接');
+      // stack 中性：通用注入不得含特定專案/技術棧的寫死內容
+      expect(plan.prompt).not.toContain('NaNa');
+      expect(plan.prompt).not.toContain('MetaData.java');
+      expect(plan.prompt).not.toContain('findAll');
       expect(plan.prompt).toContain('mcp__omni-commander__get_verification_plan(taskId="t-be")');
       expect(plan.prompt).toContain('mcp__omni-commander__report_verification_result(taskId="t-be", results=[...])');
       expect(plan.prompt).toContain('mcp__omni-commander__report_verification_evidence(taskId="t-be", filePath=...)');
@@ -374,7 +378,7 @@ describe('ExecutionPipeline', () => {
 
       expect(plan.prompt).not.toContain('## 效能分析');
       expect(plan.prompt).not.toContain('## 安全檢查');
-      expect(plan.prompt).not.toContain('禁止 findAll()');
+      expect(plan.prompt).not.toContain('撈全表回程式記憶體再過濾');
     });
 
     it('非 bug 任務策略不含取得 BUG 現場步驟', async () => {

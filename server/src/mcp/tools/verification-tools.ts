@@ -3,8 +3,9 @@
  * get_verification_plan, report_verification_result, report_verification_evidence
  *
  * Checklist content mirrors CLAUDE.md「subagent 完成後的 orchestrator 驗證」:
- * backend = grep findAll / DDL 比對 / API 煙霧測試 / seed SQL 檢查;
+ * backend = 撈全表靜態檢查 / DDL 比對 / API 煙霧測試 / seed SQL 檢查;
  * frontend = tsc --noEmit / Playwright 瀏覽器測試; fullstack = both.
+ * 通用（stack 中性）——專案特有慣例走 extraPrompt / 專案筆記，不寫死在此。
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
@@ -24,13 +25,13 @@ export interface VerificationItem {
 const BACKEND_ITEMS: VerificationItem[] = [
   {
     id: 'be-no-findall',
-    item: '靜態檢查：ServiceImpl 沒有 findAll()',
-    how: 'grep 所有本次修改的 ServiceImpl，確認沒有 findAll() + Java 記憶體過濾（Legacy 表可能有幾十萬筆）',
+    item: '靜態檢查：沒有「撈全表 + 記憶體過濾」的查詢',
+    how: 'grep 本次修改的資料存取層，確認沒有先撈整張表回來再用程式過濾的寫法（Legacy 大表可能有數十萬筆）——過濾/分頁必須下推到查詢層。專案技術棧的具體禁用寫法見專案額外指示/專案筆記',
   },
   {
     id: 'be-ddl-match',
-    item: 'DDL 比對：CREATE TABLE 欄位名與 Entity @Column name 一致',
-    how: '逐欄比對 DDL 與 Entity @Column name，特別是 MetaData 的 CREATE_DATE / MODIFY_DATE / DATA_REMARK',
+    item: 'DDL 比對：CREATE TABLE 欄位名與 ORM/模型定義一致',
+    how: '逐欄比對 DDL 與 ORM 欄位定義（Entity/Model 對應），含系統共用欄位（如建立/修改時間、備註欄）——共用欄位的確切名稱以專案慣例為準',
   },
   {
     id: 'be-api-smoke',
@@ -78,7 +79,7 @@ export function registerVerificationTools(server: McpServer): void {
   // ── get_verification_plan ─────────────────────────────────
   server.tool(
     'get_verification_plan',
-    '取得任務的驗收清單（依 task label 決定：backend=grep findAll/DDL 比對/API 煙霧測試/seed SQL；frontend=tsc --noEmit/Playwright；fullstack=兩者）。**標記 completed 之前必須逐項執行並用 report_verification_result 回報結果。**',
+    '取得任務的驗收清單（依 task label 決定：backend=撈全表靜態檢查/DDL 比對/API 煙霧測試/seed SQL；frontend=tsc --noEmit/Playwright；fullstack=兩者）。**標記 completed 之前必須逐項執行並用 report_verification_result 回報結果。**',
     {
       taskId: z.string().describe('任務 ID'),
     },

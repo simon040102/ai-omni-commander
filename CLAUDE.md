@@ -115,8 +115,10 @@ A dual-mode AI collaborative development system. Originally orchestrated multipl
 以下規範全文已由 `get_execution_plan` 自動注入 subagent prompt（真相來源：`server/src/orchestrator/ExecutionPipeline.ts` 的 buildTaskPrompt 系列）：
 - **規格文件閱讀**（所有 role）：逐項完整讀 SA/SD/Axure，report_output 摘要理解重點
 - **規格遵循最高原則**（所有 role）：規格沒寫的不做、規格寫的照做；不確定就 report_spec_gap / [NEEDS_CLARIFICATION]
-- **後端效能分析**（backend role）：寫 code 前分析資料表/WHERE/N+1/資料流，禁 findAll()
-- **後端安全檢查**（backend role）：@Param 綁定、權限驗證、參數驗證、response/log 不外洩
+- **後端效能分析**（backend role）：寫 code 前分析資料表/過濾條件/N+1/資料流，禁「撈全表 + 記憶體過濾」
+- **後端安全檢查**（backend role）：SQL 參數綁定、權限驗證、參數驗證、response/log 不外洩
+
+> 注入內容為 **stack 中性通用版**。專案特有的技術棧慣例（如富邦系的 NaNa 大表禁 findAll()、MetaData.java 的 CREATE_DATE/MODIFY_DATE/DATA_REMARK 欄位）放在各專案的 `backendExtraPrompt` / 專案筆記，會自動注入，不寫死在通用工具。
 
 **⚠ 嚴禁在 prompt 中手動摘要規格內容。** prompt 只放規格文件的完整路徑，讓 subagent 自己用 Read tool 讀取原始文件。手動摘要容易打錯字或遺漏細節（如「儲存」寫成「存儲」），subagent 會照著錯的摘要實作而不會核對原始文件。
 
@@ -193,8 +195,8 @@ subagent 回報完成後，**我（orchestrator）必須自己驗證**，不能�
 0b. **AI 回對（完成閘門依據）**：`get_compliance_review_plan(taskId)` 取得派工計畫 → 派**獨立的 AI 審查 subagent**（絕不可由寫 code 的 implementer 自評）讀規格原文 + checklist + 實際程式碼逐項判定（含 logic 項目，matched 必附 file+line 證據）→ `save_compliance_review` 寫回。**最新 AI 回對 missing=0 才可標 completed**；missing>0 → 交回 implementer 修正後重新派 AI 回對
 
 #### 後端任務
-1. **靜態檢查**：grep ServiceImpl 有沒有 `findAll()`
-2. **DDL 比對**：確認 CREATE TABLE 欄位名與 Entity @Column name 一致（特別是 MetaData 的 CREATE_DATE / MODIFY_DATE / DATA_REMARK）
+1. **靜態檢查**：grep 資料存取層有沒有「撈全表 + 記憶體過濾」的查詢（專案技術棧的具體禁用寫法見該專案 extraPrompt / 專案筆記）
+2. **DDL 比對**：確認 CREATE TABLE 欄位名與 ORM/模型定義逐欄一致（含系統共用欄位，如建立/修改時間——確切欄位名以專案慣例為準）
 3. **API 煙霧測試**：啟動服務後 curl 每個新 API，確認回 200 不是 500
 4. **seed SQL 檢查**：確認 INSERT 欄位數量與 VALUES 參數數量一致
 
