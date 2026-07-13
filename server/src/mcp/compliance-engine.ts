@@ -47,6 +47,8 @@ export interface ItemResult {
   status: ComplianceStatus;
   evidence?: Evidence[];
   note?: string;
+  /** 引擎 × AI 分歧偵測：只出現在 ai_review run，且只在最新 engine run 對同一項的判定與 AI 相反時才有值 */
+  engineStatus?: 'matched' | 'missing';
 }
 
 export interface ComplianceSummary {
@@ -148,12 +150,18 @@ function matchSubstring(files: ScannedFile[], text: string): Evidence[] {
   return evidence;
 }
 
+/** 識別字比對器：有 \w 字元用 word-boundary，純 CJK（無 \w 字元、\b 永遠不成立）
+ *  退回 substring 比對。與 matchIdentifier 同一套規則，export 供證據驗證重用。 */
+export function makeIdentifierTester(ident: string): (s: string) => boolean {
+  const hasWordChars = /[A-Za-z0-9_]/.test(ident);
+  const re = hasWordChars ? new RegExp(`\\b${escapeRegex(ident)}\\b`) : null;
+  return (s: string): boolean => (re ? re.test(s) : s.includes(ident));
+}
+
 /** word-boundary 識別字搜尋（識別字含底線，\b 對 _ 有效）。回傳所有命中（供 db_field 排序用）。
  *  content 不含任何 \w 字元（如純中文）時 \b 永遠不成立，退回 substring 比對避免系統性 missing。 */
 function matchIdentifier(files: ScannedFile[], ident: string, maxHits = 50): Evidence[] {
-  const hasWordChars = /[A-Za-z0-9_]/.test(ident);
-  const re = hasWordChars ? new RegExp(`\\b${escapeRegex(ident)}\\b`) : null;
-  const hit = (s: string): boolean => (re ? re.test(s) : s.includes(ident));
+  const hit = makeIdentifierTester(ident);
   const evidence: Evidence[] = [];
   for (const f of files) {
     if (!hit(f.content)) continue;

@@ -43,6 +43,8 @@ interface RunItemResult {
   status: 'matched' | 'missing' | 'manual' | 'waived';
   evidence?: Array<{ file: string; line: number }>;
   note?: string;
+  /** 只在 AI 回對與最新程式預檢判定相反時出現（引擎的判定） */
+  engineStatus?: 'matched' | 'missing';
 }
 
 interface TaskDetail {
@@ -239,7 +241,15 @@ export function SpecCompliancePanel({ taskSummaries, loading, error, refetch }: 
                             : r?.note || '';
                           return (
                             <tr key={item.id} className="border-t border-border/40 align-top">
-                              <td className="py-1.5 px-2 text-center">{statusBadge(status)}</td>
+                              <td className="py-1.5 px-2 text-center whitespace-nowrap">
+                                {statusBadge(status)}
+                                {r?.engineStatus && (
+                                  <span
+                                    className="text-amber-400 ml-0.5 cursor-help"
+                                    title={`與程式預檢結果分歧（程式預檢=${r.engineStatus === 'matched' ? '符合' : '缺少'}）——抽查優先靶點`}
+                                  >⚡</span>
+                                )}
+                              </td>
                               <td className="py-1.5 px-2 whitespace-nowrap text-muted-foreground">
                                 {TYPE_LABELS[item.itemType] || item.itemType}
                               </td>

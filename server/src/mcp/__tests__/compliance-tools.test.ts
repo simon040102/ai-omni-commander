@@ -48,6 +48,12 @@ beforeAll(() => {
   feRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'omni-comp-tools-'));
   fs.mkdirSync(path.join(feRoot, 'src'), { recursive: true });
   fs.writeFileSync(path.join(feRoot, 'src', 'Index.tsx'), '<h1>代理人設定作業</h1>\n', 'utf-8');
+  // 40 行檔案：目標文字只在第 1 行——證據引用遠處行會超出 ±10 相關性窗口
+  fs.writeFileSync(
+    path.join(feRoot, 'src', 'Long.tsx'),
+    ['// 窗口測試目標文字', ...Array.from({ length: 39 }, (_, i) => `const filler_${i} = ${i};`)].join('\n'),
+    'utf-8',
+  );
 });
 
 afterAll(() => {
@@ -108,6 +114,41 @@ describe('compliance-tools', () => {
       const result = await callTool(server, 'save_spec_checklist', { taskId: 'task-1', items });
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('200');
+    });
+
+    it('replace=true after an ai_review run exists → [CHECKLIST_REPLACE] audit trail + response warning', async () => {
+      seedProject(testDb);
+      seedTask(testDb);
+      await callTool(server, 'save_spec_checklist', { taskId: 'task-1', items: [UI_ITEM, MISSING_ITEM] });
+      // 手造一筆 ai_review run（模擬已完成過 AI 回對）
+      testDb.prepare(`
+        INSERT INTO spec_compliance_runs (id, task_id, total, matched, missing, manual, waived, results_json, source)
+        VALUES ('run-air', 'task-1', 2, 2, 0, 0, 0, '[]', 'ai_review')
+      `).run();
+
+      const result = await callTool(server, 'save_spec_checklist', {
+        taskId: 'task-1', items: [{ itemType: 'ui_text', content: '縮水後的唯一項' }], replace: true,
+      });
+
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).toContain('[CHECKLIST_REPLACE]');
+      const audit = testDb.prepare("SELECT content FROM agent_outputs WHERE task_id = 'task-1' AND content LIKE '[CHECKLIST_REPLACE]%'").all() as Array<{ content: string }>;
+      expect(audit).toHaveLength(1);
+      expect(audit[0].content).toContain('移除 2 筆');
+    });
+
+    it('replace=true without any ai_review run → no audit line', async () => {
+      seedProject(testDb);
+      seedTask(testDb);
+      await callTool(server, 'save_spec_checklist', { taskId: 'task-1', items: [UI_ITEM] });
+
+      const result = await callTool(server, 'save_spec_checklist', {
+        taskId: 'task-1', items: [{ itemType: 'ui_text', content: '重抽的項' }], replace: true,
+      });
+
+      expect(result.content[0].text).not.toContain('[CHECKLIST_REPLACE]');
+      const audit = testDb.prepare("SELECT COUNT(*) as c FROM agent_outputs WHERE task_id = 'task-1' AND content LIKE '[CHECKLIST_REPLACE]%'").get() as { c: number };
+      expect(audit.c).toBe(0);
     });
 
     it('returns error for non-existent task', async () => {
@@ -361,6 +402,11 @@ describe('compliance-tools', () => {
       // 寧嚴勿鬆 + 嚴禁只看回報
       expect(text).toContain('寧嚴勿鬆');
       expect(text).toContain('必須自己用 Read/Grep 開檔案核對');
+      // N2：反向完整性掃描（full 掃 SA/SD 規格原文）+ 證據會被程式驗證的警告
+      expect(text).toContain('反向掃描規格原文');
+      expect(text).toContain('反向掃描無遺漏');
+      expect(text).toContain('每筆 evidence 會被程式驗證');
+      expect(text).toContain('整批退回');
       // full 軌（無 track 記錄）不得出現 light 內容
       expect(text).not.toContain('LIGHT 軌');
       expect(text).not.toContain('原始 BUG 內容');
@@ -395,6 +441,11 @@ describe('compliance-tools', () => {
       expect(text).toContain('Playwright');
       // 不再要求讀 SA/SD 規格原文
       expect(text).not.toContain('讀規格原文');
+      // N2：反向完整性掃描改掃 BUG 原文 + 證據會被程式驗證的警告
+      expect(text).toContain('反向掃描 BUG 原文');
+      expect(text).toContain('反向掃描無遺漏');
+      expect(text).toContain('每筆 evidence 會被程式驗證');
+      expect(text).not.toContain('反向掃描規格原文');
       // 證據要求、涵蓋要求、寧嚴勿鬆、獨立 reviewer 全部照舊
       expect(text).toContain('evidence');
       expect(text).toContain('必須涵蓋所有未豁免項目');
@@ -539,6 +590,149 @@ describe('compliance-tools', () => {
         results: [{ itemId: 'x', status: 'missing' }],
       });
       expect(result.isError).toBe(true);
+    });
+
+    describe('evidence program validation (N1)', () => {
+      it('rejects the whole batch when an evidence file does not exist — no run written', async () => {
+        const rows = await seedChecklist([UI_ITEM]);
+
+        const result = await callTool(server, 'save_compliance_review', {
+          taskId: 'task-1',
+          results: [{ itemId: rows[0].id, status: 'matched', evidence: [{ file: 'src/Nope.tsx', line: 1 }] }],
+        });
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain('未通過程式驗證');
+        expect(result.content[0].text).toContain('整批拒收');
+        expect(result.content[0].text).toContain('檔案不存在');
+        expect(result.content[0].text).toContain('src/Nope.tsx:1');
+        expect(result.content[0].text).toContain('i18n'); // 引用指引
+        const count = (testDb.prepare('SELECT COUNT(*) as c FROM spec_compliance_runs WHERE task_id = ?').get('task-1') as { c: number }).c;
+        expect(count).toBe(0);
+      });
+
+      it('rejects out-of-range line numbers', async () => {
+        const rows = await seedChecklist([UI_ITEM]);
+
+        const result = await callTool(server, 'save_compliance_review', {
+          taskId: 'task-1',
+          results: [{ itemId: rows[0].id, status: 'matched', evidence: [{ file: 'src/Index.tsx', line: 999 }] }],
+        });
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain('行號超界');
+      });
+
+      it('rejects evidence whose ±10-line window does not contain the content', async () => {
+        const rows = await seedChecklist([{ itemType: 'ui_text', content: '窗口測試目標文字', side: 'frontend' }]);
+
+        // 文字在 Long.tsx 第 1 行，證據引第 30 行 → 窗口 20~40 找不到
+        const result = await callTool(server, 'save_compliance_review', {
+          taskId: 'task-1',
+          results: [{ itemId: rows[0].id, status: 'matched', evidence: [{ file: 'src/Long.tsx', line: 30 }] }],
+        });
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain('找不到文字');
+        // 引對行就通過
+        const ok = await callTool(server, 'save_compliance_review', {
+          taskId: 'task-1',
+          results: [{ itemId: rows[0].id, status: 'matched', evidence: [{ file: 'src/Long.tsx', line: 1 }] }],
+        });
+        expect(ok.isError).toBeUndefined();
+      });
+
+      it('logic items skip the relevance check (file + line validity only)', async () => {
+        const rows = await seedChecklist([{ itemType: 'logic', content: '查詢結果依建立日期倒序', side: 'frontend' }]);
+
+        const result = await callTool(server, 'save_compliance_review', {
+          taskId: 'task-1',
+          results: [{ itemId: rows[0].id, status: 'matched', evidence: [{ file: 'src/Long.tsx', line: 30 }], note: '排序邏輯確認' }],
+        });
+        expect(result.isError).toBeUndefined();
+        expect(result.content[0].text).toContain('missing=0');
+      });
+
+      it('skips validation with a note when the project has no workspace paths', async () => {
+        testDb.prepare(`INSERT INTO projects (id, name, working_dir) VALUES ('proj-w', 'P', '/tmp/w')`).run();
+        seedTask(testDb, 'task-w', 'proj-w', 'frontend');
+        await callTool(server, 'save_spec_checklist', { taskId: 'task-w', items: [UI_ITEM] });
+        const row = testDb.prepare("SELECT id FROM spec_checklist_items WHERE task_id = 'task-w'").get() as { id: string };
+
+        const result = await callTool(server, 'save_compliance_review', {
+          taskId: 'task-w',
+          results: [{ itemId: row.id, status: 'matched', evidence: [{ file: 'src/Whatever.tsx', line: 1 }] }],
+        });
+        expect(result.isError).toBeUndefined();
+        expect(result.content[0].text).toContain('證據未經程式驗證');
+        const count = (testDb.prepare('SELECT COUNT(*) as c FROM spec_compliance_runs WHERE task_id = ?').get('task-w') as { c: number }).c;
+        expect(count).toBe(1);
+      });
+    });
+
+    describe('engine × AI discrepancy detection (N3)', () => {
+      it('marks engineStatus on discrepant items and lists them in the response (both directions)', async () => {
+        const rows = await seedChecklist([UI_ITEM, MISSING_ITEM]);
+        // 造 engine run：UI_ITEM=missing（AI 將判 matched → 分歧）、MISSING_ITEM=matched（AI 將判 missing → 分歧）
+        testDb.prepare(`
+          INSERT INTO spec_compliance_runs (id, task_id, total, matched, missing, manual, waived, results_json, source)
+          VALUES ('run-engine', 'task-1', 2, 1, 1, 0, 0, ?, 'engine')
+        `).run(JSON.stringify([
+          { itemId: rows[0].id, itemType: 'ui_text', content: rows[0].content, status: 'missing' },
+          { itemId: rows[1].id, itemType: 'ui_text', content: rows[1].content, status: 'matched' },
+        ]));
+
+        const result = await callTool(server, 'save_compliance_review', {
+          taskId: 'task-1',
+          results: [
+            { itemId: rows[0].id, status: 'matched', evidence: [{ file: 'src/Index.tsx', line: 1 }] },
+            { itemId: rows[1].id, status: 'missing', note: '找不到' },
+          ],
+        });
+        expect(result.isError).toBeUndefined();
+        const text = result.content[0].text;
+        expect(text).toContain('分歧 2 項');
+        expect(text).toContain('抽查的優先靶點');
+        expect(text).toContain('程式預檢=missing / AI=matched');
+        expect(text).toContain('程式預檢=matched / AI=missing');
+
+        // results_json 保持陣列形狀，分歧項帶 engineStatus
+        const run = testDb.prepare("SELECT results_json FROM spec_compliance_runs WHERE task_id = 'task-1' AND source = 'ai_review'").get() as { results_json: string };
+        const items = JSON.parse(run.results_json) as Array<{ itemId: string; status: string; engineStatus?: string }>;
+        expect(Array.isArray(items)).toBe(true);
+        expect(items.find(i => i.itemId === rows[0].id)?.engineStatus).toBe('missing');
+        expect(items.find(i => i.itemId === rows[1].id)?.engineStatus).toBe('matched');
+      });
+
+      it('agreeing items get no engineStatus; latest engine run wins', async () => {
+        const rows = await seedChecklist([UI_ITEM]);
+        // 真實 engine run（UI_ITEM=matched）——與 AI 一致，不算分歧
+        await callTool(server, 'run_spec_compliance', { taskId: 'task-1' });
+
+        const result = await callTool(server, 'save_compliance_review', {
+          taskId: 'task-1',
+          results: [{ itemId: rows[0].id, status: 'matched', evidence: [{ file: 'src/Index.tsx', line: 1 }] }],
+        });
+        expect(result.isError).toBeUndefined();
+        expect(result.content[0].text).not.toContain('分歧');
+
+        const run = testDb.prepare("SELECT results_json FROM spec_compliance_runs WHERE task_id = 'task-1' AND source = 'ai_review'").get() as { results_json: string };
+        const items = JSON.parse(run.results_json) as Array<Record<string, unknown>>;
+        expect(items.every(i => !('engineStatus' in i))).toBe(true);
+      });
+
+      it('no engine run → no crash, no engineStatus, no discrepancy section', async () => {
+        const rows = await seedChecklist([UI_ITEM]);
+
+        const result = await callTool(server, 'save_compliance_review', {
+          taskId: 'task-1',
+          results: [{ itemId: rows[0].id, status: 'matched', evidence: [{ file: 'src/Index.tsx', line: 1 }] }],
+        });
+        expect(result.isError).toBeUndefined();
+        expect(result.content[0].text).toContain('missing=0');
+        expect(result.content[0].text).not.toContain('分歧');
+
+        const run = testDb.prepare("SELECT results_json FROM spec_compliance_runs WHERE task_id = 'task-1' AND source = 'ai_review'").get() as { results_json: string };
+        const items = JSON.parse(run.results_json) as Array<Record<string, unknown>>;
+        expect(items.every(i => !('engineStatus' in i))).toBe(true);
+      });
     });
   });
 });

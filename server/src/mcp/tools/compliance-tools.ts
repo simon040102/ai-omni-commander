@@ -25,6 +25,7 @@ import {
   runComplianceEngine,
   type EngineItem, type ChecklistItemType, type ChecklistSide, type ItemResult, type WorkspaceRoots,
 } from '../compliance-engine.js';
+import { validateReviewEvidence, RELEVANCE_WINDOW, type EvidenceCheckInput } from '../evidence-validator.js';
 
 export const CHECKLIST_ITEM_TYPES = ['ui_text', 'api', 'param', 'response_field', 'db_field', 'logic'] as const;
 export const CHECKLIST_SIDES = ['frontend', 'backend', 'both'] as const;
@@ -128,6 +129,24 @@ export function registerComplianceTools(server: McpServer): void {
       })();
 
       const total = (db.prepare('SELECT COUNT(*) as c FROM spec_checklist_items WHERE task_id = ?').get(taskId) as { c: number }).c;
+
+      // 稽核：已有 AI 回對紀錄後還 replace 整份檢查表 = 高風險操作（可能縮小驗證範圍
+      // 再自評）——留 [CHECKLIST_REPLACE] 軌跡供人工檢視。reviewer plan 明文禁止 replace。
+      let replaceAudit = '';
+      if (replace && removed > 0) {
+        const hadAiReview = (db.prepare(
+          "SELECT COUNT(*) as c FROM spec_compliance_runs WHERE task_id = ? AND source = 'ai_review'"
+        ).get(taskId) as { c: number }).c > 0;
+        if (hadAiReview) {
+          const { agentId } = ensureMcpAgent(db, taskId, task.project_id);
+          db.prepare(`
+            INSERT INTO agent_outputs (agent_id, task_id, stream_type, content)
+            VALUES (?, ?, 'system', ?)
+          `).run(agentId, taskId, `[CHECKLIST_REPLACE] 已有 AI 回對紀錄後整份取代檢查表（移除 ${removed} 筆、新增 ${items.length} 筆）——請人工確認取代的正當性`);
+          replaceAudit = '\n⚠ 此任務已有 AI 回對紀錄，整份取代檢查表已記入稽核軌跡（[CHECKLIST_REPLACE]）；新檢查表必須重新完整回對。';
+        }
+      }
+
       const notifyOk = await notifyWebServer({
         event: 'task.checklistSaved',
         data: { taskId, projectId: task.project_id, count: items.length, total, action: 'saved' },
@@ -138,7 +157,7 @@ export function registerComplianceTools(server: McpServer): void {
       return {
         content: [{
           type: 'text' as const,
-          text: `Spec checklist saved：+${items.length} 項${replaceNote}，此任務目前共 ${total} 項${warning}。實作完成後先呼叫 run_spec_compliance(taskId="${taskId}") 做程式預檢，再由 orchestrator 派獨立 AI 回對 agent（get_compliance_review_plan → save_compliance_review）。`,
+          text: `Spec checklist saved：+${items.length} 項${replaceNote}，此任務目前共 ${total} 項${warning}。實作完成後先呼叫 run_spec_compliance(taskId="${taskId}") 做程式預檢，再由 orchestrator 派獨立 AI 回對 agent（get_compliance_review_plan → save_compliance_review）。${replaceAudit}`,
         }],
       };
     },
@@ -468,11 +487,18 @@ export function registerComplianceTools(server: McpServer): void {
 > 3. 將以下 prompt 原封不動作為 subagent 任務傳入
 > 4. subagent 完成後檢查 save_compliance_review 的結果：missing=0 才可繼續結案流程；missing>0 → 把 missing 清單交回 implementer 修正，修正後**重新派 AI 回對**`;
 
-      const commonTail = `4. **判定標準（寧嚴勿鬆）**：每項判 matched 或 missing——
+      // 反向完整性掃描（步驟 4）：full 掃 SA/SD 規格原文，light 掃 BUG 原文
+      const reverseScanStep = track === 'light'
+        ? `4. **反向掃描 BUG 原文（完整性檢查）**：重讀 BUG 原文（任務描述、Asana 留言、附件截圖裡的預期行為），找出有明確預期但 checklist 沒有對應項目的行為。找到遺漏 → 呼叫 save_spec_checklist(taskId="${taskId}", items=[...]) 補上（**append，不可用 replace**），把補上的項目一併納入本次逐項驗證與 save_compliance_review（新項目通常判 missing，交由 implementer 補做），並在總結列出補了哪些；staleness 閘門會自動要求後續回對涵蓋它們。沒有遺漏也要明確說「反向掃描無遺漏」。`
+        : `4. **反向掃描規格原文（完整性檢查）**：逐節掃 SA/SD 規格，找出規格有明確要求但 checklist 沒有對應項目的內容（欄位/文字/API/邏輯）。找到遺漏 → 呼叫 save_spec_checklist(taskId="${taskId}", items=[...]) 補上（**append，不可用 replace**），把補上的項目一併納入本次逐項驗證與 save_compliance_review（新項目通常判 missing，交由 implementer 補做），並在總結列出補了哪些；staleness 閘門會自動要求後續回對涵蓋它們。沒有遺漏也要明確說「反向掃描無遺漏」。`;
+
+      const commonTail = `${reverseScanStep}
+5. **判定標準（寧嚴勿鬆）**：每項判 matched 或 missing——
    - matched **必須附 evidence**（file + line，workspace 相對路徑）與一句說明（note）
+   - **每筆 evidence 會被程式驗證**（檔案存在、行號有效、該行 ±${RELEVANCE_WINDOW} 行內確實含該文字/路徑/識別字）——引用不精確會整批退回，請引用實際包含該文字/路徑/識別字的行（如文字在 i18n 檔就引 i18n 檔）
    - 找不到、不確定、規格與程式碼有出入 → 一律 missing，可用 note 說明疑點
-5. **一次寫回**：全部判完後呼叫 save_compliance_review(taskId="${taskId}", results=[{itemId, status, evidence: [{file, line}], note}, ...])，**必須涵蓋所有未豁免項目**。
-6. **嚴禁**只看 implementer 的回報、verification report、commit message 或任何摘要就下判定——**必須自己用 Read/Grep 開檔案核對**。
+6. **一次寫回**：全部判完後呼叫 save_compliance_review(taskId="${taskId}", results=[{itemId, status, evidence: [{file, line}], note}, ...])，**必須涵蓋所有未豁免項目**。
+7. **嚴禁**只看 implementer 的回報、verification report、commit message 或任何摘要就下判定——**必須自己用 Read/Grep 開檔案核對**。
 
 ## 絕對禁止
 - 不得修改任何程式碼或檔案（只讀）
@@ -539,7 +565,7 @@ ${commonTail}`;
   // ── save_compliance_review ────────────────────────────────
   server.tool(
     'save_compliance_review',
-    '寫回「AI 規格回對」結果（由獨立 AI 審查 agent 呼叫，見 get_compliance_review_plan）。results 必須涵蓋該任務**所有未豁免**的檢查表項目（缺項會被拒）；matched 項目必附 evidence（file+line）。寫入後成為完成閘門的依據：最新 ai_review run 的 missing=0 才可標 completed。',
+    '寫回「AI 規格回對」結果（由獨立 AI 審查 agent 呼叫，見 get_compliance_review_plan）。results 必須涵蓋該任務**所有未豁免**的檢查表項目（缺項會被拒）；matched 項目必附 evidence（file+line）。**每筆 evidence 會被程式驗證**（檔案存在、行號有效、該行附近確實含該文字/路徑/識別字；logic 只驗檔案+行號）——引用不精確會整批退回。寫入後成為完成閘門的依據：最新 ai_review run 的 missing=0 才可標 completed；與最新程式預檢（engine run）判定相反的項目會標 engineStatus 並在回應列出（抽查優先靶點）。',
     {
       taskId: z.string().describe('任務 ID'),
       results: z.array(z.object({
@@ -559,7 +585,7 @@ ${commonTail}`;
       if (results.length > MAX_REVIEW_RESULTS) {
         return { content: [{ type: 'text' as const, text: `Error: 一次最多 ${MAX_REVIEW_RESULTS} 項（收到 ${results.length}）。` }], isError: true };
       }
-      const task = db.prepare('SELECT id, project_id FROM tasks WHERE id = ?').get(taskId) as { id: string; project_id: string } | undefined;
+      const task = db.prepare('SELECT id, project_id, label FROM tasks WHERE id = ?').get(taskId) as { id: string; project_id: string; label: string } | undefined;
       if (!task) {
         return { content: [{ type: 'text' as const, text: `Error: Task "${taskId}" not found` }], isError: true };
       }
@@ -624,14 +650,87 @@ ${lines.join('\n')}${noEvidence.length > 20 ? `\n（其餘 ${noEvidence.length -
         };
       }
 
+      // ── N1：程式驗證 matched 證據（AI 判定、程式驗證判定依據）──
+      // workspace roots 依 task.label 解析（同 run_spec_compliance 的規則）；
+      // root 未設定或路徑不存在 → 無法驗證，維持現行為並註記。
+      const project = db.prepare('SELECT frontend_path, backend_path FROM projects WHERE id = ?').get(task.project_id) as
+        { frontend_path: string | null; backend_path: string | null } | undefined;
+      const roots: WorkspaceRoots = {};
+      if (task.label === 'frontend') {
+        if (project?.frontend_path) roots.frontend = project.frontend_path;
+      } else if (task.label === 'backend') {
+        if (project?.backend_path) roots.backend = project.backend_path;
+      } else {
+        if (project?.frontend_path) roots.frontend = project.frontend_path;
+        if (project?.backend_path) roots.backend = project.backend_path;
+      }
+      if (roots.frontend && !fs.existsSync(roots.frontend)) delete roots.frontend;
+      if (roots.backend && !fs.existsSync(roots.backend)) delete roots.backend;
+
+      let evidenceNote = '';
+      if (!roots.frontend && !roots.backend) {
+        evidenceNote = '\n（注意：證據未經程式驗證——workspace 未設定或路徑不存在）';
+      } else {
+        const checkInputs: EvidenceCheckInput[] = results
+          .filter(r => r.status === 'matched' && rowById.get(r.itemId)!.waived === 0)
+          .map(r => {
+            const row = rowById.get(r.itemId)!;
+            return {
+              itemId: r.itemId,
+              itemType: row.item_type,
+              content: row.content,
+              side: row.side ?? 'both',
+              detail: parseJson<Record<string, unknown> | null>(row.detail_json, null),
+              evidence: r.evidence!,
+            };
+          });
+        const failures = validateReviewEvidence(checkInputs, roots);
+        if (failures.length > 0) {
+          const lines = failures.slice(0, 20).map(f => {
+            const row = rowById.get(f.itemId);
+            return `- ${f.itemId}（[${row?.item_type ?? '?'}] ${row?.content ?? ''}）: ${f.file}:${f.line} — ${f.reason}`;
+          });
+          const more = failures.length > 20 ? `\n（其餘 ${failures.length - 20} 筆略）` : '';
+          return {
+            content: [{
+              type: 'text' as const,
+              text: `Error: ${failures.length} 筆 matched 證據未通過程式驗證，整批拒收（未寫入 run）：
+${lines.join('\n')}${more}
+
+請引用實際包含該文字/路徑/識別字的行（如文字在 i18n 檔就引 i18n 檔、API path 引呼叫處或 handler 定義行附近）；確實找不到證據就判 missing（寧嚴勿鬆）。修正證據後重新呼叫 save_compliance_review。`,
+            }],
+            isError: true,
+          };
+        }
+      }
+
+      // ── N3：引擎 × AI 分歧偵測（對照最新 source='engine' 的 run；無 engine run 則跳過）──
+      const engineRun = db.prepare(
+        "SELECT results_json FROM spec_compliance_runs WHERE task_id = ? AND source = 'engine' ORDER BY run_at DESC, rowid DESC LIMIT 1"
+      ).get(taskId) as { results_json: string } | undefined;
+      const engineStatusById = new Map<string, 'matched' | 'missing'>();
+      if (engineRun) {
+        for (const it of parseJson<ItemResult[]>(engineRun.results_json, [])) {
+          if (it.itemId && (it.status === 'matched' || it.status === 'missing')) {
+            engineStatusById.set(it.itemId, it.status);
+          }
+        }
+      }
+
       // 組 results_json（同引擎的 ItemResult 形狀；waived 項目照表補 status='waived'）
       const reviewItems: ItemResult[] = [];
+      const discrepancies: Array<{ itemId: string; itemType: ChecklistItemType; content: string; engineStatus: 'matched' | 'missing'; aiStatus: 'matched' | 'missing' }> = [];
       let matched = 0;
       let missing = 0;
       for (const r of results) {
         const row = rowById.get(r.itemId)!;
         if (row.waived === 1) continue; // 已豁免的判定不計入（照表記 waived）
         if (r.status === 'matched') matched++; else missing++;
+        const engineStatus = engineStatusById.get(r.itemId);
+        const discrepant = engineStatus !== undefined && engineStatus !== r.status;
+        if (discrepant) {
+          discrepancies.push({ itemId: r.itemId, itemType: row.item_type, content: row.content, engineStatus, aiStatus: r.status });
+        }
         reviewItems.push({
           itemId: r.itemId,
           itemType: row.item_type,
@@ -639,6 +738,7 @@ ${lines.join('\n')}${noEvidence.length > 20 ? `\n（其餘 ${noEvidence.length -
           status: r.status,
           ...(r.evidence && r.evidence.length > 0 ? { evidence: r.evidence } : {}),
           ...(r.note ? { note: r.note } : {}),
+          ...(discrepant ? { engineStatus } : {}), // 只在分歧時加，results_json 保持陣列形狀
         });
       }
       const waivedRows = rows.filter(r => r.waived === 1);
@@ -678,6 +778,12 @@ ${lines.join('\n')}${noEvidence.length > 20 ? `\n（其餘 ${noEvidence.length -
         data: { taskId, projectId: task.project_id, runId, action: 'ai_review' },
       }).catch(() => {});
 
+      // 分歧區段（N3）：引擎與 AI 判定相反的項目——抽查優先靶點
+      const discrepancySection = discrepancies.length > 0
+        ? `\n\n⚡ discrepancies — 引擎 × AI 分歧 ${discrepancies.length} 項（分歧項是抽查的優先靶點：引擎誤中註解或 AI 看漏都可能）：
+${discrepancies.slice(0, 20).map(d => `- ${d.itemId}: [${d.itemType}] ${d.content} — 程式預檢=${d.engineStatus} / AI=${d.aiStatus}`).join('\n')}${discrepancies.length > 20 ? `\n（其餘 ${discrepancies.length - 20} 項略）` : ''}`
+        : '';
+
       const notifyWarning = notifyOk ? '' : ' (warning: Web UI notification failed)';
       if (missing > 0) {
         const missingLines = reviewItems.filter(i => i.status === 'missing').slice(0, 20)
@@ -687,7 +793,7 @@ ${lines.join('\n')}${noEvidence.length > 20 ? `\n（其餘 ${noEvidence.length -
           content: [{
             type: 'text' as const,
             text: `AI 規格回對已記錄（runId=${runId}）：${matched}/${autoTotal} 符合，❌ ${missing} 項 missing${notifyWarning}：
-${missingLines.join('\n')}${more}
+${missingLines.join('\n')}${more}${discrepancySection}${evidenceNote}
 
 missing 不為 0 時 update_task_status(completed) 會被拒絕。請 implementer 修正後**重新執行 AI 回對**（get_compliance_review_plan → 獨立 reviewer → save_compliance_review），或對有正當理由的項目用 waive_checklist_item(itemId, reason) 豁免後重新回對。`,
           }],
@@ -696,7 +802,7 @@ missing 不為 0 時 update_task_status(completed) 會被拒絕。請 implemente
       return {
         content: [{
           type: 'text' as const,
-          text: `✅ AI 規格回對通過（runId=${runId}）：${matched}/${autoTotal} 符合，missing=0${notifyWarning}。完成閘門已解鎖，可繼續驗收流程後標記 completed。`,
+          text: `✅ AI 規格回對通過（runId=${runId}）：${matched}/${autoTotal} 符合，missing=0${notifyWarning}。完成閘門已解鎖，可繼續驗收流程後標記 completed。${discrepancySection}${evidenceNote}`,
         }],
       };
     },
