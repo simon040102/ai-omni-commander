@@ -105,6 +105,21 @@ describe('projects queries', () => {
     deleteProject('d1');
     expect(getProject('d1')).toBeNull();
   });
+
+  // WS project.update 走 updateProject(configJson) 原樣保存——testCommand 欄位保存與讀回
+  it('updateProject() persists configJson testCommand fields and reads them back', () => {
+    createProject({ id: 'u3', name: 'TestCmd', workingDir: '/u' });
+    updateProject('u3', {
+      configJson: JSON.stringify({
+        frontendTestCommand: 'pnpm vitest run',
+        backendTestCommand: 'mvn test',
+      }),
+    });
+    const proj = getProject('u3')!;
+    const config = JSON.parse(proj.configJson!);
+    expect(config.frontendTestCommand).toBe('pnpm vitest run');
+    expect(config.backendTestCommand).toBe('mvn test');
+  });
 });
 
 describe('workspaceSkills queries', () => {

@@ -32,7 +32,7 @@ Claude Code / Claude Desktop
 
 ### MCP Server Entry Point
 - `server/src/mcp-entry.ts` — stdio transport, spawned by Claude Code
-- `server/src/mcp/McpServer.ts` — registers all 52 tools + start_task prompt + server instructions
+- `server/src/mcp/McpServer.ts` — registers all 53 tools + start_task prompt + server instructions
 - `server/src/mcp/tools/` — tool implementations (task, document, project, progress, workspace)
 - `server/src/mcp/db.ts` — standalone SQLite connection for MCP process
 - `server/src/mcp/notify.ts` — HTTP POST to Web Server for real-time UI updates

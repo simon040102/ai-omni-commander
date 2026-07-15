@@ -115,6 +115,7 @@ A dual-mode AI collaborative development system. Originally orchestrated multipl
 以下規範全文已由 `get_execution_plan` 自動注入 subagent prompt（真相來源：`server/src/orchestrator/ExecutionPipeline.ts` 的 buildTaskPrompt 系列）：
 - **規格文件閱讀**（所有 role）：逐項完整讀 SA/SD/Axure，report_output 摘要理解重點
 - **規格遵循最高原則**（所有 role）：規格沒寫的不做、規格寫的照做；不確定就 report_spec_gap / [NEEDS_CLARIFICATION]
+- **單元測試強制流程**（所有 role）：先列測試案例清單（report_output 留稽核軌跡）再寫測試；失敗案例的預期結果必須有規格出處，規格沒定義就 report_spec_gap 不可編造；測試指令來自專案設定 `frontendTestCommand`/`backendTestCommand`（light 軌案例來源改為 BUG 原文重現步驟）
 - **後端效能分析**（backend role）：寫 code 前分析資料表/過濾條件/N+1/資料流，禁「撈全表 + 記憶體過濾」
 - **後端安全檢查**（backend role）：SQL 參數綁定、權限驗證、參數驗證、response/log 不外洩
 
@@ -183,8 +184,9 @@ subagent 完成開發後，必須在標記 completed 之前：
 2. 如果有 lint/typecheck 指令，也要跑
 3. build 失敗 → 修復後再試，最多 3 次
 4. 最終失敗 → `update_task_status(taskId, "failed", "build 失敗：錯誤訊息")`
-5. 跑 `run_spec_compliance(taskId)` 做程式預檢（抓文字/路徑錯字並修掉）——預檢僅 advisory，不解鎖完成閘門
-6. 通知 orchestrator 派**獨立 AI 回對 agent**（implementer 不可自評）：`get_compliance_review_plan(taskId)` → reviewer 逐項驗證 → `save_compliance_review`，最新 AI 回對 missing=0 才可標 completed
+5. 跑單元測試（專案設定的 `frontendTestCommand` / `backendTestCommand`，沒設定就用 workspace CLAUDE.md 的測試指令；都沒有則 `report_output` 記錄後跳過），失敗修復後重跑最多 3 次，最終失敗 → `update_task_status(taskId, "failed", "單元測試失敗：...")`。單元測試只驗邏輯，不驗 SQL 和欄位名——API 煙霧測試照舊
+6. 跑 `run_spec_compliance(taskId)` 做程式預檢（抓文字/路徑錯字並修掉）——預檢僅 advisory，不解鎖完成閘門
+7. 通知 orchestrator 派**獨立 AI 回對 agent**（implementer 不可自評）：`get_compliance_review_plan(taskId)` → reviewer 逐項驗證 → `save_compliance_review`，最新 AI 回對 missing=0 才可標 completed
 
 ### subagent 完成後的 orchestrator 驗證（我自己要做）
 
@@ -230,7 +232,7 @@ MCP Server（stdio，由 Claude Code 經 .mcp.json spawn）與 Web Server（Expr
   ```
 - 新增程式碼時**嚴禁**在 MCP process 內用 `process.cwd()` 解析路徑，一律走 `getDataDir()` / `resolveFromRepoRoot()`
 
-### MCP Tools (52 total)
+### MCP Tools (53 total)
 
 完整用法見各工具 description 與 server instructions（連線時自動注入）。分組一覽：
 
@@ -239,14 +241,14 @@ MCP Server（stdio，由 Claude Code 經 .mcp.json spawn）與 Web Server（Expr
 - **專案 / 設定**：`list_projects`, `get_project`, `create_project`, `update_project`, `set_extra_prompt`, `set_global_config`
 - **規格缺口**：`report_spec_gap`, `list_spec_gaps`, `resolve_spec_gap`, `check_spec_changes`, `check_spec_consistency`
 - **規格回對（checklist / compliance）**：`save_spec_checklist`, `get_spec_checklist`, `waive_checklist_item`, `run_spec_compliance`, `get_compliance_review_plan`, `save_compliance_review`
-- **驗收**：`get_verification_plan`, `report_verification_result`, `report_verification_evidence`
+- **驗收**：`get_verification_plan`, `get_test_baseline_plan`, `report_verification_result`, `report_verification_evidence`
 - **專案筆記**：`save_project_note`, `list_project_notes`, `archive_project_note`
 - **流程圖（Flow-Gated）**：`save_task_flow`, `report_flow_check`, `get_task_flows`, `save_sa_flow`
 - **回報**：`report_output`, `report_milestone`
 - **Asana / 其他**：`sync_asana_tasks`, `list_asana_projects`, `get_asana_task_comments`, `get_skill_gen_plan`, `query_external_db`, `health_check`
 
 特殊行為註記（行為規則）：
-- **`update_task_status` 完成閘門**：`completed` 受 flow gate B + AI 規格回對閘門（最新 ai_review run missing=0）管制；`skipFlowGate=true` + `skipReason` 可覆寫兩個閘門，**限使用者明確同意**，會記 `[SKIP]` 供稽核
+- **`update_task_status` 完成閘門**：`completed` 受 flow gate B + AI 規格回對閘門（最新 ai_review run missing=0）+ 單元測試閘門（專案有設 `frontendTestCommand`/`backendTestCommand` 時，對應 side 的「單元測試全數通過」驗收項最新一筆回報必須 passed=true；既有測試不是全綠先用 `get_test_baseline_plan` 修基線）管制；`skipFlowGate=true` + `skipReason` 可覆寫全部閘門，**限使用者明確同意**，會記 `[SKIP]` 供稽核
 - **`fetch_svn_specs` 雙來源**：從 SVN **加上**專案設定的本地 `specFolders` 合併撈取；git 資料夾先安全 `git pull --ff-only`（dirty → 跳過 pull + 警告）
 - **`get_execution_plan` 自動判軌**：full / light 軌（見「選擇任務後」的任務軌道說明），並自動注入規格閱讀／規格遵循／後端效能／後端安全四項規範
 

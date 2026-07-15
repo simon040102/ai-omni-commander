@@ -621,7 +621,7 @@ ${orchestratorNote}
 1. **取得完整 BUG 現場**：上列任務標題/描述是起點；呼叫 get_asana_task_comments(taskId="${taskId}") 讀回報討論串、fetch_task_attachments(projectId="${task.project_id}", taskId="${taskId}") 取附件截圖並用 Read tool 看圖。**BUG 原文是你判定的唯一依據，不是任何人的轉述。**
 2. **取得檢查表（必須看完全部）**：呼叫 get_spec_checklist(taskId="${taskId}", limit=50, offset=0) 取得項目（含 itemId）。**檢查表可能很大且會分頁**——回應裡 hasMore=true 就以「offset += 本頁回傳的 count」繼續呼叫（頁面過大時會自動縮頁，實際回傳筆數可能小於 limit，note 會給正確的續取 offset——**不可假設每頁固定 50 筆**），直到 hasMore=false，把每一頁的項目都收集齊。**save_compliance_review 必須涵蓋所有非 waived 項目（含 logic 類），漏收任何一頁就會被退回。**
 3. **逐項在實際程式碼中驗證**（一項都不可跳過）：
-   - **logic（修復後預期行為）→ 讀實際的程式碼修改（diff / 相關檔案），追完整程式碼流程確認該行為真的達成，不可只憑檔名、函式名或 implementer 的說法猜。環境允許時用 Playwright 實測頁面行為更好（非必要）**
+   - **logic（修復後預期行為）→ 讀實際的程式碼修改（diff / 相關檔案），追完整程式碼流程確認該行為真的達成，不可只憑檔名、函式名或 implementer 的說法猜。環境允許時用 Playwright 實測頁面行為更好（非必要）。若 implementer 已為該邏輯撰寫單元測試，測試檔中對應案例的 file+line 可作為 evidence（仍會被程式開檔驗證）**
    - ui_text → 在程式碼中找到該文字的**渲染處**（不是只出現在註解/測試），確認與 BUG 原文要求逐字一致
    - api / param / response_field / db_field → 同 full 軌標準：確認確實串接/存在，不是只出現字串
 ${commonTail}`
@@ -649,7 +649,7 @@ ${orchestratorNote}
    - api → 確認 path、method、參數確實**串接**（前端有呼叫、後端有 handler），不是只出現字串
    - param / response_field → 確認參數/欄位確實進出該 API 的 request/response
    - db_field → 確認 Entity（@Column name）/ DDL 中確實存在該欄位
-   - **logic → 追實際程式碼流程（Controller → Service → SQL / 元件 → handler → API），確認邏輯與規格描述一致。這是 AI 回對的核心價值，不可跳過、不可只憑檔名或函式名猜**
+   - **logic → 追實際程式碼流程（Controller → Service → SQL / 元件 → handler → API），確認邏輯與規格描述一致。這是 AI 回對的核心價值，不可跳過、不可只憑檔名或函式名猜。若 implementer 已為該邏輯撰寫單元測試，測試檔中對應案例的 file+line 可作為 evidence（仍會被程式開檔驗證）**
 ${commonTail}`;
 
       return { content: [{ type: 'text' as const, text: truncateResponse(plan) }] };

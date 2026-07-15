@@ -20,6 +20,7 @@ vi.mock('../svn-status.js', () => ({
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { registerTaskTools } from '../tools/task-tools.js';
+import { registerVerificationTools, UNRELATED_TEST_FAILURE_RULE } from '../tools/verification-tools.js';
 import { isSvnCliAvailable, fetchRemoteLastModified } from '../svn-status.js';
 import { callTool } from './test-helpers.js';
 
@@ -577,6 +578,173 @@ describe('task-tools', () => {
       const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed', skipFlowGate: true });
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('skipReason');
+    });
+  });
+
+  describe('update_task_status unit test gate（單元測試閘門）', () => {
+    const TEST_CMD_CONFIG = JSON.stringify({
+      frontendTestCommand: 'pnpm vitest run',
+      backendTestCommand: 'mvn test',
+    });
+
+    function startTask(label = 'backend', configJson: string | null = TEST_CMD_CONFIG, taskId = 'task-1') {
+      seedProject(testDb);
+      if (configJson !== null) {
+        testDb.prepare("UPDATE projects SET config_json = ? WHERE id = 'proj-1'").run(configJson);
+      }
+      seedTask(testDb, taskId, 'proj-1', label);
+      testDb.prepare("UPDATE tasks SET status = 'in_progress' WHERE id = ?").run(taskId);
+    }
+
+    /** 走真實的 report_verification_result 寫入路徑——釘住寫入格式與閘門解析同步 */
+    async function reportUnitTest(item: string, passed: boolean, note?: string, taskId = 'task-1') {
+      const result = await callTool(server, 'report_verification_result', {
+        taskId, results: [{ item, passed, ...(note ? { note } : {}) }],
+      });
+      expect(result.isError).toBeUndefined();
+    }
+
+    beforeEach(() => {
+      // 閘門解析的是 report_verification_result 寫入的格式——同一 server 註冊兩組工具做整合測試
+      registerVerificationTools(server);
+    });
+
+    it('backend 任務設 backendTestCommand + 無驗收回報 → 擋，訊息含實際指令字串與回報指引', async () => {
+      startTask('backend');
+
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('單元測試閘門');
+      expect(result.content[0].text).toContain('backendTestCommand（mvn test）');
+      expect(result.content[0].text).toContain('report_verification_result(taskId="task-1"');
+      expect(result.content[0].text).toContain('be-unit-tests');
+      expect(result.content[0].text).toContain('get_test_baseline_plan');
+      // G4 第三處（閘門錯誤訊息）與常數全文同步（task-tools 直接插值 UNRELATED_TEST_FAILURE_RULE）
+      expect(result.content[0].text).toContain(UNRELATED_TEST_FAILURE_RULE);
+
+      const status = (testDb.prepare("SELECT status FROM tasks WHERE id = 'task-1'").get() as { status: string }).status;
+      expect(status).toBe('in_progress');
+    });
+
+    it('最新一筆 passed=false → 擋（訊息指出未通過需重跑）', async () => {
+      startTask('backend');
+      await reportUnitTest('be-unit-tests', false, '3 個測試失敗');
+
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('未通過（FAIL）');
+      expect(result.content[0].text).toContain('mvn test');
+    });
+
+    it('passed=true → 放行', async () => {
+      startTask('backend');
+      await reportUnitTest('be-unit-tests', true, '全數通過');
+
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      expect(result.isError).toBeUndefined();
+      const status = (testDb.prepare("SELECT status FROM tasks WHERE id = 'task-1'").get() as { status: string }).status;
+      expect(status).toBe('completed');
+    });
+
+    it('先 false 後 true（取最新一筆）→ 放行', async () => {
+      startTask('backend');
+      await reportUnitTest('be-unit-tests', false, '第一次失敗');
+      await reportUnitTest('be-unit-tests', true, '修復後全綠');
+
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      expect(result.isError).toBeUndefined();
+    });
+
+    it('先 true 後 false（取最新一筆）→ 擋', async () => {
+      startTask('backend');
+      await reportUnitTest('be-unit-tests', true);
+      await reportUnitTest('be-unit-tests', false, '回歸失敗');
+
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      expect(result.isError).toBe(true);
+    });
+
+    it('用 item 文字（非 id）回報也算——與 get_verification_plan 的回報約定一致', async () => {
+      startTask('frontend');
+      await reportUnitTest('單元測試全數通過（指令：pnpm vitest run）', true);
+
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      expect(result.isError).toBeUndefined();
+    });
+
+    it('note 含無關失敗清單不影響判定（G4：誠實揭露不被別人的債卡死）', async () => {
+      startTask('frontend');
+      await reportUnitTest('fe-unit-tests', true, '本任務相關測試全綠；無關失敗清單：legacy-date.test.ts（既有失敗，建議 get_test_baseline_plan）');
+
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      expect(result.isError).toBeUndefined();
+    });
+
+    it('沒設 testCommand 的專案此閘門不存在（行為與現在完全一致）', async () => {
+      startTask('backend', null);
+
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      expect(result.isError).toBeUndefined();
+    });
+
+    it('frontend 任務只看 frontendTestCommand——回報 fe-unit-tests 即放行，不要求 be', async () => {
+      startTask('frontend');
+      await reportUnitTest('fe-unit-tests', true);
+
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      expect(result.isError).toBeUndefined();
+    });
+
+    it('fullstack 兩側都要：只回報一側 → 擋且訊息指向缺的那側', async () => {
+      startTask('fullstack');
+      await reportUnitTest('be-unit-tests', true);
+
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('frontendTestCommand（pnpm vitest run）');
+      expect(result.content[0].text).not.toContain('backendTestCommand');
+
+      // 補回報另一側後放行
+      await reportUnitTest('fe-unit-tests', true);
+      const retry = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      expect(retry.isError).toBeUndefined();
+    });
+
+    it('其他 label（如 devops）→ 兩側有設的都要', async () => {
+      startTask('devops', JSON.stringify({ frontendTestCommand: 'pnpm vitest run' }));
+
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('frontendTestCommand（pnpm vitest run）');
+    });
+
+    it('skipFlowGate=true + skipReason 跳過此閘門並記 [SKIP] 稽核', async () => {
+      startTask('backend');
+
+      const result = await callTool(server, 'update_task_status', {
+        taskId: 'task-1', status: 'completed', skipFlowGate: true, skipReason: '使用者同意：測試環境故障',
+      });
+      expect(result.isError).toBeUndefined();
+      const status = (testDb.prepare("SELECT status FROM tasks WHERE id = 'task-1'").get() as { status: string }).status;
+      expect(status).toBe('completed');
+
+      const outputs = testDb.prepare("SELECT content FROM agent_outputs WHERE task_id = 'task-1' AND content LIKE '[SKIP]%'").all() as Array<{ content: string }>;
+      expect(outputs.some(o => o.content.includes('[SKIP] 使用者跳過單元測試閘門') && o.content.includes('測試環境故障'))).toBe(true);
+    });
+
+    it('skipFlowGate=true 無 skipReason → 拒絕', async () => {
+      startTask('backend');
+
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed', skipFlowGate: true });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('skipReason');
+    });
+
+    it('壞 config_json → 閘門安全關閉不擋（與 get_verification_plan 行為一致）', async () => {
+      startTask('backend', '{broken json');
+
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      expect(result.isError).toBeUndefined();
     });
   });
 

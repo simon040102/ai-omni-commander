@@ -48,6 +48,27 @@ const BACKEND_PERFORMANCE_SECTION = `## 效能分析（強制 — 寫 code 之�
 ⚠ 禁止「撈全表回程式記憶體再過濾」——過濾/分頁一律下推到查詢層。Legacy 大表可能有數十萬筆。`;
 
 /**
+ * 專案設定的單元測試指令（config_json.frontendTestCommand / backendTestCommand）。
+ * 注入「單元測試（強制流程）」區塊——frontend 任務用 frontend、backend 用 backend、
+ * 其他 role（fullstack / both）兩個都列。未設定時注入 fallback 文案（用 workspace
+ * CLAUDE.md 的測試指令；找不到就 report_output 記錄後跳過）。
+ */
+export interface TestCommands {
+  frontend?: string;
+  backend?: string;
+}
+
+/** Read test commands from parsed project config（stack 中性——指令內容由專案設定提供）。 */
+export function extractTestCommands(config: ProjectConfig | null | undefined): TestCommands {
+  const fe = config?.frontendTestCommand;
+  const be = config?.backendTestCommand;
+  return {
+    frontend: typeof fe === 'string' && fe.trim() ? fe.trim() : undefined,
+    backend: typeof be === 'string' && be.trim() ? be.trim() : undefined,
+  };
+}
+
+/**
  * 安全弱點檢查（後端限定）— 通用版（stack 中性）。
  */
 const BACKEND_SECURITY_SECTION = `## 安全檢查（完成實作後逐項確認）
@@ -199,10 +220,11 @@ export class ExecutionPipeline {
     // Parse project config (needed for SVN auth in spec fetch and auto-fetch)
     const projectConfig = project.configJson ? JSON.parse(project.configJson) as ProjectConfig : null;
     const extraPrompt = task.label === 'frontend'
-      ? (projectConfig as any)?.frontendExtraPrompt as string | undefined
+      ? projectConfig?.frontendExtraPrompt
       : task.label === 'backend'
-      ? (projectConfig as any)?.backendExtraPrompt as string | undefined
+      ? projectConfig?.backendExtraPrompt
       : undefined;
+    const testCommands = extractTestCommands(projectConfig);
 
     // Fetch spec content if available (pass svnConfig so SVN https:// URLs get auth)
     let specResult: SpecResult | null = null;
@@ -291,6 +313,7 @@ export class ExecutionPipeline {
       mockupFiles,
       testOptions,
       extraPrompt,
+      testCommands,
       saFlowResult: saFlowResult ?? undefined,
       svnSpecFetch: { attempted: specFetch.attempted, functionCode: specFetch.functionCode || undefined, error: specFetch.error, warnings: specFetch.warnings },
     });
@@ -337,10 +360,11 @@ export class ExecutionPipeline {
     const superpowers = this.selectSuperpowers(task.taskType);
     const projectConfig = project.configJson ? JSON.parse(project.configJson) as ProjectConfig : null;
     const extraPrompt = task.label === 'frontend'
-      ? (projectConfig as any)?.frontendExtraPrompt as string | undefined
+      ? projectConfig?.frontendExtraPrompt
       : task.label === 'backend'
-      ? (projectConfig as any)?.backendExtraPrompt as string | undefined
+      ? projectConfig?.backendExtraPrompt
       : undefined;
+    const testCommands = extractTestCommands(projectConfig);
 
     let specResult: SpecResult | null = null;
     if (task.specUrl) {
@@ -413,6 +437,7 @@ export class ExecutionPipeline {
       mockupFiles,
       testOptions,
       extraPrompt,
+      testCommands,
       saFlowResult: saFlowResult ?? undefined,
       svnSpecFetch: { attempted: specFetch.attempted, functionCode: specFetch.functionCode || undefined, error: specFetch.error, warnings: specFetch.warnings },
     });
@@ -447,10 +472,11 @@ export class ExecutionPipeline {
 
     const projectConfig = project.configJson ? JSON.parse(project.configJson) as ProjectConfig : null;
     const extraPrompt = forRole === 'frontend'
-      ? (projectConfig as any)?.frontendExtraPrompt as string | undefined
+      ? projectConfig?.frontendExtraPrompt
       : forRole === 'backend'
-      ? (projectConfig as any)?.backendExtraPrompt as string | undefined
+      ? projectConfig?.backendExtraPrompt
       : undefined;
+    const testCommands = extractTestCommands(projectConfig);
 
     const superpowers = this.selectSuperpowers(task.taskType);
 
@@ -525,6 +551,7 @@ export class ExecutionPipeline {
       mockupFiles: opts?.mockupFiles,
       testOptions: opts?.testOptions,
       extraPrompt,
+      testCommands,
       saFlowResult: saFlowResult ?? undefined,
       svnSpecFetch: { attempted: specFetch.attempted, functionCode: specFetch.functionCode || undefined, error: specFetch.error, warnings: specFetch.warnings },
     });
@@ -647,6 +674,8 @@ export class ExecutionPipeline {
     mockupFiles?: string[];
     testOptions?: TestOptions;
     extraPrompt?: string;
+    /** 專案設定的單元測試指令（frontendTestCommand / backendTestCommand），注入「單元測試（強制流程）」區塊 */
+    testCommands?: TestCommands;
     saFlowResult?: { fullFlow: string; relevantFlow: string; flowPath: string } | null;
     /**
      * Auto spec fetch outcome (SVN + local spec folders) — attempted=true means
@@ -757,6 +786,7 @@ export class ExecutionPipeline {
       realTaskId: opts.taskId,
       projectId: opts.projectId,
       track: opts.track,
+      testCommands: opts.testCommands,
     });
     parts.push(taskPrompt);
 
@@ -1133,9 +1163,9 @@ ${flowDiagram}
     title: string,
     description: string,
     taskType: TaskType,
-    promptOpts: { role?: string; testOptions?: TestOptions; reportTaskId?: string; realTaskId?: string; projectId?: string; track?: ExecutionTrack } = {},
+    promptOpts: { role?: string; testOptions?: TestOptions; reportTaskId?: string; realTaskId?: string; projectId?: string; track?: ExecutionTrack; testCommands?: TestCommands } = {},
   ): string {
-    const { role, testOptions, reportTaskId, realTaskId, projectId, track } = promptOpts;
+    const { role, testOptions, reportTaskId, realTaskId, projectId, track, testCommands } = promptOpts;
     const taskId = realTaskId ?? reportTaskId;
     const typeLabels: Record<TaskType, string> = {
       bug: 'Bug Fix',
@@ -1165,6 +1195,8 @@ ${this.buildSpecComplianceSection(taskId, track)}
 ${this.buildSpecReadingSection(taskId, track)}
 
 ${this.buildSpecChecklistSection(taskId, track, projectId)}
+
+${this.buildUnitTestSection(taskId, track, role, testCommands)}
 
 ${this.buildStrategy(taskType, taskId, projectId)}
 
@@ -1292,6 +1324,57 @@ ${reportLine}
   }
 
   /**
+   * 單元測試（強制流程）— 與規格檢查表同一精神：先列案例清單再寫測試，
+   * 清單用 report_output 留稽核軌跡；失敗案例的預期結果必須有規格出處
+   * （承接「規格未定義禁止自創」——沒定義就 report_spec_gap，嚴禁編造預期值）。
+   * 單元測試只驗邏輯，不驗 SQL 和欄位名——API 煙霧測試照舊，是補強不是取代。
+   * 測試指令來自專案設定（frontendTestCommand / backendTestCommand）：
+   * frontend 任務注入 frontend 指令、backend 注入 backend 指令、其他 role 兩個都列；
+   * 未設定則注入 fallback 文案（用 workspace CLAUDE.md 的測試指令）。
+   */
+  private buildUnitTestSection(taskId?: string, track?: ExecutionTrack, role?: string, testCommands?: TestCommands): string {
+    const tidComma = taskId ? `taskId="${taskId}", ` : '';
+
+    // 測試指令：side 對應（frontend/backend 各注入自己的；其他 role 兩個都列）
+    const FALLBACK = '用 workspace CLAUDE.md 定義的測試指令；找不到測試指令則用 report_output 記錄「此 workspace 無測試指令」後跳過本節';
+    let commandNote: string;
+    if (role === 'frontend') {
+      commandNote = testCommands?.frontend ? `\`${testCommands.frontend}\`` : FALLBACK;
+    } else if (role === 'backend') {
+      commandNote = testCommands?.backend ? `\`${testCommands.backend}\`` : FALLBACK;
+    } else {
+      const both: string[] = [];
+      if (testCommands?.frontend) both.push(`前端 \`${testCommands.frontend}\``);
+      if (testCommands?.backend) both.push(`後端 \`${testCommands.backend}\``);
+      commandNote = both.length > 0 ? both.join('、') : FALLBACK;
+    }
+
+    // 案例來源：full 軌 = SA 流程 + 檢查表 logic 項 + Axure；light 軌 = BUG 原文重現步驟
+    const caseSourceLine = track === 'light'
+      ? '1. **先理解流程**：重讀 BUG 原文的重現步驟與預期行為（任務描述、Asana 留言、附件截圖）與檢查表的 logic 項，弄清楚每條行為的觸發條件與預期結果'
+      : '1. **先理解流程**：重讀 SA 操作流程、規格檢查表的 logic 項、Axure 畫面操作，弄清楚每條邏輯的輸入、輸出與分支條件';
+    const normalCaseSource = track === 'light'
+      ? '每個自己 side 的 logic 項（修復後預期行為）至少一條成功案例'
+      : '每個自己 side 的 logic 項至少一條成功案例';
+
+    return `## 單元測試（強制流程 — 先列案例清單，再寫測試）
+
+與規格檢查表同一精神：**先列案例清單、再寫測試**，清單是可稽核的產出。單元測試只驗邏輯，不驗 SQL 和欄位名——API 煙霧測試照舊執行，是補強不是取代。
+
+${caseSourceLine}
+2. **先列測試案例清單，列完才准寫測試**：用 mcp__omni-commander__report_output(${tidComma}content="...") 回報完整案例清單留下稽核軌跡，分類必須涵蓋：
+   - **正常流程**：${normalCaseSource}
+   - **失敗路徑**：必填空值、格式/長度錯誤、資料不存在、權限不足、依賴失敗
+   - **邊界/花式操作**：邊界值、重複送出、特殊字元、分頁邊界等
+   每條案例標注對應的 checklist itemId 或規格出處
+3. **失敗案例的預期結果必須有規格出處**：錯誤訊息、驗證規則是規格寫的才能斷言；規格沒定義的失敗行為 → 呼叫 mcp__omni-commander__report_spec_gap(${tidComma}category=..., description=...) 記錄，該案例先不寫或只斷言「不得 crash」這類中性行為——**嚴禁編造預期值**（編出來的預期值會被測試固化成「正確答案」）
+4. **寫測試 → 跑到綠**：測試名稱或註解標注對應的 itemId/規格出處——之後 AI 回對 logic 項可直接引用測試檔的 file+line 當證據
+5. **完成前全套再跑一次**：測試指令：${commandNote}
+6. **禁裝擋板**：測試指令執行失敗且原因是**框架/套件不存在**（command not found、找不到模組/類別路徑）→ **嚴禁自行安裝任何套件或修改建置檔**（package.json / pom.xml / build.gradle / lockfile 一律不可動）。這代表專案設定與 workspace 實況不符：report_output 記錄後標 failed，由使用者處理。「修復重試最多 3 次」僅適用於**測試本身的失敗**（斷言不過、程式 bug）
+7. **只准新增/修改與本任務直接相關的測試**：跑全套時撞到既有的**無關失敗** → 不可順手修（你沒有那些功能的規格脈絡，亂修會把潛在 bug 固化成斷言）——用 mcp__omni-commander__report_output(${tidComma}content="...") 記錄無關失敗清單，並建議使用者執行 get_test_baseline_plan 做基線修復。這些無關失敗**不阻擋**你回報自己任務的測試結果：自己任務相關的測試全綠即可回報 passed=true，note 必列無關失敗清單（report_verification_result 的 note 註明）`;
+  }
+
+  /**
    * Build the strategy section for a task type.
    * Bug tasks get an extra step 0 that pulls BUG evidence via MCP tools (needs taskId).
    */
@@ -1375,11 +1458,16 @@ ${reportLine}
   private buildCompletionCriteria(role?: string, testOptions?: TestOptions, reportTaskId?: string, realTaskId?: string): string {
     const taskId = realTaskId ?? reportTaskId;
     const reportName = reportTaskId ?? realTaskId ?? 'adhoc';
+    // 單元測試：順序在 build 之後、run_spec_compliance（buildVerificationToolLines）之前
+    const unitTestLine = taskId
+      ? `- Build 通過後跑單元測試（指令與案例要求見「單元測試（強制流程）」區塊），確保全數通過；失敗則修復後重跑，最多 3 次；最終仍失敗 → mcp__omni-commander__update_task_status(taskId="${taskId}", status="failed", summary="單元測試失敗：...")`
+      : '- Build 通過後跑單元測試（指令與案例要求見「單元測試（強制流程）」區塊），確保全數通過；失敗則修復後重跑，最多 3 次；最終仍失敗 → 標記任務 failed 並說明原因';
     if (role === 'frontend') {
       const opts = testOptions?.frontend;
       const lines: string[] = [
         '- **回對規格**：開發完成後，重新閱讀原始規格文件，逐項確認畫面欄位、元件互動、API 串接、data-testid 是否都已正確實作。列出每項需求對應的程式碼位置及確認結果，若有缺漏立即修復',
         '- 執行 build 指令（例如 npm run build / pnpm build），確保零錯誤',
+        unitTestLine,
         '- 所有 playwright 截圖一律使用 `fullPage: true`，確保捕捉完整頁面（含捲軸內容）',
       ];
       const runMock = opts?.useMock !== false && !opts?.useRealApi || opts?.useMock;
@@ -1435,10 +1523,11 @@ ${reportLine}
       const lines: string[] = [
         '- **回對規格**：開發完成後，重新閱讀原始規格文件，逐項確認每支 API 的 URL、INPUT/OUTPUT 欄位、商業邏輯是否都已正確實作。列出每項需求對應的程式碼位置及確認結果，若有缺漏立即修復',
         '- 執行 build 指令，確保零錯誤',
+        unitTestLine,
       ];
       if (opts?.unitTests) {
         lines.push(
-          '- 撰寫每個端點/模組的單元測試，執行所有測試（例如 npm test / pnpm test），確保全數通過',
+          '- 撰寫每個端點/模組的單元測試（案例清單與測試指令依「單元測試（強制流程）」區塊，不可另用其他指令），確保全數通過',
           '- 在所有測試通過之前，**不要**標記 [TASK_COMPLETE]',
         );
       }
@@ -1471,8 +1560,8 @@ ${reportLine}
     // Default for other roles
     return [
       '- **回對規格**：開發完成後，重新閱讀原始規格文件，逐項確認每項需求是否都已正確實作。列出每項需求對應的程式碼位置及確認結果，若有缺漏立即修復',
-      '- 完成任務後，如果專案有測試，請執行測試確保通過',
       '- 如果是前端專案，請執行 build 確保成功',
+      unitTestLine,
       ...this.buildVerificationToolLines(taskId, false),
       '- 確認完成後，在回應末尾加上 [TASK_COMPLETE]',
     ].join('\n');

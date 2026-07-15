@@ -80,6 +80,32 @@ describe('project-tools', () => {
     });
   });
 
+  describe('update_project testCommand fields', () => {
+    it('persists frontendTestCommand/backendTestCommand in configJson and get_project reads them back unmasked', async () => {
+      testDb.prepare(`INSERT INTO projects (id, name, working_dir) VALUES (?, ?, ?)`).run('p1', 'Test', '/tmp');
+
+      const result = await callTool(server, 'update_project', {
+        projectId: 'p1',
+        configJson: JSON.stringify({
+          frontendTestCommand: 'pnpm vitest run',
+          backendTestCommand: 'mvn test',
+        }),
+      });
+      expect(result.isError).toBeUndefined();
+
+      const row = testDb.prepare("SELECT config_json FROM projects WHERE id = 'p1'").get() as { config_json: string };
+      const saved = JSON.parse(row.config_json);
+      expect(saved.frontendTestCommand).toBe('pnpm vitest run');
+      expect(saved.backendTestCommand).toBe('mvn test');
+
+      // 讀回：get_project 的 configJson 遮罩只處理 DB 憑證，testCommand 原樣可見
+      const getResult = await callTool(server, 'get_project', { projectId: 'p1' });
+      const data = JSON.parse(getResult.content[0].text);
+      expect(data.configJson.frontendTestCommand).toBe('pnpm vitest run');
+      expect(data.configJson.backendTestCommand).toBe('mvn test');
+    });
+  });
+
   describe('get_project', () => {
     it('returns project with task stats', async () => {
       testDb.prepare(`INSERT INTO projects (id, name, working_dir) VALUES (?, ?, ?)`).run('p1', 'Test', '/tmp');

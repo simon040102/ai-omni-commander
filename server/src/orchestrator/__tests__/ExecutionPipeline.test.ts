@@ -31,6 +31,8 @@ import { ExecutionPipeline } from '../ExecutionPipeline.js';
 import { createProject } from '../../db/queries/projects.js';
 // 只有測試可跨 web/MCP 邊界 import——用來釘住 ExecutionPipeline 手抄的 uiTextRule 與 MCP 常數同文
 import { UI_TEXT_EXTRACTION_RULE } from '../../mcp/tools/compliance-tools.js';
+// 同理：釘住單元測試區塊的「禁裝擋板」「無關失敗回報規則」與 verification-tools 常數同文
+import { NO_INSTALL_GUARD_RULE, UNRELATED_TEST_FAILURE_RULE } from '../../mcp/tools/verification-tools.js';
 
 function freshDb(): Database.Database {
   const db = new Database(':memory:');
@@ -510,6 +512,155 @@ describe('ExecutionPipeline', () => {
 
       expect(plan.prompt).toContain('## 規格檢查表（light 軌 — 從 BUG 原文抽取，強制）');
       expect(plan.prompt).toContain('## BUG 原文閱讀（light 軌 — 強制，寫 code 之前必須完成）');
+    });
+  });
+
+  describe('單元測試（強制流程）注入', () => {
+    const TEST_CMD_CONFIG = JSON.stringify({
+      frontendTestCommand: 'pnpm vitest run',
+      backendTestCommand: 'mvn test',
+    });
+
+    function createTask(projectId: string, taskId: string, label: string, taskType: string, configJson?: string) {
+      createProject({ id: projectId, name: 'UnitTest Test', workingDir: '/tmp/ut', configJson });
+      testDb.prepare(`
+        INSERT INTO tasks (id, project_id, title, description, label, task_type)
+        VALUES (?, ?, 'WA05 查詢作業', '實作查詢頁', ?, ?)
+      `).run(taskId, projectId, label, taskType);
+    }
+
+    it('full 軌注入單元測試區塊：先列案例清單 + 規格出處 + report_spec_gap + 案例分類', async () => {
+      createTask('p-ut-fe', 't-ut-fe', 'frontend', 'feature', TEST_CMD_CONFIG);
+
+      const plan = await pipeline.buildExecutionPlan('t-ut-fe');
+
+      expect(plan.prompt).toContain('## 單元測試（強制流程 — 先列案例清單，再寫測試）');
+      expect(plan.prompt).toContain('**先列測試案例清單，列完才准寫測試**');
+      expect(plan.prompt).toContain('mcp__omni-commander__report_output(taskId="t-ut-fe", content="...") 回報完整案例清單');
+      // 案例分類：正常流程 / 失敗路徑 / 邊界
+      expect(plan.prompt).toContain('每個自己 side 的 logic 項至少一條成功案例');
+      expect(plan.prompt).toContain('必填空值、格式/長度錯誤、資料不存在、權限不足、依賴失敗');
+      expect(plan.prompt).toContain('邊界值、重複送出、特殊字元、分頁邊界');
+      expect(plan.prompt).toContain('每條案例標注對應的 checklist itemId 或規格出處');
+      // 失敗案例預期結果必須有規格出處（規格未定義禁止自創）
+      expect(plan.prompt).toContain('**失敗案例的預期結果必須有規格出處**');
+      expect(plan.prompt).toContain('mcp__omni-commander__report_spec_gap(taskId="t-ut-fe", category=..., description=...)');
+      expect(plan.prompt).toContain('嚴禁編造預期值');
+      expect(plan.prompt).toContain('不得 crash');
+      // 測試名稱標注 itemId → AI 回對可引用 file+line
+      expect(plan.prompt).toContain('測試名稱或註解標注對應的 itemId/規格出處');
+      // 單元測試只驗邏輯（煙霧測試照舊）
+      expect(plan.prompt).toContain('單元測試只驗邏輯，不驗 SQL 和欄位名');
+      // full 軌案例來源：SA 流程 + 檢查表 logic 項 + Axure
+      expect(plan.prompt).toContain('重讀 SA 操作流程、規格檢查表的 logic 項、Axure 畫面操作');
+      // 注入位置：規格檢查表區塊之後
+      const checklistIdx = plan.prompt.indexOf('## 規格檢查表');
+      const unitTestIdx = plan.prompt.indexOf('## 單元測試（強制流程');
+      expect(checklistIdx).toBeGreaterThan(-1);
+      expect(unitTestIdx).toBeGreaterThan(checklistIdx);
+    });
+
+    it('light 軌變體：案例來源改為 BUG 原文重現步驟', async () => {
+      createTask('p-ut-lt', 't-ut-lt', 'frontend', 'bug', TEST_CMD_CONFIG);
+
+      const plan = await pipeline.buildExecutionPlan('t-ut-lt', undefined, undefined, undefined, undefined, 'light');
+
+      expect(plan.prompt).toContain('## 單元測試（強制流程 — 先列案例清單，再寫測試）');
+      expect(plan.prompt).toContain('重讀 BUG 原文的重現步驟與預期行為');
+      expect(plan.prompt).toContain('修復後預期行為）至少一條成功案例');
+      expect(plan.prompt).not.toContain('重讀 SA 操作流程、規格檢查表的 logic 項、Axure 畫面操作');
+    });
+
+    it('frontend 任務注入 frontendTestCommand（不含 backend 指令）', async () => {
+      createTask('p-ut-cmd-fe', 't-ut-cmd-fe', 'frontend', 'feature', TEST_CMD_CONFIG);
+
+      const plan = await pipeline.buildExecutionPlan('t-ut-cmd-fe');
+
+      expect(plan.prompt).toContain('測試指令：`pnpm vitest run`');
+      expect(plan.prompt).not.toContain('mvn test');
+    });
+
+    it('backend 任務注入 backendTestCommand（不含 frontend 指令）', async () => {
+      createTask('p-ut-cmd-be', 't-ut-cmd-be', 'backend', 'feature', TEST_CMD_CONFIG);
+
+      const plan = await pipeline.buildExecutionPlan('t-ut-cmd-be');
+
+      expect(plan.prompt).toContain('測試指令：`mvn test`');
+      expect(plan.prompt).not.toContain('pnpm vitest run');
+    });
+
+    it('其他 role（兩個都設定）→ 前後端指令都列', async () => {
+      createTask('p-ut-both', 't-ut-both', 'devops', 'other', TEST_CMD_CONFIG);
+
+      const plan = await pipeline.buildExecutionPlan('t-ut-both');
+
+      expect(plan.prompt).toContain('前端 `pnpm vitest run`');
+      expect(plan.prompt).toContain('後端 `mvn test`');
+    });
+
+    it('無 testCommand → 注入 fallback 文案（workspace CLAUDE.md 的測試指令 / 無測試指令則記錄後跳過）', async () => {
+      createTask('p-ut-none', 't-ut-none', 'frontend', 'feature');
+
+      const plan = await pipeline.buildExecutionPlan('t-ut-none');
+
+      expect(plan.prompt).toContain('## 單元測試（強制流程 — 先列案例清單，再寫測試）');
+      expect(plan.prompt).toContain('用 workspace CLAUDE.md 定義的測試指令');
+      expect(plan.prompt).toContain('此 workspace 無測試指令');
+      expect(plan.prompt).not.toContain('pnpm vitest run');
+    });
+
+    it('禁裝擋板（G2）：框架不存在嚴禁自行安裝或改建置檔，重試 3 次僅適用測試本身失敗——與 MCP 常數同文', async () => {
+      createTask('p-ut-guard', 't-ut-guard', 'backend', 'feature', TEST_CMD_CONFIG);
+
+      const plan = await pipeline.buildExecutionPlan('t-ut-guard');
+
+      // 釘住兩處手抄同步：prompt 逐字含 verification-tools 匯出的禁裝擋板全文
+      expect(plan.prompt).toContain(NO_INSTALL_GUARD_RULE);
+      expect(plan.prompt).toContain('**禁裝擋板**');
+      expect(plan.prompt).toContain('嚴禁自行安裝任何套件或修改建置檔');
+      expect(plan.prompt).toContain('package.json / pom.xml / build.gradle / lockfile 一律不可動');
+      expect(plan.prompt).toContain('僅適用於**測試本身的失敗**');
+    });
+
+    it('只准動本任務相關的測試（G4）：無關失敗不可順手修、建議 get_test_baseline_plan、回報規則與 MCP 常數同文', async () => {
+      createTask('p-ut-scope', 't-ut-scope', 'frontend', 'feature', TEST_CMD_CONFIG);
+
+      const plan = await pipeline.buildExecutionPlan('t-ut-scope');
+
+      expect(plan.prompt).toContain('**只准新增/修改與本任務直接相關的測試**');
+      expect(plan.prompt).toContain('不可順手修');
+      expect(plan.prompt).toContain('固化成斷言');
+      expect(plan.prompt).toContain('get_test_baseline_plan');
+      // 釘住兩處手抄同步：與 get_verification_plan 驗收項描述同文的回報規則
+      expect(plan.prompt).toContain(UNRELATED_TEST_FAILURE_RULE);
+      expect(plan.prompt).toContain('mcp__omni-commander__report_output(taskId="t-ut-scope", content="...") 記錄無關失敗清單');
+    });
+
+    it('完成標準含單元測試步驟：build 之後、run_spec_compliance 之前，最終失敗標 failed', async () => {
+      createTask('p-ut-cc', 't-ut-cc', 'backend', 'feature', TEST_CMD_CONFIG);
+
+      const plan = await pipeline.buildExecutionPlan('t-ut-cc');
+
+      expect(plan.prompt).toContain('Build 通過後跑單元測試');
+      expect(plan.prompt).toContain('最多 3 次');
+      expect(plan.prompt).toContain('mcp__omni-commander__update_task_status(taskId="t-ut-cc", status="failed", summary="單元測試失敗：...")');
+      // 順序：build → 單元測試 → run_spec_compliance
+      const buildIdx = plan.prompt.indexOf('- 執行 build 指令，確保零錯誤');
+      const unitIdx = plan.prompt.indexOf('Build 通過後跑單元測試');
+      const complianceIdx = plan.prompt.indexOf('mcp__omni-commander__run_spec_compliance(taskId="t-ut-cc")');
+      expect(buildIdx).toBeGreaterThan(-1);
+      expect(unitIdx).toBeGreaterThan(buildIdx);
+      expect(complianceIdx).toBeGreaterThan(unitIdx);
+    });
+
+    it('executeAdHoc（無 taskId）單元測試區塊省略 taskId 參數', async () => {
+      createProject({ id: 'p-ut-adhoc', name: 'UT AdHoc', workingDir: '/tmp/ut-adhoc' });
+
+      await pipeline.executeAdHoc('p-ut-adhoc', 'add a helper');
+
+      const call = mockStartAgent.mock.calls[0][0];
+      expect(call.prompt).toContain('## 單元測試（強制流程 — 先列案例清單，再寫測試）');
+      expect(call.prompt).not.toContain('taskId="undefined"');
     });
   });
 });

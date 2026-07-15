@@ -50,6 +50,14 @@ export interface EnsureMcpAgentResult {
   title: string | null;
 }
 
+/** agents.role 的 CHECK 白名單（schema.ts）——task label 不在其中（如 fullstack）時退回 'quick'，
+ *  否則 INSERT OR IGNORE 會靜默吞掉 CHECK violation，後續 agent_outputs 寫入直接 FK 爆炸。
+ *  與 schema 的同步由測試對 in-memory DB 逐一 INSERT 驗證（helpers-agent-roles）。 */
+export const AGENT_ROLES = new Set([
+  'master', 'architect', 'backend', 'frontend', 'coordinator',
+  'integration-test', 'skill-gen', 'devops', 'testing', 'review', 'quick', 'axure',
+]);
+
 /**
  * Ensure the synthetic mcp-{taskId} agent row exists (concurrency-safe via
  * INSERT OR IGNORE). created=true only when this call inserted the row —
@@ -58,7 +66,8 @@ export interface EnsureMcpAgentResult {
 export function ensureMcpAgent(db: Database.Database, taskId: string, projectId: string): EnsureMcpAgentResult {
   const agentId = `mcp-${taskId}`;
   const taskInfo = db.prepare('SELECT title, label FROM tasks WHERE id = ?').get(taskId) as { title: string; label: string } | undefined;
-  const role = taskInfo?.label || 'quick';
+  const rawRole = taskInfo?.label || 'quick';
+  const role = AGENT_ROLES.has(rawRole) ? rawRole : 'quick';
   const title = taskInfo?.title || null;
   const result = db.prepare(`
     INSERT OR IGNORE INTO agents (id, project_id, role, status, model, current_task_id, title)

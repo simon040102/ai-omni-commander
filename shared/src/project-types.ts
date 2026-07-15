@@ -82,6 +82,18 @@ export interface ProjectConfig {
   specFolders?: SpecFolderConfig[];
   axshareUrl?: string;
   dbConnections?: import('./schema-types.js').DbConnectionConfig[];
+  /** 前端 subagent 額外指示（原封不動注入 prompt） */
+  frontendExtraPrompt?: string;
+  /** 後端 subagent 額外指示（原封不動注入 prompt） */
+  backendExtraPrompt?: string;
+  /**
+   * 前端單元測試指令（如 "pnpm vitest run"）。設定後會：
+   * 1) 注入 execution plan 的「單元測試（強制流程）」區塊；
+   * 2) get_verification_plan 自動前置「單元測試全數通過」驗收項。
+   */
+  frontendTestCommand?: string;
+  /** 後端單元測試指令（如 "mvn test"）——行為同 frontendTestCommand */
+  backendTestCommand?: string;
 }
 
 /** Stored plan for an agent */

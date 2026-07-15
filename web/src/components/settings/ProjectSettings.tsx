@@ -59,6 +59,10 @@ export function ProjectSettings() {
   const [frontendExtraPrompt, setFrontendExtraPrompt] = useState('');
   const [backendExtraPrompt, setBackendExtraPrompt] = useState('');
 
+  // Unit test commands per role (injected into execution plan + verification plan)
+  const [frontendTestCommand, setFrontendTestCommand] = useState('');
+  const [backendTestCommand, setBackendTestCommand] = useState('');
+
   // MCP skill gen modal
   const [skillGenMcpCommand, setSkillGenMcpCommand] = useState<string | null>(null);
 
@@ -103,6 +107,8 @@ export function ProjectSettings() {
       setAxshareUrl(existingConfig?.axshareUrl || '');
       setFrontendExtraPrompt(existingConfig?.frontendExtraPrompt || '');
       setBackendExtraPrompt(existingConfig?.backendExtraPrompt || '');
+      setFrontendTestCommand(existingConfig?.frontendTestCommand || '');
+      setBackendTestCommand(existingConfig?.backendTestCommand || '');
     }
   }, [project, existingConfig]);
 
@@ -153,6 +159,8 @@ export function ProjectSettings() {
       axshareUrl: axshareUrl.trim() || undefined,
       frontendExtraPrompt: frontendExtraPrompt.trim() || undefined,
       backendExtraPrompt: backendExtraPrompt.trim() || undefined,
+      frontendTestCommand: frontendTestCommand.trim() || undefined,
+      backendTestCommand: backendTestCommand.trim() || undefined,
       dbConnections: dbConnections.length > 0 ? dbConnections : undefined,
     };
 
@@ -173,7 +181,8 @@ export function ProjectSettings() {
 
     addToast({ type: 'success', title: '已儲存專案設定' });
   }, [client, project, name, frontendPath, backendPath, asanaProjectGid, dbConnections,
-    svnFrontendPath, svnBackendPath, specFolders, axshareUrl, frontendExtraPrompt, backendExtraPrompt, existingConfig, addToast]);
+    svnFrontendPath, svnBackendPath, specFolders, axshareUrl, frontendExtraPrompt, backendExtraPrompt,
+    frontendTestCommand, backendTestCommand, existingConfig, addToast]);
 
   const handleGenSkills = useCallback((workspaceType: 'frontend' | 'backend') => {
     if (!project) return;
@@ -422,6 +431,41 @@ export function ProjectSettings() {
               rows={4}
               placeholder={`例如：\n- API 路徑統一使用 /main/ 前綴\n- 所有 Entity 繼承 BaseEntity`}
               className="w-full bg-muted border border-border rounded-md px-3 py-2 text-sm font-mono outline-none focus:border-primary focus:ring-1 focus:ring-primary/30 resize-y"
+            />
+          </div>
+        </div>
+
+        {/* Unit Test Commands per Role */}
+        <div className="border border-border rounded-lg p-4 space-y-3">
+          <div className="flex items-center gap-2">
+            <svg className="w-4 h-4 text-cyan-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <polyline points="9 11 12 14 22 4" />
+              <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+            </svg>
+            <h4 className="text-sm font-medium">單元測試指令（Test Commands）</h4>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            各 workspace 的單元測試指令。設定後會注入執行計畫的「單元測試（強制流程）」區塊，
+            並在驗收清單（get_verification_plan）自動前置「單元測試全數通過」項目。留空則不出現。
+          </p>
+          <div>
+            <label className="block text-xs text-muted-foreground mb-1">前端測試指令</label>
+            <input
+              type="text"
+              value={frontendTestCommand}
+              onChange={(e) => setFrontendTestCommand(e.target.value)}
+              placeholder="例如：pnpm vitest run"
+              className="w-full bg-muted border border-border rounded-md px-3 py-2 text-sm font-mono outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-muted-foreground mb-1">後端測試指令</label>
+            <input
+              type="text"
+              value={backendTestCommand}
+              onChange={(e) => setBackendTestCommand(e.target.value)}
+              placeholder="例如：mvn test"
+              className="w-full bg-muted border border-border rounded-md px-3 py-2 text-sm font-mono outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
             />
           </div>
         </div>

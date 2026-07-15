@@ -14,6 +14,7 @@ import {
 } from '../flow-gate.js';
 import { parseJson, getAsanaPat, ASANA_API_BASE, ASANA_FETCH_TIMEOUT_MS } from '../helpers.js';
 import { runSpecChangeCheck, type SpecChangeTarget } from '../spec-change.js';
+import { parseTestCommands, getRequiredUnitTestItems, findLatestUnitTestVerification, UNRELATED_TEST_FAILURE_RULE } from './verification-tools.js';
 
 interface TaskRow {
   id: string;
@@ -391,7 +392,7 @@ ${flowGateSection}
   // ── update_task_status ────────────────────────────────────
   server.tool(
     'update_task_status',
-    'Update the status of a task. Use this to mark tasks as in_progress, completed, or failed. For flow-gated tasks, "completed" is rejected until gate B has passed for every required role. Tasks with a spec checklist additionally require the latest run_spec_compliance run to have missing=0. skipFlowGate=true (with skipReason, only with explicit user approval) overrides both gates.',
+    'Update the status of a task. Use this to mark tasks as in_progress, completed, or failed. For flow-gated tasks, "completed" is rejected until gate B has passed for every required role. Tasks with a spec checklist additionally require the latest run_spec_compliance run to have missing=0. Projects with frontendTestCommand/backendTestCommand configured additionally require a passing "單元測試全數通過" verification report (report_verification_result) for the task\'s side(s). skipFlowGate=true (with skipReason, only with explicit user approval) overrides all these gates.',
     {
       taskId: z.string().describe('The task ID'),
       status: z.enum(['in_progress', 'completed', 'failed']).describe('New task status'),
@@ -410,7 +411,7 @@ ${flowGateSection}
         | { kind: 'ok'; projectId: string; stoppedAgent: boolean };
 
       const txn = db.transaction((): TxnResult => {
-        const task = db.prepare('SELECT id, project_id, status, flow_required FROM tasks WHERE id = ?').get(taskId) as { id: string; project_id: string; status: string; flow_required: number | null } | undefined;
+        const task = db.prepare('SELECT id, project_id, status, label, flow_required FROM tasks WHERE id = ?').get(taskId) as { id: string; project_id: string; status: string; label: string; flow_required: number | null } | undefined;
         if (!task) {
           return { kind: 'error', message: `Error: Task "${taskId}" not found` };
         }
@@ -537,6 +538,44 @@ ${lines.join('\n')}${more}
 若使用者明確同意跳過閘門，改用 skipFlowGate=true + skipReason 重新呼叫（會記錄 [SKIP]）。`,
                 };
               }
+            }
+          }
+        }
+
+        // ── Unit Test: exit gate（單元測試驗收閘門）──
+        // 專案設定 testCommand（frontendTestCommand / backendTestCommand）時，該任務
+        // 對應 side 的「單元測試全數通過」驗收項必須有**最新一筆 passed=true** 的
+        // report_verification_result 回報才可標 completed。哪些 side 需要與
+        // get_verification_plan 共用 getRequiredUnitTestItems（單一真相，避免規則漂移）。
+        // 沒設 testCommand 的專案此閘門不存在（行為與既有完全一致）。
+        // 沿用 skipFlowGate+skipReason 跳過（記 [SKIP] 供稽核）。只做同步 DB 查詢。
+        if (status === 'completed') {
+          const projRow = db.prepare('SELECT config_json FROM projects WHERE id = ?').get(task.project_id) as { config_json: string | null } | undefined;
+          const requiredUnitItems = getRequiredUnitTestItems(task.label, parseTestCommands(projRow?.config_json));
+          const unitFailures: string[] = [];
+          for (const item of requiredUnitItems) {
+            const latest = findLatestUnitTestVerification(db, taskId, item);
+            if (!latest) {
+              unitFailures.push(`- 單元測試閘門：此專案設定了 ${item.side}TestCommand（${item.command}），但「單元測試全數通過」尚無通過的驗收回報。請在 ${item.side} workspace 執行測試並用 report_verification_result(taskId="${taskId}", results=[{item:"${item.id}", passed:true, note:"..."}]) 回報後再標 completed。`);
+            } else if (!latest.passed) {
+              unitFailures.push(`- 單元測試閘門：此專案設定了 ${item.side}TestCommand（${item.command}），但「單元測試全數通過」最新一筆驗收回報為未通過（FAIL）。請修復後重跑測試，並用 report_verification_result(taskId="${taskId}", results=[{item:"${item.id}", passed:true, note:"..."}]) 重新回報後再標 completed。`);
+            }
+          }
+          if (unitFailures.length > 0) {
+            if (skipFlowGate) {
+              if (!skipReason || !skipReason.trim()) {
+                return { kind: 'error', message: 'Error: skipFlowGate=true 需要 skipReason（使用者同意跳過閘門的原因）。' };
+              }
+              logTaskOutput(db, taskId, task.project_id, `[SKIP] 使用者跳過單元測試閘門：${skipReason.trim()}`);
+            } else {
+              return {
+                kind: 'error',
+                message: `Error: 單元測試閘門未通過，不可標記 completed。
+${unitFailures.join('\n')}
+
+（提醒：既有的**無關失敗**不卡你——${UNRELATED_TEST_FAILURE_RULE}，並建議使用者執行 get_test_baseline_plan 做基線修復。）
+若使用者明確同意跳過閘門，改用 skipFlowGate=true + skipReason 重新呼叫（會記錄 [SKIP]）。`,
+              };
             }
           }
         }
