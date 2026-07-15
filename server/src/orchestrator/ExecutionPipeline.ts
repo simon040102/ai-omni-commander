@@ -1249,6 +1249,10 @@ ${reportLine}
    * 不為 0 無法標 completed。所有 role 都注入；有 taskId 才注入具體呼叫。
    */
   private buildSpecChecklistSection(taskId?: string, track?: ExecutionTrack, projectId?: string): string {
+    // ui_text 抽取規範——與 mcp/tools/compliance-tools.ts 的 UI_TEXT_EXTRACTION_RULE 同文
+    // （web/MCP 邊界不互相 import，靠測試釘住兩處同步）：行為敘述句存成 ui_text 永遠
+    // 驗不過（程式中不存在該字面文字），只能事後豁免。
+    const uiTextRule = '**行為敘述句（「點擊X後…」「當…時…」）與元件動態組字的完整 label 禁止存 ui_text——存 logic**；ui_text 只放程式中應存在的字面文字（按鈕字、標題、訊息、i18n 值）';
     const saveCall = taskId
       ? `mcp__omni-commander__save_spec_checklist(taskId="${taskId}", items=[{itemType, content, side?, sourceRef?}, ...])`
       : 'save_spec_checklist(taskId, items=[...])';
@@ -1268,6 +1272,7 @@ ${reportLine}
 本任務無 SA/SD，檢查表來源是原始 BUG 內容：
 1. 讀任務描述、呼叫 ${commentsCall} 讀回報討論串、${attachCall} 取截圖並用 Read tool 看圖
 2. 從中抽出「修復後預期行為」清單（每個可驗證的行為一項，itemType="logic"；若 bug 涉及特定訊息文字/欄位則用 ui_text）
+   - ${uiTextRule}
 3. ${saveCall} 寫入
 範例：「計劃部門查詢欄位輸入值後查詢，結果正確過濾」
 
@@ -1279,6 +1284,7 @@ ${reportLine}
 讀完 SA/SD 規格後，立即呼叫 ${saveCall} 抽取結構化檢查表：
 - **每一個欄位名/按鈕文字/訊息文字/API/DB 欄位都是一項**，content 必須從規格**逐字抄**（不可翻譯或改寫）
 - itemType：ui_text=規格逐字文字 / api=API 路徑（如 "POST /api/wa05/save"）/ param=請求參數 / response_field=回應欄位 / db_field=DB 欄位 / logic=邏輯規則
+- ${uiTextRule}
 - 邏輯類規則（WHERE 條件、排序、狀態轉換等）標 itemType="logic"（程式預檢不比對，由 AI 回對驗證）
 - sourceRef 填規格檔名+章節，方便回查
 

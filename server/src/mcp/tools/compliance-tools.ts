@@ -19,7 +19,7 @@ import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { getMcpDb } from '../db.js';
 import { notifyWebServer } from '../notify.js';
-import { ensureMcpAgent, parseJson, truncateResponse } from '../helpers.js';
+import { ensureMcpAgent, parseJson, truncateResponse, CHARACTER_LIMIT } from '../helpers.js';
 import { getFlowState } from '../flow-gate.js';
 import {
   runComplianceEngine,
@@ -60,6 +60,13 @@ interface RunRow {
 
 const MAX_REVIEW_RESULTS = 500;
 
+/**
+ * P2：ui_text 抽取規範——行為敘述句存成 ui_text 永遠驗不過（程式中不存在該字面文字），
+ * 只能事後豁免。三處文案（tool description、ExecutionPipeline 兩軌、review plan 反向掃描）共用同一規則。
+ */
+export const UI_TEXT_EXTRACTION_RULE =
+  '**行為敘述句（「點擊X後…」「當…時…」）與元件動態組字的完整 label 禁止存 ui_text——存 logic**；ui_text 只放程式中應存在的字面文字（按鈕字、標題、訊息、i18n 值）';
+
 function rowToItem(r: ChecklistRow): Record<string, unknown> {
   return {
     id: r.id,
@@ -85,12 +92,12 @@ export function registerComplianceTools(server: McpServer): void {
   // ── save_spec_checklist ───────────────────────────────────
   server.tool(
     'save_spec_checklist',
-    '儲存規格檢查表（規格回對的輸入）。**讀完 SA/SD 規格後立即抽取：每一個欄位名/按鈕文字/訊息文字/API/DB 欄位都是一項，content 必須從規格逐字抄**（不可翻譯或改寫）。任務完成時先用 run_spec_compliance 做程式預檢，再由獨立 AI 回對 agent（get_compliance_review_plan → save_compliance_review）逐項驗證，最新 AI 回對的 missing 不為 0 無法標 completed。itemType 對應：ui_text=規格逐字文字（按鈕/標題/訊息）；api=路徑（如 "POST /api/wa05/save"）；param/response_field/db_field=識別字；logic=規則描述（程式預檢不比對，由 AI 回對驗證）。',
+    `儲存規格檢查表（規格回對的輸入）。**讀完 SA/SD 規格後立即抽取：每一個欄位名/按鈕文字/訊息文字/API/DB 欄位都是一項，content 必須從規格逐字抄**（不可翻譯或改寫）。任務完成時先用 run_spec_compliance 做程式預檢，再由獨立 AI 回對 agent（get_compliance_review_plan → save_compliance_review）逐項驗證，最新 AI 回對的 missing 不為 0 無法標 completed。itemType 對應：ui_text=規格逐字文字（按鈕/標題/訊息）；api=路徑（如 "POST /api/wa05/save"）；param/response_field/db_field=識別字；logic=規則描述（程式預檢不比對，由 AI 回對驗證）。${UI_TEXT_EXTRACTION_RULE}。`,
     {
       taskId: z.string().describe('任務 ID'),
       items: z.array(z.object({
-        itemType: z.enum(CHECKLIST_ITEM_TYPES).describe('項目類型：ui_text=規格逐字文字 / api=API 路徑（如 "POST /api/wa05/save"）/ param=請求參數識別字 / response_field=回應欄位識別字 / db_field=DB 欄位識別字 / logic=邏輯規則描述'),
-        content: z.string().min(1).describe('比對內容：ui_text 從規格逐字抄；api 為 "METHOD /path" 或 "/path"；param/response_field/db_field 為識別字；logic 為規則描述'),
+        itemType: z.enum(CHECKLIST_ITEM_TYPES).describe(`項目類型：ui_text=規格逐字文字 / api=API 路徑（如 "POST /api/wa05/save"）/ param=請求參數識別字 / response_field=回應欄位識別字 / db_field=DB 欄位識別字 / logic=邏輯規則描述。${UI_TEXT_EXTRACTION_RULE}`),
+        content: z.string().min(1).describe(`比對內容：ui_text 從規格逐字抄；api 為 "METHOD /path" 或 "/path"；param/response_field/db_field 為識別字；logic 為規則描述。${UI_TEXT_EXTRACTION_RULE}`),
         side: z.enum(CHECKLIST_SIDES).optional().describe('比對哪一側 workspace（預設 both）'),
         sourceRef: z.string().optional().describe('規格出處（規格檔名+章節，如 "SPEC_WA05.docx §3.2"）'),
         detail: z.record(z.string(), z.unknown()).optional().describe('補充資訊（自由物件，如 api 的 { "method": "POST" }）'),
@@ -114,17 +121,21 @@ export function registerComplianceTools(server: McpServer): void {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `);
       let removed = 0;
+      // P4：回傳本次新增項目的 id，reviewer 補項後不用再查一次 get_spec_checklist
+      const created: Array<{ id: string; itemType: ChecklistItemType; content: string }> = [];
       db.transaction(() => {
         if (replace) {
           removed = db.prepare('DELETE FROM spec_checklist_items WHERE task_id = ? AND waived = 0').run(taskId).changes;
         }
         for (const item of items) {
+          const id = randomUUID();
           insert.run(
-            randomUUID(), taskId, task.project_id,
+            id, taskId, task.project_id,
             item.itemType, item.content, item.side ?? 'both',
             item.detail ? JSON.stringify(item.detail) : null,
             item.sourceRef ?? null,
           );
+          created.push({ id, itemType: item.itemType, content: item.content });
         }
       })();
 
@@ -157,7 +168,11 @@ export function registerComplianceTools(server: McpServer): void {
       return {
         content: [{
           type: 'text' as const,
-          text: `Spec checklist saved：+${items.length} 項${replaceNote}，此任務目前共 ${total} 項${warning}。實作完成後先呼叫 run_spec_compliance(taskId="${taskId}") 做程式預檢，再由 orchestrator 派獨立 AI 回對 agent（get_compliance_review_plan → save_compliance_review）。${replaceAudit}`,
+          text: truncateResponse(`Spec checklist saved：+${items.length} 項${replaceNote}，此任務目前共 ${total} 項${warning}。實作完成後先呼叫 run_spec_compliance(taskId="${taskId}") 做程式預檢，再由 orchestrator 派獨立 AI 回對 agent（get_compliance_review_plan → save_compliance_review）。${replaceAudit}
+
+本次新增項目（後續判定/豁免可直接引用這些 id，不需再查 get_spec_checklist）
+created:
+${JSON.stringify(created, null, 2)}`, '（created 清單被截斷——用 get_spec_checklist(taskId) 取得項目 id）'),
         }],
       };
     },
@@ -187,31 +202,47 @@ export function registerComplianceTools(server: McpServer): void {
       const rows = db.prepare('SELECT * FROM spec_checklist_items WHERE task_id = ? ORDER BY created_at ASC, rowid ASC LIMIT ? OFFSET ?')
         .all(taskId, effLimit, effOffset) as ChecklistRow[];
       const run = getLatestRun(db, taskId);
-      const hasMore = effOffset + rows.length < total;
 
-      const text = JSON.stringify({
-        taskId,
-        total,
-        count: rows.length,
-        offset: effOffset,
-        hasMore,
-        items: rows.map(rowToItem),
-        latestRun: run ? {
-          id: run.id,
-          runAt: run.run_at,
-          source: run.source,
-          total: run.total,
-          matched: run.matched,
-          missing: run.missing,
-          manual: run.manual,
-          waived: run.waived,
-        } : null,
-      }, null, 2);
+      // P3：截斷安全分頁——單頁 JSON 超過 CHARACTER_LIMIT 時逐步對半縮小本頁筆數重組，
+      // 保證回應永遠是可解析的完整 JSON；count/hasMore 以實際回傳筆數計算。
+      // truncateResponse 保留為最終保險（單一項目本身就超限時才會觸發）。
+      const buildPayload = (pageRows: ChecklistRow[], shrunk: boolean): string => {
+        const hasMore = effOffset + pageRows.length < total;
+        return JSON.stringify({
+          taskId,
+          total,
+          count: pageRows.length,
+          offset: effOffset,
+          hasMore,
+          ...(shrunk ? { note: `本頁因大小自動縮至 ${pageRows.length} 筆（原 limit=${effLimit}），續用 offset=${effOffset + pageRows.length} 取後續` } : {}),
+          items: pageRows.map(rowToItem),
+          latestRun: run ? {
+            id: run.id,
+            runAt: run.run_at,
+            source: run.source,
+            total: run.total,
+            matched: run.matched,
+            missing: run.missing,
+            manual: run.manual,
+            waived: run.waived,
+          } : null,
+        }, null, 2);
+      };
 
+      let pageRows = rows;
+      let shrunk = false;
+      let text = buildPayload(pageRows, shrunk);
+      while (text.length > CHARACTER_LIMIT && pageRows.length > 1) {
+        pageRows = pageRows.slice(0, Math.ceil(pageRows.length / 2));
+        shrunk = true;
+        text = buildPayload(pageRows, shrunk);
+      }
+
+      const finalHasMore = effOffset + pageRows.length < total;
       return {
         content: [{
           type: 'text' as const,
-          text: truncateResponse(text, `檢查表共 ${total} 項，本頁 offset=${effOffset}、count=${rows.length}${hasMore ? '、hasMore=true → 用 offset 續取下一頁' : ''}。若單頁仍被截斷，改用更小的 limit 重取。`),
+          text: truncateResponse(text, `檢查表共 ${total} 項，本頁 offset=${effOffset}、count=${pageRows.length}${finalHasMore ? '、hasMore=true → 用 offset 續取下一頁' : ''}。單一項目過大導致截斷——此頁 JSON 已損毀，勿依 hasMore 判斷，改逐項處理。`),
         }],
       };
     },
@@ -480,6 +511,68 @@ export function registerComplianceTools(server: McpServer): void {
         ? `（另有 ${items.length - activeItems.length} 項已豁免，不需驗證）`
         : '';
 
+      // ── P1a：元件知識庫（category='component' 的 active 專案筆記；只此分類，防 prompt 膨脹）──
+      const componentNotes = db.prepare(`
+        SELECT content FROM project_notes
+        WHERE project_id = ? AND active = 1 AND category = 'component'
+        ORDER BY created_at ASC
+      `).all(task.project_id) as Array<{ content: string }>;
+      // 字元預算：筆記會隨使用累積，無上限注入會把 plan 尾端的防線文字擠出 truncateResponse
+      const COMPONENT_NOTES_CHAR_BUDGET = 4000;
+      let componentNotesSection = '';
+      if (componentNotes.length > 0) {
+        const noteLines: string[] = [];
+        let notesBudget = COMPONENT_NOTES_CHAR_BUDGET;
+        let notesTruncated = false;
+        for (const n of componentNotes) {
+          const line = `- ${n.content}`;
+          if (line.length + 1 > notesBudget) { notesTruncated = true; break; }
+          notesBudget -= line.length + 1;
+          noteLines.push(line);
+        }
+        if (noteLines.length > 0) {
+          componentNotesSection = `
+
+## 元件知識庫（已確認的元件級事實，降低重複追查成本）
+${noteLines.join('\n')}${notesTruncated ? '\n（筆記已達大小上限截斷，其餘用 list_project_notes 查看）' : ''}
+
+用法：這些事實告訴你**證據在哪個元件檔**——直接開該檔引用對應行號當證據，不需重讀整個元件追邏輯。
+**這不是免驗證通行證**：對應項目仍須附 file+line 證據、仍會被程式開檔驗證；若引用行驗證失敗代表元件已變更，重查並更新筆記。`;
+        }
+      }
+
+      // ── P1b：引擎預檢種子——最新 engine run 的 matched 證據（前 50 項，每項一行 file:line）──
+      const ENGINE_SEED_CHAR_BUDGET = 8000;
+      const engineRunRow = db.prepare(
+        "SELECT results_json FROM spec_compliance_runs WHERE task_id = ? AND source = 'engine' ORDER BY run_at DESC, rowid DESC LIMIT 1"
+      ).get(taskId) as { results_json: string } | undefined;
+      let engineSeedSection = '';
+      if (engineRunRow) {
+        const allMatchedSeeds = parseJson<ItemResult[]>(engineRunRow.results_json, [])
+          .filter(i => i.status === 'matched' && i.evidence && i.evidence.length > 0);
+        const seeds = allMatchedSeeds.slice(0, 50);
+        if (seeds.length > 0) {
+          const seedLines: string[] = [];
+          let budget = ENGINE_SEED_CHAR_BUDGET;
+          let seedTruncated = allMatchedSeeds.length > seeds.length;
+          for (const s of seeds) {
+            const ev = s.evidence![0];
+            const line = `- ${s.itemId}: [${s.itemType}] ${s.content} → ${ev.file}:${ev.line}`;
+            if (line.length + 1 > budget) { seedTruncated = true; break; }
+            budget -= line.length + 1;
+            seedLines.push(line);
+          }
+          if (seedLines.length > 0) {
+            engineSeedSection = `
+
+## 引擎預檢種子（最新程式預檢 source='engine' 已 matched 的項目與其證據）
+${seedLines.join('\n')}${seedTruncated ? '\n（種子清單已達大小上限截斷，其餘項自行比對）' : ''}
+
+用法：以上項目引擎已在程式碼中命中——可先開其引用的 file:line 確認，屬實即沿用該證據（仍須你自己開檔看過，引擎可能誤中註解/測試檔，不屬實照樣判 missing），把時間集中在引擎 missing / manual / logic 項。`;
+          }
+        }
+      }
+
       // 兩軌共用：orchestrator 派工指示 + 判定標準/寫回/禁令（證據要求、涵蓋要求、寧嚴勿鬆照舊）
       const orchestratorNote = `> **給 orchestrator 的指示：**
 > 1. 用 Agent tool 派出**一個獨立的 AI 回對 subagent**，cwd 設為上列 workspace 路徑（both 時擇一，prompt 中附上兩個路徑）
@@ -489,8 +582,8 @@ export function registerComplianceTools(server: McpServer): void {
 
       // 反向完整性掃描（步驟 4）：full 掃 SA/SD 規格原文，light 掃 BUG 原文
       const reverseScanStep = track === 'light'
-        ? `4. **反向掃描 BUG 原文（完整性檢查）**：重讀 BUG 原文（任務描述、Asana 留言、附件截圖裡的預期行為），找出有明確預期但 checklist 沒有對應項目的行為。找到遺漏 → 呼叫 save_spec_checklist(taskId="${taskId}", items=[...]) 補上（**append，不可用 replace**），把補上的項目一併納入本次逐項驗證與 save_compliance_review（新項目通常判 missing，交由 implementer 補做），並在總結列出補了哪些；staleness 閘門會自動要求後續回對涵蓋它們。沒有遺漏也要明確說「反向掃描無遺漏」。`
-        : `4. **反向掃描規格原文（完整性檢查）**：逐節掃 SA/SD 規格，找出規格有明確要求但 checklist 沒有對應項目的內容（欄位/文字/API/邏輯）。找到遺漏 → 呼叫 save_spec_checklist(taskId="${taskId}", items=[...]) 補上（**append，不可用 replace**），把補上的項目一併納入本次逐項驗證與 save_compliance_review（新項目通常判 missing，交由 implementer 補做），並在總結列出補了哪些；staleness 閘門會自動要求後續回對涵蓋它們。沒有遺漏也要明確說「反向掃描無遺漏」。`;
+        ? `4. **反向掃描 BUG 原文（完整性檢查）**：重讀 BUG 原文（任務描述、Asana 留言、附件截圖裡的預期行為），找出有明確預期但 checklist 沒有對應項目的行為。找到遺漏 → 呼叫 save_spec_checklist(taskId="${taskId}", items=[...]) 補上（**append，不可用 replace**；補項同守抽取規範：${UI_TEXT_EXTRACTION_RULE}），把補上的項目一併納入本次逐項驗證與 save_compliance_review（新項目通常判 missing，交由 implementer 補做），並在總結列出補了哪些；staleness 閘門會自動要求後續回對涵蓋它們。沒有遺漏也要明確說「反向掃描無遺漏」。`
+        : `4. **反向掃描規格原文（完整性檢查）**：逐節掃 SA/SD 規格，找出規格有明確要求但 checklist 沒有對應項目的內容（欄位/文字/API/邏輯）。找到遺漏 → 呼叫 save_spec_checklist(taskId="${taskId}", items=[...]) 補上（**append，不可用 replace**；補項同守抽取規範：${UI_TEXT_EXTRACTION_RULE}），把補上的項目一併納入本次逐項驗證與 save_compliance_review（新項目通常判 missing，交由 implementer 補做），並在總結列出補了哪些；staleness 閘門會自動要求後續回對涵蓋它們。沒有遺漏也要明確說「反向掃描無遺漏」。`;
 
       const commonTail = `${reverseScanStep}
 5. **判定標準（寧嚴勿鬆）**：每項判 matched 或 missing——
@@ -499,9 +592,10 @@ export function registerComplianceTools(server: McpServer): void {
    - 找不到、不確定、規格與程式碼有出入 → 一律 missing，可用 note 說明疑點
 6. **一次寫回**：全部判完後呼叫 save_compliance_review(taskId="${taskId}", results=[{itemId, status, evidence: [{file, line}], note}, ...])，**必須涵蓋所有未豁免項目**。
 7. **嚴禁**只看 implementer 的回報、verification report、commit message 或任何摘要就下判定——**必須自己用 Read/Grep 開檔案核對**。
+8. **回寫元件知識庫（save_compliance_review 之後）**：把本次審查中新確認的**可重用元件級事實**（共用元件產生什麼文字/行為、慣例差異），用 save_project_note(projectId="${task.project_id}", category="component", content=...) 記錄，內容必須附元件檔路徑與關鍵識別（無出處的觀察不記）——下一個任務的 reviewer 會自動收到。
 
 ## 絕對禁止
-- 不得修改任何程式碼或檔案（只讀）
+- 不得修改任何程式碼或檔案（只讀；MCP 回寫僅限 save_project_note / save_spec_checklist / save_compliance_review 三個工具）
 - 不得呼叫 update_task_status——結案由 orchestrator 決定`;
 
       const plan = track === 'light'
@@ -520,12 +614,12 @@ ${orchestratorNote}
 
 ---
 
-你是獨立的規格審查員（reviewer）。本任務為 **light 軌**（無 SA/SD 規格文件）——驗證基準是**原始 BUG 內容**。你的任務：**逐項回對規格檢查表（從 BUG 原文抽出的「修復後預期行為」）與實際程式碼，判定每個預期行為是否已確實達成**。你不是來寫 code 的，只讀不改。
+你是獨立的規格審查員（reviewer）。本任務為 **light 軌**（無 SA/SD 規格文件）——驗證基準是**原始 BUG 內容**。你的任務：**逐項回對規格檢查表（從 BUG 原文抽出的「修復後預期行為」）與實際程式碼，判定每個預期行為是否已確實達成**。你不是來寫 code 的，只讀不改。${componentNotesSection}${engineSeedSection}
 
 ## 審查流程（強制，依序執行）
 
 1. **取得完整 BUG 現場**：上列任務標題/描述是起點；呼叫 get_asana_task_comments(taskId="${taskId}") 讀回報討論串、fetch_task_attachments(projectId="${task.project_id}", taskId="${taskId}") 取附件截圖並用 Read tool 看圖。**BUG 原文是你判定的唯一依據，不是任何人的轉述。**
-2. **取得檢查表（必須看完全部）**：呼叫 get_spec_checklist(taskId="${taskId}", limit=50, offset=0) 取得項目（含 itemId）。**檢查表可能很大且會分頁**——回應裡 hasMore=true 就用遞增的 offset（0、50、100…）繼續呼叫，直到 hasMore=false，把每一頁的項目都收集齊。**save_compliance_review 必須涵蓋所有非 waived 項目（含 logic 類），漏收任何一頁就會被退回。**
+2. **取得檢查表（必須看完全部）**：呼叫 get_spec_checklist(taskId="${taskId}", limit=50, offset=0) 取得項目（含 itemId）。**檢查表可能很大且會分頁**——回應裡 hasMore=true 就以「offset += 本頁回傳的 count」繼續呼叫（頁面過大時會自動縮頁，實際回傳筆數可能小於 limit，note 會給正確的續取 offset——**不可假設每頁固定 50 筆**），直到 hasMore=false，把每一頁的項目都收集齊。**save_compliance_review 必須涵蓋所有非 waived 項目（含 logic 類），漏收任何一頁就會被退回。**
 3. **逐項在實際程式碼中驗證**（一項都不可跳過）：
    - **logic（修復後預期行為）→ 讀實際的程式碼修改（diff / 相關檔案），追完整程式碼流程確認該行為真的達成，不可只憑檔名、函式名或 implementer 的說法猜。環境允許時用 Playwright 實測頁面行為更好（非必要）**
    - ui_text → 在程式碼中找到該文字的**渲染處**（不是只出現在註解/測試），確認與 BUG 原文要求逐字一致
@@ -544,12 +638,12 @@ ${orchestratorNote}
 
 ---
 
-你是獨立的規格審查員（reviewer）。你的任務：**逐項回對規格檢查表與實際程式碼，判定每一項是否已確實實作**。你不是來寫 code 的，只讀不改。
+你是獨立的規格審查員（reviewer）。你的任務：**逐項回對規格檢查表與實際程式碼，判定每一項是否已確實實作**。你不是來寫 code 的，只讀不改。${componentNotesSection}${engineSeedSection}
 
 ## 審查流程（強制，依序執行）
 
 1. **讀規格原文**：用 Read tool 完整讀取上列規格文件（SA/SD）。這是你判定的唯一依據，不是任何人的轉述。
-2. **取得檢查表（必須看完全部）**：呼叫 get_spec_checklist(taskId="${taskId}", limit=50, offset=0) 取得項目（含 itemId）。**檢查表可能很大且會分頁**——回應裡 hasMore=true 就用遞增的 offset（0、50、100…）繼續呼叫，直到 hasMore=false，把每一頁的項目都收集齊。**save_compliance_review 必須涵蓋所有非 waived 項目（含 logic 類），漏收任何一頁就會被退回。**
+2. **取得檢查表（必須看完全部）**：呼叫 get_spec_checklist(taskId="${taskId}", limit=50, offset=0) 取得項目（含 itemId）。**檢查表可能很大且會分頁**——回應裡 hasMore=true 就以「offset += 本頁回傳的 count」繼續呼叫（頁面過大時會自動縮頁，實際回傳筆數可能小於 limit，note 會給正確的續取 offset——**不可假設每頁固定 50 筆**），直到 hasMore=false，把每一頁的項目都收集齊。**save_compliance_review 必須涵蓋所有非 waived 項目（含 logic 類），漏收任何一頁就會被退回。**
 3. **逐項在實際程式碼中驗證**（一項都不可跳過）：
    - ui_text → 在程式碼中找到該文字的**渲染處**（不是只出現在註解/測試），確認與規格逐字一致
    - api → 確認 path、method、參數確實**串接**（前端有呼叫、後端有 handler），不是只出現字串

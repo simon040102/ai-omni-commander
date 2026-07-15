@@ -29,6 +29,8 @@ const mockDocumentParser = {
 
 import { ExecutionPipeline } from '../ExecutionPipeline.js';
 import { createProject } from '../../db/queries/projects.js';
+// 只有測試可跨 web/MCP 邊界 import——用來釘住 ExecutionPipeline 手抄的 uiTextRule 與 MCP 常數同文
+import { UI_TEXT_EXTRACTION_RULE } from '../../mcp/tools/compliance-tools.js';
 
 function freshDb(): Database.Database {
   const db = new Database(':memory:');
@@ -423,6 +425,8 @@ describe('ExecutionPipeline', () => {
         expect(plan.prompt).toContain('## 規格檢查表（強制 — 讀完規格後立即執行）');
         expect(plan.prompt).toContain(`mcp__omni-commander__save_spec_checklist(taskId="${tid}", items=[{itemType, content, side?, sourceRef?}, ...])`);
         expect(plan.prompt).toContain('itemType="logic"');
+        // P2：行為敘述句禁存 ui_text——斷言「全文」與 MCP 常數逐字相同（釘住兩處手抄同步）
+        expect(plan.prompt).toContain(UI_TEXT_EXTRACTION_RULE);
         // 第一步：run_spec_compliance 程式預檢（advisory，不解鎖閘門）
         expect(plan.prompt).toContain(`mcp__omni-commander__run_spec_compliance(taskId="${tid}")`);
         expect(plan.prompt).toContain('程式預檢');
@@ -468,6 +472,8 @@ describe('ExecutionPipeline', () => {
       expect(plan.prompt).toContain('## 規格檢查表（light 軌 — 從 BUG 原文抽取，強制）');
       expect(plan.prompt).toContain('修復後預期行為');
       expect(plan.prompt).toContain('itemType="logic"');
+      // P2：light 軌同守——全文與 MCP 常數逐字相同（釘住兩處手抄同步）
+      expect(plan.prompt).toContain(UI_TEXT_EXTRACTION_RULE);
       expect(plan.prompt).toContain('mcp__omni-commander__get_asana_task_comments(taskId="t-lt")');
       expect(plan.prompt).toContain('mcp__omni-commander__fetch_task_attachments(projectId="p-lt", taskId="t-lt")');
       expect(plan.prompt).toContain('mcp__omni-commander__save_spec_checklist(taskId="t-lt"');

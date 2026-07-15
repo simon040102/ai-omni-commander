@@ -155,6 +155,36 @@ describe('compliance-tools', () => {
       const result = await callTool(server, 'save_spec_checklist', { taskId: 'nope', items: [UI_ITEM] });
       expect(result.isError).toBe(true);
     });
+
+    it('P4: returns the created item ids as a parseable JSON block matching the DB', async () => {
+      seedProject(testDb);
+      seedTask(testDb);
+
+      const result = await callTool(server, 'save_spec_checklist', {
+        taskId: 'task-1',
+        items: [UI_ITEM, { itemType: 'logic', content: '依建立日期倒序' }],
+      });
+      expect(result.isError).toBeUndefined();
+      const text = result.content[0].text;
+      // 引導文字保留
+      expect(text).toContain('Spec checklist saved');
+      expect(text).toContain('run_spec_compliance');
+      // created JSON 區塊
+      const created = JSON.parse(text.slice(text.indexOf('created:') + 'created:'.length)) as Array<{ id: string; itemType: string; content: string }>;
+      expect(created).toHaveLength(2);
+      expect(created[0]).toMatchObject({ itemType: 'ui_text', content: '代理人設定作業' });
+      expect(created[1]).toMatchObject({ itemType: 'logic', content: '依建立日期倒序' });
+      // id 與 DB 一致
+      const dbIds = (testDb.prepare('SELECT id FROM spec_checklist_items WHERE task_id = ? ORDER BY created_at ASC, rowid ASC').all('task-1') as Array<{ id: string }>).map(r => r.id);
+      expect(created.map(c => c.id)).toEqual(dbIds);
+    });
+
+    it('P2: tool description forbids storing behaviour sentences as ui_text (存 logic)', () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const tool = (server as any)._registeredTools['save_spec_checklist'];
+      expect(tool.description).toContain('禁止存 ui_text——存 logic');
+      expect(tool.description).toContain('字面文字');
+    });
   });
 
   describe('get_spec_checklist', () => {
@@ -208,6 +238,35 @@ describe('compliance-tools', () => {
         if (!page.hasMore) break;
       }
       expect(allIds.size).toBe(120);
+    });
+
+    it('P3: auto-shrinks an oversized page so the JSON stays parseable, hasMore is trustworthy, and all ids are reachable across pages', async () => {
+      seedProject(testDb);
+      seedTask(testDb);
+      // 30 項 × ~1500 字 content → 單頁（limit=50）JSON 遠超 CHARACTER_LIMIT(25000)
+      const big = 'X規格文字'.repeat(300);
+      const items = Array.from({ length: 30 }, (_, i) => ({ itemType: 'ui_text', content: `項${i}-${big}` }));
+      await callTool(server, 'save_spec_checklist', { taskId: 'task-1', items });
+
+      const raw = (await callTool(server, 'get_spec_checklist', { taskId: 'task-1', limit: 50, offset: 0 })).content[0].text;
+      const p1 = JSON.parse(raw); // 不會 throw——回應是完整 JSON，不是硬截斷
+      expect(p1.total).toBe(30);
+      expect(p1.count).toBeLessThan(30);          // 本頁自動縮小
+      expect(p1.count).toBe(p1.items.length);     // count 以實際回傳筆數計
+      expect(p1.hasMore).toBe(true);              // hasMore 可信
+      expect(p1.note).toContain('自動縮至');
+      expect(p1.note).toContain(`offset=${p1.count}`);
+
+      // 跨頁（以實際回傳的 count 推進 offset）仍可收齊全部 30 個 id
+      const allIds = new Set<string>();
+      for (let offset = 0; ;) {
+        const page = JSON.parse((await callTool(server, 'get_spec_checklist', { taskId: 'task-1', limit: 50, offset })).content[0].text);
+        expect(page.count).toBe(page.items.length);
+        for (const it of page.items) allIds.add(it.id);
+        if (!page.hasMore) break;
+        offset += page.count;
+      }
+      expect(allIds.size).toBe(30);
     });
   });
 
@@ -407,6 +466,11 @@ describe('compliance-tools', () => {
       expect(text).toContain('反向掃描無遺漏');
       expect(text).toContain('每筆 evidence 會被程式驗證');
       expect(text).toContain('整批退回');
+      // P2：反向掃描補項同守 ui_text 抽取規範
+      expect(text).toContain('禁止存 ui_text——存 logic');
+      // P1：回寫閉環（save_compliance_review 之後記錄可重用元件級事實）
+      expect(text).toContain('save_project_note(projectId="proj-1", category="component"');
+      expect(text).toContain('無出處的觀察不記');
       // full 軌（無 track 記錄）不得出現 light 內容
       expect(text).not.toContain('LIGHT 軌');
       expect(text).not.toContain('原始 BUG 內容');
@@ -446,6 +510,9 @@ describe('compliance-tools', () => {
       expect(text).toContain('反向掃描無遺漏');
       expect(text).toContain('每筆 evidence 會被程式驗證');
       expect(text).not.toContain('反向掃描規格原文');
+      // P2：補項同守 ui_text 抽取規範；P1：回寫閉環（兩軌共用 commonTail）
+      expect(text).toContain('禁止存 ui_text——存 logic');
+      expect(text).toContain('save_project_note(projectId="proj-1", category="component"');
       // 證據要求、涵蓋要求、寧嚴勿鬆、獨立 reviewer 全部照舊
       expect(text).toContain('evidence');
       expect(text).toContain('必須涵蓋所有未豁免項目');
@@ -453,6 +520,98 @@ describe('compliance-tools', () => {
       expect(text).toContain('絕不可由寫 code 的 implementer 自評');
       expect(text).toContain('必須自己用 Read/Grep 開檔案核對');
       expect(text).toContain(`save_compliance_review(taskId="task-1"`);
+    });
+
+    it('P1: injects active category=component notes only (no other categories, no archived); absent when none', async () => {
+      seedProject(testDb);
+      seedTask(testDb);
+      await callTool(server, 'save_spec_checklist', { taskId: 'task-1', items: [UI_ITEM] });
+
+      // 無 component notes → 整節不出現（回寫步驟照樣存在）
+      const before = (await callTool(server, 'get_compliance_review_plan', { taskId: 'task-1' })).content[0].text;
+      expect(before).not.toContain('## 元件知識庫');
+      expect(before).toContain('save_project_note(projectId="proj-1", category="component"');
+
+      testDb.prepare(`INSERT INTO project_notes (id, project_id, category, content) VALUES ('n-comp', 'proj-1', 'component', '共用表頭元件 PageHeader.tsx 會自動加「作業」字尾')`).run();
+      testDb.prepare(`INSERT INTO project_notes (id, project_id, category, content) VALUES ('n-pit', 'proj-1', 'pitfall', '大表禁 findAll')`).run();
+      testDb.prepare(`INSERT INTO project_notes (id, project_id, category, content, active) VALUES ('n-arch', 'proj-1', 'component', '已封存的元件事實', 0)`).run();
+
+      const text = (await callTool(server, 'get_compliance_review_plan', { taskId: 'task-1' })).content[0].text;
+      expect(text).toContain('## 元件知識庫');
+      expect(text).toContain('PageHeader.tsx');
+      // 框架文字：降低追查成本 + 不是免驗證通行證
+      expect(text).toContain('證據在哪個元件檔');
+      expect(text).toContain('這不是免驗證通行證');
+      expect(text).toContain('重查並更新筆記');
+      // 只注入 component 分類；封存的不注入
+      expect(text).not.toContain('大表禁 findAll');
+      expect(text).not.toContain('已封存的元件事實');
+    });
+
+    it('P1: component notes are budget-capped — 超量筆記截斷並附提示，防線文字不被擠出', async () => {
+      seedProject(testDb);
+      seedTask(testDb);
+      await callTool(server, 'save_spec_checklist', { taskId: 'task-1', items: [UI_ITEM] });
+      // 塞爆預算（4000 字元）：10 筆各 ~600 字元
+      for (let i = 0; i < 10; i++) {
+        testDb.prepare(`INSERT INTO project_notes (id, project_id, category, content) VALUES (?, 'proj-1', 'component', ?)`)
+          .run(`n-big-${i}`, `元件事實 ${i}：${'很長的說明'.repeat(120)}`);
+      }
+
+      const text = (await callTool(server, 'get_compliance_review_plan', { taskId: 'task-1' })).content[0].text;
+      expect(text).toContain('## 元件知識庫');
+      expect(text).toContain('元件事實 0'); // 最早的筆記有進
+      expect(text).toContain('筆記已達大小上限截斷');
+      expect(text).not.toContain('元件事實 9'); // 超出預算的沒進
+      // 預算生效 → plan 尾端的防線文字沒被 truncateResponse 擠掉
+      expect(text).toContain('不得呼叫 update_task_status');
+    });
+
+    it('分頁指示與縮頁行為一致：以本頁 count 遞增 offset，不假設固定 50 筆', async () => {
+      seedProject(testDb);
+      seedTask(testDb);
+      await callTool(server, 'save_spec_checklist', { taskId: 'task-1', items: [UI_ITEM] });
+
+      const text = (await callTool(server, 'get_compliance_review_plan', { taskId: 'task-1' })).content[0].text;
+      expect(text).toContain('offset += 本頁回傳的 count');
+      expect(text).toContain('不可假設每頁固定 50 筆');
+      expect(text).not.toContain('0、50、100');
+    });
+
+    it('P1: latest engine run seeds matched evidence (file:line) into the plan; absent without a run', async () => {
+      seedProject(testDb);
+      seedTask(testDb);
+      await callTool(server, 'save_spec_checklist', { taskId: 'task-1', items: [UI_ITEM, MISSING_ITEM] });
+
+      const before = (await callTool(server, 'get_compliance_review_plan', { taskId: 'task-1' })).content[0].text;
+      expect(before).not.toContain('引擎預檢種子');
+
+      await callTool(server, 'run_spec_compliance', { taskId: 'task-1' }); // UI_ITEM matched at src/Index.tsx:1
+      const after = (await callTool(server, 'get_compliance_review_plan', { taskId: 'task-1' })).content[0].text;
+      expect(after).toContain('## 引擎預檢種子');
+      expect(after).toContain('src/Index.tsx:1');
+      expect(after).toContain('[ui_text] 代理人設定作業');
+      // 種子只是起點：仍須自己開檔確認、時間集中在 missing/manual/logic
+      expect(after).toContain('引擎 missing / manual / logic');
+      expect(after).not.toContain('不存在的文字 →'); // engine missing 的項目不進種子
+    });
+
+    it('P1: light 軌 plan 也注入元件知識庫與引擎種子', async () => {
+      seedProject(testDb);
+      seedTask(testDb);
+      testDb.prepare(`UPDATE tasks SET flow_state = ? WHERE id = 'task-1'`).run(
+        JSON.stringify({ roles: {}, track: 'light', trackReason: '自動判定' }),
+      );
+      await callTool(server, 'save_spec_checklist', { taskId: 'task-1', items: [UI_ITEM] });
+      testDb.prepare(`INSERT INTO project_notes (id, project_id, category, content) VALUES ('n-comp', 'proj-1', 'component', '共用查詢列元件 SearchBar.tsx 一列兩欄')`).run();
+      await callTool(server, 'run_spec_compliance', { taskId: 'task-1' });
+
+      const text = (await callTool(server, 'get_compliance_review_plan', { taskId: 'task-1' })).content[0].text;
+      expect(text).toContain('LIGHT 軌');
+      expect(text).toContain('## 元件知識庫');
+      expect(text).toContain('SearchBar.tsx');
+      expect(text).toContain('## 引擎預檢種子');
+      expect(text).toContain('src/Index.tsx:1');
     });
   });
 
