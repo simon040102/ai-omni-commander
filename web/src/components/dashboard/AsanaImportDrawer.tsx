@@ -88,7 +88,10 @@ export function AsanaImportDrawer({ open, onClose }: AsanaImportDrawerProps) {
           title: asanaTask.name,
           description,
           taskType: 'other' as const,
-          label: (/前端|串接/.test(asanaTask.name) ? 'frontend' : /後端/.test(asanaTask.name) ? 'backend' : 'backend') as 'frontend' | 'backend',
+          // Keep aligned with server/src/utils/taskClassification.ts detectLabel()
+          // (client cannot import server code): 前端/串接 → frontend, 後端 → backend,
+          // no marker → frontend (canonical default).
+          label: (/前端|串接/.test(asanaTask.name) ? 'frontend' : /後端/.test(asanaTask.name) ? 'backend' : 'frontend') as 'frontend' | 'backend',
           source: 'asana' as const,
           sourceRef: asanaTask.gid,
           specUrl,

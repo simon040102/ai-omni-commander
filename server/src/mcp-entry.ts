@@ -44,6 +44,11 @@ async function main() {
   process.on('unhandledRejection', (err) => {
     process.stderr.write(`[MCP] Unhandled rejection: ${err instanceof Error ? (err.stack || err.message) : String(err)}\n`);
   });
+  // Same pattern as the Web server (index.ts): log to stderr and keep serving —
+  // stdout is the JSON-RPC channel and must never receive diagnostics.
+  process.on('uncaughtException', (err) => {
+    process.stderr.write(`[MCP] Uncaught exception: ${err instanceof Error ? (err.stack || err.message) : String(err)}\n`);
+  });
   server.server.onclose = shutdown;
 
   await server.connect(transport);

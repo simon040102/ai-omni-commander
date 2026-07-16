@@ -154,6 +154,7 @@ export function runMigrations(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_events_project ON events(project_id);
     CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
     CREATE INDEX IF NOT EXISTS idx_agent_outputs_agent ON agent_outputs(agent_id);
+    CREATE INDEX IF NOT EXISTS idx_agent_outputs_task ON agent_outputs(task_id);
     CREATE INDEX IF NOT EXISTS idx_interventions_status ON interventions(status);
     CREATE INDEX IF NOT EXISTS idx_recent_paths_last_used ON recent_paths(last_used_at DESC);
   `);
@@ -345,8 +346,13 @@ export function runMigrations(db: Database.Database): void {
 
   if (needsQuickRoleMigration || needsReviewingStatusMigration || needsCoordinatorRoleMigration) {
     try {
+      // PRAGMA foreign_keys is a no-op inside a transaction — keep it outside.
+      // BEGIN IMMEDIATE makes the whole rebuild atomic (no half-rebuilt table on
+      // crash) and locks out a concurrently starting second process (Web + MCP
+      // share the same SQLite file).
+      db.exec('PRAGMA foreign_keys = OFF');
       db.exec(`
-        PRAGMA foreign_keys = OFF;
+        BEGIN IMMEDIATE;
 
         CREATE TABLE IF NOT EXISTS agents_new (
           id              TEXT PRIMARY KEY,
@@ -382,10 +388,12 @@ export function runMigrations(db: Database.Database): void {
         ALTER TABLE agents_new RENAME TO agents;
         CREATE INDEX IF NOT EXISTS idx_agents_project ON agents(project_id);
 
-        PRAGMA foreign_keys = ON;
+        COMMIT;
       `);
     } catch (err) {
       process.stderr.write(`[schema] agents role/status migration failed: ${err instanceof Error ? err.message : String(err)}\n`);
+      try { db.exec('ROLLBACK'); } catch { /* no open transaction */ }
+    } finally {
       db.exec('PRAGMA foreign_keys = ON');
     }
   }
@@ -394,8 +402,9 @@ export function runMigrations(db: Database.Database): void {
   const tasksInfo = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'").get() as { sql: string } | undefined;
   if (tasksInfo?.sql && (!tasksInfo.sql.includes("'fullstack'") || !tasksInfo.sql.includes("'testing'"))) {
     try {
+      db.exec('PRAGMA foreign_keys = OFF');
       db.exec(`
-        PRAGMA foreign_keys = OFF;
+        BEGIN IMMEDIATE;
 
         CREATE TABLE IF NOT EXISTS tasks_new (
           id                TEXT PRIMARY KEY,
@@ -433,10 +442,12 @@ export function runMigrations(db: Database.Database): void {
         ALTER TABLE tasks_new RENAME TO tasks;
         CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
 
-        PRAGMA foreign_keys = ON;
+        COMMIT;
       `);
     } catch (err) {
       process.stderr.write(`[schema] tasks fullstack/testing migration failed: ${err instanceof Error ? err.message : String(err)}\n`);
+      try { db.exec('ROLLBACK'); } catch { /* no open transaction */ }
+    } finally {
       db.exec('PRAGMA foreign_keys = ON');
     }
   }
@@ -558,8 +569,9 @@ export function runMigrations(db: Database.Database): void {
     const specGapsInfo = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='spec_gaps'").get() as { sql: string } | undefined;
     if (specGapsInfo?.sql && !specGapsInfo.sql.includes("'spec_changed'")) {
       try {
+        db.exec('PRAGMA foreign_keys = OFF');
         db.exec(`
-          PRAGMA foreign_keys = OFF;
+          BEGIN IMMEDIATE;
 
           CREATE TABLE IF NOT EXISTS spec_gaps_new (
             id              TEXT PRIMARY KEY,
@@ -582,10 +594,12 @@ export function runMigrations(db: Database.Database): void {
           CREATE INDEX IF NOT EXISTS idx_spec_gaps_task ON spec_gaps(task_id);
           CREATE INDEX IF NOT EXISTS idx_spec_gaps_status ON spec_gaps(status);
 
-          PRAGMA foreign_keys = ON;
+          COMMIT;
         `);
       } catch (err) {
         process.stderr.write(`[schema] v12 spec_gaps spec_changed migration failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        try { db.exec('ROLLBACK'); } catch { /* no open transaction */ }
+      } finally {
         db.exec('PRAGMA foreign_keys = ON');
       }
     }
@@ -601,8 +615,9 @@ export function runMigrations(db: Database.Database): void {
     const documentsInfo = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='documents'").get() as { sql: string } | undefined;
     if (documentsInfo?.sql && documentsInfo.sql.includes('doc_type') && documentsInfo.sql.includes('CHECK') && !documentsInfo.sql.includes("'verification'")) {
       try {
+        db.exec('PRAGMA foreign_keys = OFF');
         db.exec(`
-          PRAGMA foreign_keys = OFF;
+          BEGIN IMMEDIATE;
 
           CREATE TABLE IF NOT EXISTS documents_new (
             id                TEXT PRIMARY KEY,
@@ -624,10 +639,12 @@ export function runMigrations(db: Database.Database): void {
           DROP TABLE documents;
           ALTER TABLE documents_new RENAME TO documents;
 
-          PRAGMA foreign_keys = ON;
+          COMMIT;
         `);
       } catch (err) {
         process.stderr.write(`[schema] v13 documents verification doc_type migration failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        try { db.exec('ROLLBACK'); } catch { /* no open transaction */ }
+      } finally {
         db.exec('PRAGMA foreign_keys = ON');
       }
     }
@@ -712,8 +729,9 @@ export function runMigrations(db: Database.Database): void {
     const specGapsInfo = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='spec_gaps'").get() as { sql: string } | undefined;
     if (specGapsInfo?.sql && !specGapsInfo.sql.includes("'sa_sd_mismatch'")) {
       try {
+        db.exec('PRAGMA foreign_keys = OFF');
         db.exec(`
-          PRAGMA foreign_keys = OFF;
+          BEGIN IMMEDIATE;
 
           CREATE TABLE IF NOT EXISTS spec_gaps_new (
             id              TEXT PRIMARY KEY,
@@ -736,10 +754,12 @@ export function runMigrations(db: Database.Database): void {
           CREATE INDEX IF NOT EXISTS idx_spec_gaps_task ON spec_gaps(task_id);
           CREATE INDEX IF NOT EXISTS idx_spec_gaps_status ON spec_gaps(status);
 
-          PRAGMA foreign_keys = ON;
+          COMMIT;
         `);
       } catch (err) {
         process.stderr.write(`[schema] v17 spec_gaps sa_sd_mismatch migration failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        try { db.exec('ROLLBACK'); } catch { /* no open transaction */ }
+      } finally {
         db.exec('PRAGMA foreign_keys = ON');
       }
     }

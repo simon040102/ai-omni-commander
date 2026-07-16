@@ -13,6 +13,7 @@ import {
   type ExecutionTrack,
 } from '../flow-gate.js';
 import { parseJson, getAsanaPat, ASANA_API_BASE, ASANA_FETCH_TIMEOUT_MS } from '../helpers.js';
+import { detectLabel, detectTaskType } from '../../utils/taskClassification.js';
 import { runSpecChangeCheck, type SpecChangeTarget } from '../spec-change.js';
 import { parseTestCommands, getRequiredUnitTestItems, findLatestUnitTestVerification, UNRELATED_TEST_FAILURE_RULE } from './verification-tools.js';
 
@@ -855,21 +856,8 @@ ${unitFailures.join('\n')}
           return obj;
         };
 
-        // Label detection (regex-based)
-        const detectLabel = (title: string): string => {
-          if (/前端|串接/.test(title)) return 'frontend';
-          if (/後端/.test(title)) return 'backend';
-          return 'frontend';
-        };
-
-        // Task type detection (regex-based)
-        const detectTaskType = (title: string, notes: string): string => {
-          const text = `${title} ${notes}`.toLowerCase();
-          if (/bug|fix|error|crash|broken|fail|issue|problem|wrong|incorrect|失效|錯誤/.test(text)) return 'bug';
-          if (/refactor|restructure|reorganize|重構/.test(text)) return 'refactor';
-          if (/add|create|implement|build|new|feature|新增|開發/.test(text)) return 'feature';
-          return 'other';
-        };
+        // Label / task type detection: shared pure module (utils/taskClassification)
+        // — same logic as TaskClassifier on the Web-server sync path.
 
         // Upsert: create new tasks, update existing if changed.
         // Runs in a single transaction — no half-synced state on failure, and much faster.

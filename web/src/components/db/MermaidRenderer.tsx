@@ -62,7 +62,11 @@ export default function MermaidRenderer({ content, height = '60vh', filename = '
         mermaid.initialize({
           startOnLoad: false,
           theme: isDark ? 'dark' : 'default',
-          securityLevel: 'loose',
+          // 'antiscript': keeps HTML labels rendering but strips <script> — a
+          // hard upgrade from the previous 'loose' (no sanitization at all).
+          // NOT 'strict': 15/90 existing data/sa-flows/*.mmd use <br/> line
+          // breaks in labels, which strict would encode into literal text.
+          securityLevel: 'antiscript',
           fontFamily: '"Noto Sans TC", "Microsoft JhengHei", system-ui, sans-serif',
           er: { fontSize: 14, useMaxWidth: false },
           themeVariables: isDark ? {

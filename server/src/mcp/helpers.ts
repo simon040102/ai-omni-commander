@@ -96,7 +96,8 @@ export function maskConnectionString(connStr: string): string {
 
 /**
  * Mask credentials in a project config object before returning it from a tool:
- * dbConnections[].password → '***'; passwords inside connectionString → ***.
+ * dbConnections[].password → '***'; passwords inside connectionString → ***;
+ * legacy svnConfig.password (older config_json rows) → '***'.
  */
 export function maskProjectConfig<T>(config: T): T {
   if (!config || typeof config !== 'object') return config;
@@ -110,6 +111,13 @@ export function maskProjectConfig<T>(config: T): T {
         if (typeof c['connectionString'] === 'string') c['connectionString'] = maskConnectionString(c['connectionString']);
       }
     }
+  }
+  // SvnConfig no longer carries credentials (they live in global_config), but
+  // older config_json rows may still contain svnConfig.password — mask it too.
+  const svn = clone['svnConfig'];
+  if (svn && typeof svn === 'object') {
+    const s = svn as Record<string, unknown>;
+    if (typeof s['password'] === 'string' && s['password'] !== '') s['password'] = '***';
   }
   return clone as T;
 }

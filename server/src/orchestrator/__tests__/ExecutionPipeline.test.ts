@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { runMigrations } from '../../db/schema.js';
 
@@ -47,11 +47,17 @@ describe('ExecutionPipeline', () => {
   beforeEach(() => {
     testDb = freshDb();
     vi.clearAllMocks();
+    // executeTask 有 legacy spawn 前置閘（預設拒絕）——測試預設放行，閘門行為由專屬測試覆蓋
+    process.env['ALLOW_LEGACY_SPAWN'] = '1';
     pipeline = new ExecutionPipeline(
       mockAgentManager as any,
       mockEventBus as any,
       mockDocumentParser as any,
     );
+  });
+
+  afterEach(() => {
+    delete process.env['ALLOW_LEGACY_SPAWN'];
   });
 
   describe('classifyTask()', () => {
@@ -163,6 +169,18 @@ describe('ExecutionPipeline', () => {
       expect(call.projectId).toBe('p-task');
       expect(call.taskId).toBe('t1');
       expect(call.prompt).toContain('Fix Login');
+    });
+
+    it('ALLOW_LEGACY_SPAWN 未設時在任何副作用（含 SA flow spawn）之前就 throw', async () => {
+      delete process.env['ALLOW_LEGACY_SPAWN'];
+      createProject({ id: 'p-gate', name: 'Gate Test', workingDir: '/tmp/gate' });
+      testDb.prepare(`
+        INSERT INTO tasks (id, project_id, title, description, label, task_type)
+        VALUES ('t-gate', 'p-gate', 'Fix Login', 'crash', 'frontend', 'bug')
+      `).run();
+
+      await expect(pipeline.executeTask('t-gate')).rejects.toThrow('spawn 派工已停用');
+      expect(mockStartAgent).not.toHaveBeenCalled();
     });
   });
 

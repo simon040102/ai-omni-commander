@@ -100,6 +100,36 @@ describe('AgentManager', () => {
     vi.useRealTimers();
   });
 
+  describe('startAgent — legacy spawn hard gate', () => {
+    afterEach(() => {
+      delete process.env['ALLOW_LEGACY_SPAWN'];
+    });
+
+    it('throws when ALLOW_LEGACY_SPAWN is not set (spawn disabled by default)', async () => {
+      delete process.env['ALLOW_LEGACY_SPAWN'];
+      await expect(manager.startAgent({ projectId: 'proj-1', role: 'frontend', prompt: 'x' } as any))
+        .rejects.toThrow(/spawn 派工已停用/);
+      // Gate fires before any DB writes
+      expect(mockCreateAgent).not.toHaveBeenCalled();
+    });
+
+    it('throws for values other than 1/true', async () => {
+      process.env['ALLOW_LEGACY_SPAWN'] = 'yes';
+      await expect(manager.startAgent({ projectId: 'proj-1', role: 'frontend', prompt: 'x' } as any))
+        .rejects.toThrow(/spawn 派工已停用/);
+    });
+
+    it('passes the gate when ALLOW_LEGACY_SPAWN=1 (fails later on mocks, not on the gate)', async () => {
+      process.env['ALLOW_LEGACY_SPAWN'] = '1';
+      try {
+        await manager.startAgent({ projectId: 'proj-1', role: 'frontend', prompt: 'x' } as any);
+      } catch (err) {
+        // With heavy mocking startAgent may fail deeper in — but never on the gate
+        expect((err as Error).message).not.toMatch(/spawn 派工已停用/);
+      }
+    });
+  });
+
   describe('sendInputToAgent — debounce', () => {
     it('buffers rapid inputs and merges after 1.5s', async () => {
       // Set up a fake agent in the DB so _doSendInput can find session ID

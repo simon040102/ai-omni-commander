@@ -1,4 +1,7 @@
 import { describe, it, expect } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { runMigrations } from '../schema.js';
 
@@ -123,6 +126,42 @@ describe('schema migrations (v10–v17)', () => {
     // Idempotent: another run keeps all rows
     runMigrations(db);
     expect((db.prepare('SELECT COUNT(*) as c FROM spec_gaps').get() as any).c).toBe(2);
+  });
+
+  it('runs table rebuilds inside a transaction (atomic — no half-rebuilt table)', () => {
+    // Source-level guard: every DROP/RENAME rebuild block must be wrapped in
+    // BEGIN IMMEDIATE … COMMIT (PRAGMA foreign_keys stays outside — it is a
+    // no-op inside a transaction).
+    const src = fs.readFileSync(
+      path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'schema.ts'), 'utf-8');
+    const rebuildBlocks = src.match(/BEGIN IMMEDIATE;/g) || [];
+    // agents + tasks + spec_gaps(v12) + documents(v13) + spec_gaps(v17)
+    expect(rebuildBlocks.length).toBe(5);
+    expect((src.match(/\bCOMMIT;/g) || []).length).toBe(5);
+    // No rebuild exec string may contain PRAGMA foreign_keys (must stay outside the tx)
+    for (const block of src.split('BEGIN IMMEDIATE;').slice(1)) {
+      const body = block.split('COMMIT;')[0]!;
+      expect(body).not.toContain('PRAGMA foreign_keys');
+    }
+
+    // Behavioral: full migration on an old-shape DB completes with data intact,
+    // no dangling open transaction, and FK enforcement restored.
+    const db = oldShapeDb();
+    db.prepare("INSERT INTO projects (id, name, working_dir) VALUES ('p1','P','/tmp')").run();
+    db.prepare("INSERT INTO tasks (id, project_id, title, label, task_type) VALUES ('t1','p1','T','frontend','other')").run();
+    db.prepare("INSERT INTO spec_gaps (id, task_id, project_id, category, description) VALUES ('g1','t1','p1','other','g')").run();
+    runMigrations(db);
+    expect(db.inTransaction).toBe(false);
+    expect((db.prepare('SELECT COUNT(*) as c FROM spec_gaps').get() as any).c).toBe(1);
+    expect((db.pragma('foreign_keys') as any[])[0].foreign_keys).toBe(1);
+  });
+
+  it('creates idx_agent_outputs_task index (idempotent)', () => {
+    const db = new Database(':memory:');
+    runMigrations(db);
+    runMigrations(db); // idempotent
+    const indexes = db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='agent_outputs'").all() as any[];
+    expect(indexes.map(i => i.name)).toEqual(expect.arrayContaining(['idx_agent_outputs_agent', 'idx_agent_outputs_task']));
   });
 
   it('creates project_notes and task_spec_versions tables', () => {

@@ -4,8 +4,7 @@ import path from 'node:path';
 import mammoth from 'mammoth';
 import iconv from 'iconv-lite';
 import type { SvnConfig } from '@omni/shared';
-import { normalizeSvnUrl } from '../svn/SvnSpecService.js';
-import { getSvnCredentials } from '../db/queries/globalConfig.js';
+import { normalizeSvnUrl, runCommand, buildSvnAuth } from '../svn/SvnSpecService.js';
 import { createChildLogger } from '../utils/logger.js';
 
 const logger = createChildLogger('SpecFetcher');
@@ -157,86 +156,102 @@ export class SpecFetcher {
 
   /**
    * SVN: detect file vs directory. For files, download binary and convert.
-   * Uses svnConfig for authentication if provided.
+   *
+   * Security: svn is spawned with array args (no shell) and the password is
+   * delivered via `--password-from-stdin` (buildSvnAuth), so credentials never
+   * appear on argv. Error messages are self-composed (never echo a command
+   * line), so no thrown/logged message can contain the password.
    */
-  private async fetchSvnAuto(url: string, svnConfig?: SvnConfig | null): Promise<SpecResult> {
+  private async fetchSvnAuto(url: string, _svnConfig?: SvnConfig | null): Promise<SpecResult> {
     const svn = this.getSvnPath();
-    const authArgs = svnConfig ? this.buildAuthArgs(svnConfig) : '--non-interactive';
     const ext = this.getExtFromUrl(url);
 
     // If URL looks like a specific file (has a spec extension), download it directly
     if (ext && SPEC_EXTENSIONS.has(ext)) {
-      return this.fetchSvnFile(url, ext, svn, authArgs);
+      return this.fetchSvnFile(url, ext, svn);
     }
 
-    // Try as a file first (svn cat to check)
-    try {
-      // Use svn info to check if it's a file
-      const infoBuf = execSync(`"${svn}" info "${url}" ${authArgs}`, {
-        encoding: 'buffer',
-        timeout: 15000,
-        maxBuffer: 1024 * 1024,
-      });
-      const info = this.decodeSvnOutput(infoBuf);
+    // Use svn info to check if it's a file
+    const infoRes = await this.runSvn(svn, ['info', url], 15000, 1024 * 1024);
+    if (infoRes.status === 0 && !infoRes.error) {
+      const info = this.decodeSvnOutput(infoRes.stdout);
       if (info.includes('Node Kind: file') || info.includes('節點類型: 檔案')) {
         // It's a file — detect extension from URL and download
         const fileExt = ext || '.txt';
-        return this.fetchSvnFile(url, fileExt, svn, authArgs);
+        return this.fetchSvnFile(url, fileExt, svn);
       }
-    } catch {
-      // svn info failed — try as directory
     }
+    // svn info failed or not a file — try as directory listing
 
-    // Try as directory listing
-    try {
-      const listBuf = execSync(`"${svn}" list -R "${url}" ${authArgs}`, {
-        encoding: 'buffer',
-        timeout: 30000,
-        maxBuffer: 10 * 1024 * 1024,
+    const listRes = await this.runSvn(svn, ['list', '-R', url], 30000, 10 * 1024 * 1024);
+    if (listRes.status !== 0 || listRes.error) {
+      throw new Error(`SVN fetch failed for ${url}: ${this.svnFailureReason(listRes)}`);
+    }
+    const listing = this.decodeSvnOutput(listRes.stdout);
+
+    const files = listing
+      .split('\n')
+      .map(f => f.trim())
+      .filter(f => f && !f.endsWith('/'))
+      .filter(f => {
+        const fExt = path.extname(f).toLowerCase();
+        return SPEC_EXTENSIONS.has(fExt);
       });
-      const listing = this.decodeSvnOutput(listBuf);
 
-      const files = listing
-        .split('\n')
-        .map(f => f.trim())
-        .filter(f => f && !f.endsWith('/'))
-        .filter(f => {
-          const fExt = path.extname(f).toLowerCase();
-          return SPEC_EXTENSIONS.has(fExt);
-        });
+    const tree = files.length > 0
+      ? files.map(f => `- ${f}`).join('\n')
+      : '(no spec documents found)';
 
-      const tree = files.length > 0
-        ? files.map(f => `- ${f}`).join('\n')
-        : '(no spec documents found)';
-
-      logger.info({ url, fileCount: files.length }, 'SVN directory listing');
-      return { type: 'svn-root', content: tree, path: url };
-    } catch (err) {
-      throw new Error(`SVN fetch failed: ${(err as Error).message}`);
-    }
+    logger.info({ url, fileCount: files.length }, 'SVN directory listing');
+    return { type: 'svn-root', content: tree, path: url };
   }
 
   /**
    * Download a specific file from SVN via svn export, then convert.
    */
-  private async fetchSvnFile(url: string, ext: string, svn: string, authArgs: string): Promise<SpecResult> {
+  private async fetchSvnFile(url: string, ext: string, svn: string): Promise<SpecResult> {
     const filename = `spec-${Date.now()}${ext}`;
     const localPath = path.join(this.cacheDir, filename);
 
-    try {
-      execSync(`"${svn}" export --force "${url}" "${localPath}" ${authArgs}`, {
-        encoding: 'buffer',
-        timeout: 120000,
-        maxBuffer: 50 * 1024 * 1024,
-      });
+    const exportRes = await this.runSvn(svn, ['export', '--force', url, localPath], 120000, 50 * 1024 * 1024);
+    if (exportRes.status !== 0 || exportRes.error) {
+      // Cleanup on failure
+      try { fs.unlinkSync(localPath); } catch { /* ignore */ }
+      throw new Error(`SVN export failed for ${url}: ${this.svnFailureReason(exportRes)}`);
+    }
 
+    try {
       const buf = fs.readFileSync(localPath);
       return this.convertBinary(buf, url, ext, localPath);
     } catch (err) {
-      // Cleanup on failure
       try { fs.unlinkSync(localPath); } catch { /* ignore */ }
-      throw new Error(`SVN export failed for ${url}: ${(err as Error).message}`);
+      throw new Error(`SVN export succeeded but reading the exported file failed for ${url}: ${(err as Error).message}`);
     }
+  }
+
+  /**
+   * Run an svn subcommand with global-config auth appended.
+   * spawn with array args (never a shell string); password goes to stdin.
+   */
+  private runSvn(svn: string, args: string[], timeout: number, maxBuffer: number): ReturnType<typeof runCommand> {
+    const auth = buildSvnAuth();
+    return runCommand(svn, [...args, ...auth.args], {
+      timeout,
+      maxBuffer,
+      ...(auth.stdin !== undefined && { stdin: auth.stdin }),
+    });
+  }
+
+  /**
+   * Compose a credential-free failure reason from a runCommand result.
+   * svn writes diagnostics to stderr and never echoes stdin, so stderr is safe;
+   * runCommand's own error messages contain only the executable path.
+   */
+  private svnFailureReason(res: Awaited<ReturnType<typeof runCommand>>): string {
+    const stderrLine = this.decodeSvnOutput(res.stderr).trim().split('\n')[0];
+    if (stderrLine) return stderrLine;
+    if (res.error) return res.error.message;
+    return `svn exited with code ${res.status}`;
   }
 
   /**
@@ -387,14 +402,6 @@ export class SpecFetcher {
 
     this.svnPath = 'svn';
     return 'svn';
-  }
-
-  private buildAuthArgs(_config?: SvnConfig): string {
-    const { username, password } = getSvnCredentials();
-    const parts = ['--non-interactive', '--trust-server-cert', '--no-auth-cache'];
-    if (username) parts.push(`--username "${username}"`);
-    if (password) parts.push(`--password "${password}"`);
-    return parts.join(' ');
   }
 
   private decodeSvnOutput(buf: Buffer): string {

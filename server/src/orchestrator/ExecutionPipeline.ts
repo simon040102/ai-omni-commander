@@ -192,6 +192,14 @@ export class ExecutionPipeline {
    * Execute a specific task from the task list.
    */
   async executeTask(taskId: string, model?: string, mockupFiles?: string[], testOptions?: TestOptions, executionRunId?: string): Promise<string> {
+    // Fail fast BEFORE any side effect: the SA-flow analysis below PTY-spawns
+    // claude on cache miss, which must not happen when legacy spawn is disabled
+    // (the startAgent gate alone would fire only after that spawn already ran).
+    const allowLegacySpawn = process.env['ALLOW_LEGACY_SPAWN'];
+    if (allowLegacySpawn !== '1' && allowLegacySpawn !== 'true') {
+      throw new Error('spawn 派工已停用：任務執行請走外部 Claude Code session + MCP（get_execution_plan）。確定要使用 legacy spawn 請設環境變數 ALLOW_LEGACY_SPAWN=1');
+    }
+
     const task = getTask(taskId);
     if (!task) throw new Error(`Task ${taskId} not found`);
 
@@ -516,20 +524,22 @@ export class ExecutionPipeline {
       }
     }
 
+    // For MCP mode: check SA flow cache only (no PTY generation) — same as
+    // buildExecutionPlan above. If not cached, the subagent generates it via
+    // the save_sa_flow MCP tool; we must never spawn claude from this path.
     let saFlowResult = null;
     if (forRole === 'frontend') {
       const saDoc = this.findSaDocument(taskId, task.projectId, allSvnDocs);
       if (saDoc) {
-        try {
-          saFlowResult = await this.saFlowAnalyzer.analyze({
-            projectId: task.projectId,
-            taskId,
-            saContent: saDoc.content,
-            sourceFilename: saDoc.filename,
-            taskType: task.taskType,
-            taskDescription: task.description || '',
-          });
-        } catch { /* ignore */ }
+        // Check cache only — don't call PTY
+        const saHash = crypto.createHash('sha256').update(saDoc.content).digest('hex').slice(0, 16);
+        const cachedPath = this.saFlowAnalyzer.getFlowPath(task.projectId, saHash);
+        if (fs.existsSync(cachedPath)) {
+          const cachedFlow = fs.readFileSync(cachedPath, 'utf-8');
+          saFlowResult = { fullFlow: cachedFlow, relevantFlow: cachedFlow, flowPath: cachedPath };
+        }
+        // If not cached, saFlowResult stays null → assembleContext won't include it
+        // The MCP prompt header instructs the subagent to generate and save_sa_flow
       }
     }
 

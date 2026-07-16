@@ -41,6 +41,11 @@ import { getTask } from './db/queries/tasks.js';
 import { getRecentPaths, addRecentPath, removeRecentPath, clearRecentPaths, migrateProjectPathsToRecent } from './db/queries/recentPaths.js';
 import { getAllProjectNotes, createProjectNote, archiveProjectNote } from './db/queries/projectNotes.js';
 import { genId } from './utils/uuid.js';
+import { isSafePathParam } from './utils/pathSafety.js';
+import { ensureNotifyToken, verifyNotifyToken } from './utils/notifyToken.js';
+// maskProjectConfig is a pure function (no MCP process/state dependency) — safe
+// to reuse from the Web server so both surfaces mask credentials identically.
+import { maskProjectConfig, maskConnectionString } from './mcp/helpers.js';
 import { logger } from './utils/logger.js';
 import type { WsMessage } from '@omni/shared';
 import { EventTypes, CURRENT_MODELS, LEGACY_MODELS } from '@omni/shared';
@@ -59,6 +64,17 @@ async function main() {
 
   const config = getConfig();
   logger.info({ port: config.port }, 'Starting AI-OmniCommander (SDK mode)');
+
+  // Loud warning when binding beyond loopback — the HTTP/WS surface has NO
+  // authentication: anyone on the LAN could read specs/credentials and drive tasks.
+  const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
+  if (!LOOPBACK_HOSTS.has(config.host)) {
+    logger.warn('============================================================');
+    logger.warn(`  !! WARNING: HOST=${config.host} — server 綁定非 loopback 介面 !!`);
+    logger.warn('  Web UI / API 沒有任何認證，區網內任何人都能讀取專案設定');
+    logger.warn('  （含 DB 連線字串）並操作任務。僅限受信任的內網使用。');
+    logger.warn('============================================================');
+  }
 
   // Log available Claude models
   logger.info('=== Available Claude Models ===');
@@ -160,8 +176,7 @@ async function main() {
   // Assigned after the WS server is created (routes above it may reference it at request time)
   let wsServerRef: OmniWebSocketServer | null = null;
 
-  /** Validate path parameters to prevent directory traversal */
-  const isSafePathParam = (v: string): boolean => !v.includes('..') && !v.includes('/') && !v.includes('\\');
+  // Path-parameter traversal guard: shared impl in utils/pathSafety.ts
 
   // Health check (ok + uptime consumed by MCP health_check tool)
   app.get('/api/health', (_req, res) => {
@@ -428,7 +443,28 @@ async function main() {
       // Fetch rows
       const rows = db.prepare(
         `SELECT * FROM ${tableName} ${whereClause} ORDER BY ${safeOrderBy} ${order} LIMIT ? OFFSET ?`
-      ).all(...params, limit, offset);
+      ).all(...params, limit, offset) as Array<Record<string, unknown>>;
+
+      // projects.config_json carries credentials (dbConnections password /
+      // connectionString, legacy svnConfig.password) — mask before returning.
+      if (tableName === 'projects') {
+        for (const row of rows) {
+          const raw = row['config_json'];
+          if (typeof raw === 'string' && raw.trim() !== '') {
+            try {
+              row['config_json'] = JSON.stringify(maskProjectConfig(JSON.parse(raw)));
+            } catch {
+              // Unparseable JSON could still contain secrets — never return it raw.
+              row['config_json'] = '"[config_json unparseable — masked]"';
+            }
+          }
+          // Legacy top-level column (v3 migration) also embeds Password=…
+          const connStr = row['db_connection_string'];
+          if (typeof connStr === 'string' && connStr !== '') {
+            row['db_connection_string'] = maskConnectionString(connStr);
+          }
+        }
+      }
 
       res.json({
         table: tableName,
@@ -574,6 +610,23 @@ async function main() {
 
       if (!data) {
         res.status(400).json({ error: 'data is required' });
+        return;
+      }
+
+      // projectId/taskId become filesystem path segments — reject traversal
+      // characters and unknown projects before touching the filesystem.
+      if (projectId !== undefined) {
+        if (typeof projectId !== 'string' || !isSafePathParam(projectId)) {
+          res.status(400).json({ error: 'Invalid projectId' });
+          return;
+        }
+        if (!getProject(projectId)) {
+          res.status(400).json({ error: `Unknown projectId: ${projectId}` });
+          return;
+        }
+      }
+      if (taskId !== undefined && (typeof taskId !== 'string' || !isSafePathParam(taskId))) {
+        res.status(400).json({ error: 'Invalid taskId' });
         return;
       }
 
@@ -963,8 +1016,20 @@ async function main() {
   // project.created / project.updated / project.noteSaved, sa-flow.saved, asana.syncResult.
   const MCP_EVENT_PREFIXES = ['agent.', 'task.', 'project.', 'sa-flow.', 'asana.'];
 
+  // Shared-secret token (data/.notify-token) — the MCP process reads the same
+  // file and sends it as x-notify-token. null = file unwritable → skip validation.
+  const notifyToken = ensureNotifyToken(path.dirname(config.dbPath));
+  if (!notifyToken) {
+    logger.warn('Could not create data/.notify-token — /api/mcp-notify will accept unauthenticated requests');
+  }
+
   app.post('/api/mcp-notify', (req, res) => {
     try {
+      if (!verifyNotifyToken(notifyToken, req.headers['x-notify-token'])) {
+        logger.warn('Rejected MCP notify request (missing/invalid x-notify-token)');
+        res.status(401).json({ error: 'Invalid or missing x-notify-token' });
+        return;
+      }
       const { event, data } = req.body as { event: string; data: Record<string, unknown> };
       if (!event || typeof event !== 'string') {
         res.status(400).json({ error: 'Missing event field' });
