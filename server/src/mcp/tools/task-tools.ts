@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { getMcpDb } from '../db.js';
 import { notifyWebServer } from '../notify.js';
 import {
-  GATE_B_MAX_FAILURES, FLOW_NODE_LEVEL_SPEC,
+  GATE_B_MAX_FAILURES, GATE_A_LABEL, GATE_B_LABEL, FLOW_NODE_LEVEL_SPEC,
   resolveRole, mutateFlowState, getFlowState, getRoleState,
   detectSpecDocuments, getCompletionBlockers, logTaskOutput,
   type ExecutionTrack,
@@ -15,7 +15,7 @@ import {
 import { parseJson, getAsanaPat, ASANA_API_BASE, ASANA_FETCH_TIMEOUT_MS } from '../helpers.js';
 import { detectLabel, detectTaskType } from '../../utils/taskClassification.js';
 import { runSpecChangeCheck, type SpecChangeTarget } from '../spec-change.js';
-import { parseTestCommands, getRequiredUnitTestItems, findLatestUnitTestVerification, UNRELATED_TEST_FAILURE_RULE } from './verification-tools.js';
+import { parseTestCommands, getRequiredUnitTestItems, findLatestUnitTestVerification, listVerificationEntries, UNRELATED_TEST_FAILURE_RULE } from './verification-tools.js';
 import { getStalledHours, DEFAULT_STALE_THRESHOLD_HOURS } from '../stale-tasks.js';
 
 interface TaskRow {
@@ -318,7 +318,7 @@ export function registerTaskTools(server: McpServer): void {
             flowGateSection = `
 ## Flow-Gated Development（強制工作流 — 依序執行，不可跳步）
 
-本任務已啟用流程圖閘門。**閘門 B 未通過前，update_task_status(completed) 會被拒絕。**
+本任務已啟用流程圖閘門。**${GATE_B_LABEL}未通過前，update_task_status(completed) 會被拒絕。**
 
 ${FLOW_NODE_LEVEL_SPEC}
 
@@ -326,11 +326,11 @@ ${FLOW_NODE_LEVEL_SPEC}
 1. **檢查既有圖**：呼叫 get_task_flows(taskId="${task.id}"${rolePart}) 看已有哪些圖（雙角色任務 spec-flow 共用，已存在就沿用不重畫）
 ${flowState.specExpected ? `2. **spec-flow**：完整讀取 SA/SD 規格文件後，畫出**規格要求的業務流程圖**，呼叫 save_task_flow(taskId="${task.id}", flowType="spec", mermaidContent=..., filename=規格檔名)` : `2. 此任務無 SA/SD 規格文件 → **兩圖模式**（跳過 spec-flow，閘門改為與任務描述自洽比對）`}
 3. **plan-flow**：畫出「我打算怎麼實作」的業務步驟流程圖，save_task_flow(taskId="${task.id}", flowType="plan"${rolePart})
-4. **閘門 A**：依工具回應的指示做涵蓋比對，report_flow_check(taskId="${task.id}", gate="A", passed=..., diffs=...${rolePart})。**通過前不可寫 code**
+4. **${GATE_A_LABEL}**：依工具回應的指示做涵蓋比對，report_flow_check(taskId="${task.id}", gate="A", passed=..., diffs=...${rolePart})。**通過前不可寫 code**
 5. **實作**：嚴格照 plan-flow 進行（複雜任務建議先產 mindmap 細節覆蓋清單：save_task_flow flowType="mindmap"）
 6. **code-flow**：實作完成後，從**實際程式碼**反推業務流程圖，save_task_flow(taskId="${task.id}", flowType="code"${rolePart})
-7. **閘門 B**：依工具回應的比對準則做語意比對（建議由主 session 執行，不要由寫 code 的 subagent 自評），report_flow_check(gate="B", ...)。不符 → 修正後重存 code-flow（失敗上限 ${GATE_B_MAX_FAILURES} 次，達上限標 [NEEDS_HUMAN] 回報使用者）
-8. **閘門 B 通過後才跑測試**；測試通過才 update_task_status(taskId="${task.id}", status="completed")
+7. **${GATE_B_LABEL}**：依工具回應的比對準則做語意比對（建議由主 session 執行，不要由寫 code 的 subagent 自評），report_flow_check(gate="B", ...)。不符 → 修正後重存 code-flow（失敗上限 ${GATE_B_MAX_FAILURES} 次，達上限標 [NEEDS_HUMAN] 回報使用者）
+8. **${GATE_B_LABEL}通過後才跑測試**；測試通過才 update_task_status(taskId="${task.id}", status="completed")
 `;
           } else {
             // ── light 軌：不設 flow_required、不初始化 role gate ──
@@ -351,7 +351,7 @@ ${flowState.specExpected ? `2. **spec-flow**：完整讀取 SA/SD 規格文件�
           // full→light 覆寫時 flow_required 不降級（保守），聲明必須如實反映閘門仍生效
           const flowStillRequired = (db.prepare('SELECT flow_required FROM tasks WHERE id = ?').get(task.id) as { flow_required: number | null }).flow_required === 1;
           const lightFlowLine = flowStillRequired
-            ? `⚠ 注意：此任務先前已啟用 Flow-Gated 閘門，閘門**不降級**——結案仍需通過閘門 B（或使用者明確同意 skipFlowGate）。規格回對標準不變：`
+            ? `⚠ 注意：此任務先前已啟用 Flow-Gated 閘門，閘門**不降級**——結案仍需通過${GATE_B_LABEL}（或使用者明確同意 skipFlowGate）。規格回對標準不變：`
             : `本任務跳過 Flow-Gated 流程圖閘門，但規格回對標準不變：`;
           const trackSection = effectiveTrack === 'light'
             ? `## 任務軌道：LIGHT（輕量修復流程）
@@ -407,7 +407,7 @@ ${flowGateSection}
   // ── update_task_status ────────────────────────────────────
   server.tool(
     'update_task_status',
-    'Update the status of a task. Use this to mark tasks as in_progress, completed, or failed. For flow-gated tasks, "completed" is rejected until gate B has passed for every required role. Tasks with a spec checklist additionally require the latest run_spec_compliance run to have missing=0. Projects with frontendTestCommand/backendTestCommand configured additionally require a passing "單元測試全數通過" verification report (report_verification_result) for the task\'s side(s). skipFlowGate=true (with skipReason, only with explicit user approval) overrides all these gates.',
+    'Update the status of a task. Use this to mark tasks as in_progress, completed, or failed. "completed" is guarded by six gates: (1) 完工閘（實作邏輯對齊，原 gate B）for flow-gated tasks; (2) checklist must exist for tasks with a track; (3) latest AI compliance review (save_compliance_review) must have missing=0; (4) projects with frontendTestCommand/backendTestCommand require a passing "單元測試全數通過" verification report for the task\'s side(s); (5) dev tasks (frontend/backend/fullstack) must have an execution plan or dispatch record (get_execution_plan track / [TRACK] / [DISPATCH] via save_task_dispatch); (6) no verification item may have FAIL as its latest report_verification_result. skipFlowGate=true (with skipReason, only with explicit user approval) overrides all these gates.',
     {
       taskId: z.string().describe('The task ID'),
       status: z.enum(['in_progress', 'completed', 'failed']).describe('New task status'),
@@ -465,7 +465,7 @@ ${flowGateSection}
                 message: `Error: 任務尚未通過 Flow-Gated 閘門，不可標記 completed。缺少的步驟：
 ${lines}
 
-請依序補完（save_task_flow → report_flow_check），閘門 B 通過並跑完測試後再結案。
+請依序補完（save_task_flow → report_flow_check），${GATE_B_LABEL}通過並跑完測試後再結案。
 若使用者明確同意跳過閘門，改用 skipFlowGate=true + skipReason 重新呼叫。`,
               };
             }
@@ -589,6 +589,66 @@ ${lines.join('\n')}${more}
 ${unitFailures.join('\n')}
 
 （提醒：既有的**無關失敗**不卡你——${UNRELATED_TEST_FAILURE_RULE}，並建議使用者執行 get_test_baseline_plan 做基線修復。）
+若使用者明確同意跳過閘門，改用 skipFlowGate=true + skipReason 重新呼叫（會記錄 [SKIP]）。`,
+              };
+            }
+          }
+        }
+
+        // ── Execution Plan: exit gate（第五道 — 執行計畫/派工記錄閘門）──
+        // 開發任務（frontend/backend/fullstack）不可在「從未取得執行計畫、也沒有
+        // 派工記錄」的情況下結案——防止繞過 get_execution_plan 直接開工。
+        // 通過條件（任一即可）：
+        //   (a) flow_state 有 track（get_execution_plan 會寫）
+        //   (b) agent_outputs 有 [TRACK] 稽核行（歷史留痕）
+        //   (c) agent_outputs 有 [DISPATCH] 派工快照（save_task_dispatch——基線修復
+        //       這類不走 execution plan 的合法路徑）
+        // 其他 label（devops/testing/review/architect…）不受此閘管制。
+        if (status === 'completed' && ['frontend', 'backend', 'fullstack'].includes(task.label)) {
+          const hasTrack = !!getFlowState(db, taskId)?.track;
+          const hasAuditLine = hasTrack || !!db.prepare(
+            "SELECT 1 FROM agent_outputs WHERE task_id = ? AND stream_type = 'system' AND (content LIKE '[TRACK]%' OR content LIKE '[DISPATCH]%') LIMIT 1"
+          ).get(taskId);
+          if (!hasAuditLine) {
+            if (skipFlowGate) {
+              if (!skipReason || !skipReason.trim()) {
+                return { kind: 'error', message: 'Error: skipFlowGate=true 需要 skipReason（使用者同意跳過閘門的原因）。' };
+              }
+              logTaskOutput(db, taskId, task.project_id, `[SKIP] 使用者跳過執行計畫閘門（無執行計畫/派工記錄）：${skipReason.trim()}`);
+            } else {
+              return {
+                kind: 'error',
+                message: `Error: 此任務從未取得執行計畫或派工記錄——開發任務必須先 get_execution_plan(taskId) 取得流程（或由 orchestrator save_task_dispatch 存派工快照）再開工。
+若使用者明確同意跳過閘門，改用 skipFlowGate=true + skipReason 重新呼叫（會記錄 [SKIP]）。`,
+              };
+            }
+          }
+        }
+
+        // ── Verification Result: exit gate（第六道 — 驗收 FAIL 擋結案）──
+        // 解析此任務所有 [VERIFICATION] 回報（與單元測試閘門共用 listVerificationEntries
+        // 解析器），每個曾回報過的驗收項取最新一筆——任何項最新為 FAIL → 拒絕結案。
+        // 從未回報過的項目不擋（涵蓋性由驗收流程管，單測項已有專屬閘門且在上方先行
+        // 報錯——required 單測項 FAIL 時單元測試閘門已擋下，不會走到這裡重複報錯）。
+        if (status === 'completed') {
+          const latestByItem = new Map<string, boolean>();
+          for (const entry of listVerificationEntries(db, taskId)) {
+            if (!latestByItem.has(entry.item)) latestByItem.set(entry.item, entry.passed);
+          }
+          const failedItems = [...latestByItem.entries()].filter(([, passed]) => !passed).map(([item]) => item);
+          if (failedItems.length > 0) {
+            if (skipFlowGate) {
+              if (!skipReason || !skipReason.trim()) {
+                return { kind: 'error', message: 'Error: skipFlowGate=true 需要 skipReason（使用者同意跳過閘門的原因）。' };
+              }
+              logTaskOutput(db, taskId, task.project_id, `[SKIP] 使用者跳過驗收結果閘門（有 FAIL 驗收項）：${skipReason.trim()}`);
+            } else {
+              return {
+                kind: 'error',
+                message: `Error: 驗收結果閘門未通過，不可標記 completed。以下驗收項最新一筆回報為 FAIL：
+${failedItems.map(i => `- ${i}`).join('\n')}
+
+修復後重跑並用 report_verification_result(taskId="${taskId}", results=[{item, passed:true, note}]) 回報 passed 再結案。
 若使用者明確同意跳過閘門，改用 skipFlowGate=true + skipReason 重新呼叫（會記錄 [SKIP]）。`,
               };
             }

@@ -16,11 +16,12 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import fs from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import path from 'node:path';
+import { randomUUID, createHash } from 'node:crypto';
 import { getMcpDb } from '../db.js';
 import { notifyWebServer } from '../notify.js';
 import { ensureMcpAgent, parseJson, truncateResponse, CHARACTER_LIMIT } from '../helpers.js';
-import { getFlowState } from '../flow-gate.js';
+import { getFlowState, getFlowsDir } from '../flow-gate.js';
 import {
   runComplianceEngine,
   type EngineItem, type ChecklistItemType, type ChecklistSide, type ItemResult, type WorkspaceRoots,
@@ -85,6 +86,56 @@ function getLatestRun(db: ReturnType<typeof getMcpDb>, taskId: string): RunRow |
   return db.prepare(
     'SELECT * FROM spec_compliance_runs WHERE task_id = ? ORDER BY run_at DESC, rowid DESC LIMIT 1'
   ).get(taskId) as RunRow | undefined;
+}
+
+/** SA 流程圖內嵌上限——超過改附檔案絕對路徑讓 reviewer 用 Read 讀（防 plan 膨脹）。 */
+export const SA_FLOW_INLINE_LIMIT = 6000;
+
+/**
+ * 讀取文件內容——與 ExecutionPipeline.readDocContent 同構（web/MCP 邊界不互相 import）：
+ * parsed_text 為 "[Document saved at: X]" 指標 → 讀 X；為內文 → 直接用；否則讀 file_path。
+ */
+function readDocContentForFlow(parsedText: string | null, filePath: string): string | null {
+  if (parsedText) {
+    const mdMatch = parsedText.match(/^\[Document saved at: (.+)\]/);
+    if (mdMatch) {
+      try { return fs.readFileSync(mdMatch[1]!.trim(), 'utf-8'); } catch { return null; }
+    }
+    if (!parsedText.startsWith('[') && parsedText.length > 50) return parsedText;
+  }
+  try {
+    if (fs.existsSync(filePath)) return fs.readFileSync(filePath, 'utf-8');
+  } catch { /* ignore */ }
+  return null;
+}
+
+/**
+ * 找此任務可用的 SA 操作流程圖（R3 流程回對）——沿用 ExecutionPipeline 的 SA flow
+ * cache 查找模式：任務綁定的 SA 文件內容 sha256 前 16 碼 → data/sa-flows/
+ * {projectId}-{hash}-flow.mmd。找不到（無 SA 文件 / 未產生過流程圖）→ null。
+ */
+export function findSaFlowForTask(
+  db: ReturnType<typeof getMcpDb>,
+  taskId: string,
+  projectId: string,
+): { mermaid: string; flowPath: string; filename: string } | null {
+  const saDocs = db.prepare(`
+    SELECT d.filename, d.file_path, d.parsed_text
+    FROM task_documents td JOIN documents d ON d.id = td.document_id
+    WHERE td.task_id = ? AND d.doc_type = 'SA'
+  `).all(taskId) as Array<{ filename: string; file_path: string; parsed_text: string | null }>;
+  for (const doc of saDocs) {
+    const content = readDocContentForFlow(doc.parsed_text, doc.file_path);
+    if (!content) continue;
+    const hash = createHash('sha256').update(content).digest('hex').slice(0, 16);
+    const flowPath = path.join(getFlowsDir(), `${projectId}-${hash}-flow.mmd`);
+    try {
+      if (fs.existsSync(flowPath)) {
+        return { mermaid: fs.readFileSync(flowPath, 'utf-8'), flowPath, filename: doc.filename };
+      }
+    } catch { /* ignore */ }
+  }
+  return null;
 }
 
 export function registerComplianceTools(server: McpServer): void {
@@ -439,7 +490,7 @@ ${JSON.stringify(created, null, 2)}`, '（created 清單被截斷——用 get_s
   // ── get_compliance_review_plan ────────────────────────────
   server.tool(
     'get_compliance_review_plan',
-    '取得「AI 規格回對」的派工計畫（給 orchestrator）。回傳一份完整 prompt：由 orchestrator 派**獨立的 AI 審查 subagent**（絕不可由寫 code 的 implementer 自評）讀 SA/SD 規格原文 + get_spec_checklist 檢查表 + 實際程式碼，逐項判定 matched/missing（必附 file+line 證據），最後用 save_compliance_review 一次寫回。完成閘門只認此 AI 回對結果（最新 ai_review run 的 missing=0）。light 軌任務（get_execution_plan 判軌）驗證對象改為原始 BUG 內容（任務描述 + Asana 留言 + 附件），標準不變。',
+    '取得「AI 規格回對」的派工計畫（給 orchestrator）。回傳一份完整 prompt：由 orchestrator 派**獨立的 AI 審查 subagent**（絕不可由寫 code 的 implementer 自評）讀 SA/SD 規格原文 + get_spec_checklist 檢查表 + 實際程式碼，逐項判定 matched/missing（必附 file+line 證據），最後用 save_compliance_review 一次寫回。完成閘門只認此 AI 回對結果（最新 ai_review run 的 missing=0）。full 軌任務若有 SA 操作流程圖（sa-flows cache），計畫會加「流程回對」步驟：流程圖每個判斷分支/節點補為 logic 檢查項並在程式碼中找到對應路徑。light 軌任務（get_execution_plan 判軌）驗證對象改為原始 BUG 內容（任務描述 + Asana 留言 + 附件），標準不變。',
     {
       taskId: z.string().describe('任務 ID'),
     },
@@ -585,18 +636,50 @@ ${seedLines.join('\n')}${seedTruncated ? '\n（種子清單已達大小上限截
         ? `4. **反向掃描 BUG 原文（完整性檢查）**：重讀 BUG 原文（任務描述、Asana 留言、附件截圖裡的預期行為），找出有明確預期但 checklist 沒有對應項目的行為。找到遺漏 → 呼叫 save_spec_checklist(taskId="${taskId}", items=[...]) 補上（**append，不可用 replace**；補項同守抽取規範：${UI_TEXT_EXTRACTION_RULE}），把補上的項目一併納入本次逐項驗證與 save_compliance_review（新項目通常判 missing，交由 implementer 補做），並在總結列出補了哪些；staleness 閘門會自動要求後續回對涵蓋它們。沒有遺漏也要明確說「反向掃描無遺漏」。`
         : `4. **反向掃描規格原文（完整性檢查）**：逐節掃 SA/SD 規格，找出規格有明確要求但 checklist 沒有對應項目的內容（欄位/文字/API/邏輯）。找到遺漏 → 呼叫 save_spec_checklist(taskId="${taskId}", items=[...]) 補上（**append，不可用 replace**；補項同守抽取規範：${UI_TEXT_EXTRACTION_RULE}），把補上的項目一併納入本次逐項驗證與 save_compliance_review（新項目通常判 missing，交由 implementer 補做），並在總結列出補了哪些；staleness 閘門會自動要求後續回對涵蓋它們。沒有遺漏也要明確說「反向掃描無遺漏」。`;
 
-      const commonTail = `${reverseScanStep}
+      const commonSteps = `${reverseScanStep}
 5. **判定標準（寧嚴勿鬆）**：每項判 matched 或 missing——
    - matched **必須附 evidence**（file + line，workspace 相對路徑）與一句說明（note）
    - **每筆 evidence 會被程式驗證**（檔案存在、行號有效、該行 ±${RELEVANCE_WINDOW} 行內確實含該文字/路徑/識別字）——引用不精確會整批退回，請引用實際包含該文字/路徑/識別字的行（如文字在 i18n 檔就引 i18n 檔）
    - 找不到、不確定、規格與程式碼有出入 → 一律 missing，可用 note 說明疑點
 6. **一次寫回**：全部判完後呼叫 save_compliance_review(taskId="${taskId}", results=[{itemId, status, evidence: [{file, line}], note}, ...])，**必須涵蓋所有未豁免項目**。
 7. **嚴禁**只看 implementer 的回報、verification report、commit message 或任何摘要就下判定——**必須自己用 Read/Grep 開檔案核對**。
-8. **回寫元件知識庫（save_compliance_review 之後）**：把本次審查中新確認的**可重用元件級事實**（共用元件產生什麼文字/行為、慣例差異），用 save_project_note(projectId="${task.project_id}", category="component", content=...) 記錄，內容必須附元件檔路徑與關鍵識別（無出處的觀察不記）——下一個任務的 reviewer 會自動收到。
+8. **回寫元件知識庫（save_compliance_review 之後）**：把本次審查中新確認的**可重用元件級事實**（共用元件產生什麼文字/行為、慣例差異），用 save_project_note(projectId="${task.project_id}", category="component", content=...) 記錄，內容必須附元件檔路徑與關鍵識別（無出處的觀察不記）——下一個任務的 reviewer 會自動收到。`;
 
-## 絕對禁止
+      const forbiddenSection = `## 絕對禁止
 - 不得修改任何程式碼或檔案（只讀；MCP 回寫僅限 save_project_note / save_spec_checklist / save_compliance_review 三個工具）
 - 不得呼叫 update_task_status——結案由 orchestrator 決定`;
+
+      const commonTail = `${commonSteps}
+
+${forbiddenSection}`;
+
+      // ── R3：SA 流程圖回對（full 軌限定）──
+      // 沿用 ExecutionPipeline 的 SA flow cache（data/sa-flows/{projectId}-{contentHash}-flow.mmd）。
+      // 找不到 SA flow 或 light 軌 → 整節不出現。
+      let saFlowSection = '';
+      if (track === 'full') {
+        const saFlow = findSaFlowForTask(db, taskId, task.project_id);
+        if (saFlow) {
+          const flowBody = saFlow.mermaid.length <= SA_FLOW_INLINE_LIMIT
+            ? `### SA 流程圖（${saFlow.filename}）
+\`\`\`mermaid
+${saFlow.mermaid}
+\`\`\``
+            : `### SA 流程圖（${saFlow.filename}）
+流程圖過大（${saFlow.mermaid.length} 字元）未內嵌——用 Read tool 讀取：
+\`${saFlow.flowPath.replace(/\\/g, '/')}\``;
+          saFlowSection = `
+
+## 流程回對（SA 流程圖 → 程式路徑）
+
+此任務有 SA 操作流程圖（依 SA 文件內容產生的 Mermaid flowchart）。除上述逐項驗證外，執行流程回對：
+1. 逐一檢視 SA 流程圖的每個**判斷分支/流程節點**
+2. checklist 尚未涵蓋的分支/節點 → 呼叫 save_spec_checklist(taskId="${taskId}", items=[...])（**append，不可用 replace**）補為檢查項：itemType="logic"、content=該節點/分支的行為描述、sourceRef="SA flow ${saFlow.filename}"
+3. 補上的項目一併納入本次逐項驗證與 save_compliance_review——逐項在程式碼中找到對應路徑，matched 必附 file+line 證據（照樣過程式驗證）；**找不到對應程式路徑的分支判 missing**
+
+${flowBody}`;
+        }
+      }
 
       const plan = track === 'light'
         ? `**AI 規格回對派工計畫（Compliance Review Plan — LIGHT 軌）**
@@ -650,7 +733,9 @@ ${orchestratorNote}
    - param / response_field → 確認參數/欄位確實進出該 API 的 request/response
    - db_field → 確認 Entity（@Column name）/ DDL 中確實存在該欄位
    - **logic → 追實際程式碼流程（Controller → Service → SQL / 元件 → handler → API），確認邏輯與規格描述一致。這是 AI 回對的核心價值，不可跳過、不可只憑檔名或函式名猜。若 implementer 已為該邏輯撰寫單元測試，測試檔中對應案例的 file+line 可作為 evidence（仍會被程式開檔驗證）**
-${commonTail}`;
+${commonSteps}${saFlowSection}
+
+${forbiddenSection}`;
 
       return { content: [{ type: 'text' as const, text: truncateResponse(plan) }] };
     },

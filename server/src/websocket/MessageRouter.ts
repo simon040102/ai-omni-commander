@@ -640,7 +640,7 @@ export function registerHandlers(
       const nowTask = getTask(payload.taskId);
       if (nowTask?.status === 'completed') {
         try {
-          logTaskOutput(getDb(), payload.taskId, nowTask.projectId, '[SKIP] 使用者由 Web UI 直接標記 completed，未經閘門（flow gate / AI 規格回對 / 單元測試）檢查');
+          logTaskOutput(getDb(), payload.taskId, nowTask.projectId, '[SKIP] 使用者由 Web UI 直接標記 completed，未經閘門（完工閘 / 檢查表 / AI 規格回對 / 單元測試 / 執行計畫 / 驗收結果）檢查');
         } catch (err) {
           logger.warn({ err, taskId: payload.taskId }, 'Failed to write [SKIP] audit for direct completed');
         }

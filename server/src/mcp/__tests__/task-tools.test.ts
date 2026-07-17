@@ -43,6 +43,21 @@ function seedTask(db: Database.Database, id = 'task-1', projectId = 'proj-1', la
   );
 }
 
+/**
+ * 塞一筆 [DISPATCH] 派工快照——讓開發任務通過「執行計畫/派工記錄」完成閘門（R2），
+ * 且不影響其他閘門（不寫 flow_state track，檢查表閘門行為不變）。
+ */
+function seedDispatch(db: Database.Database, taskId = 'task-1', projectId = 'proj-1') {
+  db.prepare(`
+    INSERT OR IGNORE INTO agents (id, project_id, role, status, model, current_task_id)
+    VALUES (?, ?, 'backend', 'running', 'external', ?)
+  `).run(`mcp-${taskId}`, projectId, taskId);
+  db.prepare(`
+    INSERT INTO agent_outputs (agent_id, task_id, stream_type, content)
+    VALUES (?, ?, 'system', '[DISPATCH] {"at":"2026-01-01T00:00:00Z","meta":null,"prompt":"test dispatch"}')
+  `).run(`mcp-${taskId}`, taskId);
+}
+
 describe('task-tools', () => {
   let server: McpServer;
 
@@ -368,6 +383,7 @@ describe('task-tools', () => {
     it('updates task status with summary', async () => {
       seedProject(testDb);
       seedTask(testDb);
+      seedDispatch(testDb); // 開發任務結案需有執行計畫/派工記錄（R2）
 
       // pending → completed is not a valid transition; go through in_progress first
       await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'in_progress' });
@@ -414,6 +430,7 @@ describe('task-tools', () => {
       `);
       insertAgent.run('mcp-task-1', 'task-1');
       insertAgent.run('mcp-task-2', 'task-2');
+      seedDispatch(testDb, 'task-1'); // 開發任務結案需有執行計畫/派工記錄（R2）
 
       await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
 
@@ -447,6 +464,7 @@ describe('task-tools', () => {
       seedProject(testDb);
       seedTask(testDb, taskId);
       testDb.prepare("UPDATE tasks SET status = 'in_progress' WHERE id = ?").run(taskId);
+      seedDispatch(testDb, taskId); // 開發任務結案需有執行計畫/派工記錄（R2）——不影響檢查表閘門
     }
 
     it('blocks completed when task has a track (execution plan issued) but no checklist at all', async () => {
@@ -628,6 +646,7 @@ describe('task-tools', () => {
       }
       seedTask(testDb, taskId, 'proj-1', label);
       testDb.prepare("UPDATE tasks SET status = 'in_progress' WHERE id = ?").run(taskId);
+      seedDispatch(testDb, taskId); // 開發任務結案需有執行計畫/派工記錄（R2）
     }
 
     /** 走真實的 report_verification_result 寫入路徑——釘住寫入格式與閘門解析同步 */
@@ -779,6 +798,203 @@ describe('task-tools', () => {
 
       const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
       expect(result.isError).toBeUndefined();
+    });
+  });
+
+  describe('update_task_status execution plan gate（執行計畫/派工記錄閘門 — R2）', () => {
+    function startBareTask(label = 'backend', taskId = 'task-1') {
+      seedProject(testDb);
+      seedTask(testDb, taskId, 'proj-1', label);
+      testDb.prepare("UPDATE tasks SET status = 'in_progress' WHERE id = ?").run(taskId);
+    }
+
+    function seedTrackOutput(taskId = 'task-1') {
+      testDb.prepare(`
+        INSERT OR IGNORE INTO agents (id, project_id, role, status, model, current_task_id)
+        VALUES (?, 'proj-1', 'backend', 'running', 'external', ?)
+      `).run(`mcp-${taskId}`, taskId);
+      testDb.prepare(`
+        INSERT INTO agent_outputs (agent_id, task_id, stream_type, content)
+        VALUES (?, ?, 'system', '[TRACK] light — 自動判定：taskType=bug 且任務未綁定 SA/SD 規格文件')
+      `).run(`mcp-${taskId}`, taskId);
+    }
+
+    it('開發任務（backend）無 track/無 [TRACK]/無 [DISPATCH] → 擋，訊息指向 get_execution_plan 與 save_task_dispatch', async () => {
+      startBareTask('backend');
+
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('從未取得執行計畫或派工記錄');
+      expect(result.content[0].text).toContain('get_execution_plan');
+      expect(result.content[0].text).toContain('save_task_dispatch');
+
+      const status = (testDb.prepare("SELECT status FROM tasks WHERE id = 'task-1'").get() as { status: string }).status;
+      expect(status).toBe('in_progress');
+    });
+
+    it('通過途徑 (a)：flow_state 有 track → 不被此閘擋（改由檢查表閘門把關）', async () => {
+      startBareTask('backend');
+      testDb.prepare("UPDATE tasks SET flow_state = ? WHERE id = 'task-1'")
+        .run(JSON.stringify({ track: 'light', trackReason: 'test' }));
+
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      // 有 track 但沒檢查表 → 被「檢查表存在」閘門擋，而不是執行計畫閘門
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).not.toContain('從未取得執行計畫');
+      expect(result.content[0].text).toContain('尚未建立規格檢查表');
+    });
+
+    it('通過途徑 (b)：agent_outputs 有 [TRACK] 稽核行 → 放行', async () => {
+      startBareTask('backend');
+      seedTrackOutput();
+
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      expect(result.isError).toBeUndefined();
+      expect((testDb.prepare("SELECT status FROM tasks WHERE id = 'task-1'").get() as { status: string }).status).toBe('completed');
+    });
+
+    it('通過途徑 (c)：agent_outputs 有 [DISPATCH] 派工快照 → 放行（基線修復路徑）', async () => {
+      startBareTask('frontend');
+      seedDispatch(testDb, 'task-1');
+
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      expect(result.isError).toBeUndefined();
+    });
+
+    it('fullstack 也受此閘管制；其他 label（devops/testing/review）不受管制', async () => {
+      startBareTask('fullstack', 'task-fs');
+      const fs = await callTool(server, 'update_task_status', { taskId: 'task-fs', status: 'completed' });
+      expect(fs.isError).toBe(true);
+      expect(fs.content[0].text).toContain('從未取得執行計畫');
+
+      for (const [i, label] of ['devops', 'testing', 'review'].entries()) {
+        const tid = `task-other-${i}`;
+        seedTask(testDb, tid, 'proj-1', label);
+        testDb.prepare("UPDATE tasks SET status = 'in_progress' WHERE id = ?").run(tid);
+        const result = await callTool(server, 'update_task_status', { taskId: tid, status: 'completed' });
+        expect(result.isError).toBeUndefined();
+      }
+    });
+
+    it('skipFlowGate=true + skipReason 跳過此閘並記 [SKIP]；無 skipReason 拒絕', async () => {
+      startBareTask('backend');
+
+      const noReason = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed', skipFlowGate: true });
+      expect(noReason.isError).toBe(true);
+      expect(noReason.content[0].text).toContain('skipReason');
+
+      const result = await callTool(server, 'update_task_status', {
+        taskId: 'task-1', status: 'completed', skipFlowGate: true, skipReason: '使用者同意：口頭派工的緊急修復',
+      });
+      expect(result.isError).toBeUndefined();
+      const outputs = testDb.prepare("SELECT content FROM agent_outputs WHERE task_id = 'task-1' AND content LIKE '[SKIP]%'").all() as Array<{ content: string }>;
+      expect(outputs.some(o => o.content.includes('[SKIP] 使用者跳過執行計畫閘門') && o.content.includes('口頭派工的緊急修復'))).toBe(true);
+    });
+
+    it('in_progress / failed 轉換不受此閘影響', async () => {
+      startBareTask('backend');
+      const r1 = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'failed', summary: 'boom' });
+      expect(r1.isError).toBeUndefined();
+      const r2 = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'in_progress' });
+      expect(r2.isError).toBeUndefined();
+    });
+  });
+
+  describe('update_task_status verification result gate（驗收 FAIL 擋結案 — R5）', () => {
+    function startTask(label = 'backend', configJson: string | null = null, taskId = 'task-1') {
+      seedProject(testDb);
+      if (configJson !== null) {
+        testDb.prepare("UPDATE projects SET config_json = ? WHERE id = 'proj-1'").run(configJson);
+      }
+      seedTask(testDb, taskId, 'proj-1', label);
+      testDb.prepare("UPDATE tasks SET status = 'in_progress' WHERE id = ?").run(taskId);
+      seedDispatch(testDb, taskId); // 通過執行計畫閘門（R2）
+    }
+
+    async function report(results: Array<{ item: string; passed: boolean; note?: string }>, taskId = 'task-1') {
+      const r = await callTool(server, 'report_verification_result', { taskId, results });
+      expect(r.isError).toBeUndefined();
+    }
+
+    beforeEach(() => {
+      // 走真實的 report_verification_result 寫入路徑——釘住寫入格式與閘門解析同步
+      registerVerificationTools(server);
+    });
+
+    it('任一驗收項最新一筆為 FAIL → 擋，訊息列出 FAIL 項並指引重新回報', async () => {
+      startTask('backend');
+      await report([
+        { item: 'be-no-findall', passed: true },
+        { item: 'be-api-smoke', passed: false, note: 'GET /api/x 回 500' },
+      ]);
+
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('驗收結果閘門未通過');
+      expect(result.content[0].text).toContain('- be-api-smoke');
+      expect(result.content[0].text).not.toContain('- be-no-findall'); // PASS 項不列
+      expect(result.content[0].text).toContain('report_verification_result(taskId="task-1"');
+
+      const status = (testDb.prepare("SELECT status FROM tasks WHERE id = 'task-1'").get() as { status: string }).status;
+      expect(status).toBe('in_progress');
+    });
+
+    it('同一項先 FAIL 後 PASS（取最新一筆）→ 放行', async () => {
+      startTask('backend');
+      await report([{ item: 'be-api-smoke', passed: false, note: '500' }]);
+      await report([{ item: 'be-api-smoke', passed: true, note: '修復後 200' }]);
+
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      expect(result.isError).toBeUndefined();
+    });
+
+    it('從未回報過的項目不擋（只回報部分項且全 PASS → 放行）', async () => {
+      startTask('backend');
+      await report([{ item: 'be-no-findall', passed: true }]);
+
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      expect(result.isError).toBeUndefined();
+    });
+
+    it('完全沒有任何驗收回報 → 此閘不擋（涵蓋性由流程管）', async () => {
+      startTask('backend');
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      expect(result.isError).toBeUndefined();
+    });
+
+    it('與單元測試閘門共存不重複報錯：required 單測項 FAIL 由單元測試閘門先擋（單一錯誤）', async () => {
+      startTask('backend', JSON.stringify({ backendTestCommand: 'mvn test' }));
+      await report([{ item: 'be-unit-tests', passed: false, note: '3 個失敗' }]);
+
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('單元測試閘門');
+      expect(result.content[0].text).not.toContain('驗收結果閘門'); // 專屬閘門先擋，不重複報
+    });
+
+    it('單測項 PASS 但其他驗收項 FAIL → 由驗收結果閘門擋', async () => {
+      startTask('backend', JSON.stringify({ backendTestCommand: 'mvn test' }));
+      await report([
+        { item: 'be-unit-tests', passed: true },
+        { item: 'be-ddl-match', passed: false, note: '欄位缺 MODIFY_DATE' },
+      ]);
+
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('驗收結果閘門未通過');
+      expect(result.content[0].text).toContain('- be-ddl-match');
+    });
+
+    it('skipFlowGate=true + skipReason 跳過此閘並記 [SKIP]', async () => {
+      startTask('backend');
+      await report([{ item: 'be-api-smoke', passed: false, note: '500' }]);
+
+      const result = await callTool(server, 'update_task_status', {
+        taskId: 'task-1', status: 'completed', skipFlowGate: true, skipReason: '使用者同意：環境限制無法煙霧測試',
+      });
+      expect(result.isError).toBeUndefined();
+      const outputs = testDb.prepare("SELECT content FROM agent_outputs WHERE task_id = 'task-1' AND content LIKE '[SKIP]%'").all() as Array<{ content: string }>;
+      expect(outputs.some(o => o.content.includes('[SKIP] 使用者跳過驗收結果閘門') && o.content.includes('環境限制'))).toBe(true);
     });
   });
 

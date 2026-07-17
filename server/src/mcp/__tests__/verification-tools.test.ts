@@ -21,6 +21,7 @@ import {
   getRequiredUnitTestItems,
   parseTestCommands,
   findLatestUnitTestVerification,
+  listVerificationEntries,
   UNRELATED_TEST_FAILURE_RULE,
   NO_INSTALL_GUARD_RULE,
 } from '../tools/verification-tools.js';
@@ -92,6 +93,37 @@ describe('verification-tools', () => {
     it('returns error for non-existent task', async () => {
       const result = await callTool(server, 'get_verification_plan', { taskId: 'nope' });
       expect(result.isError).toBe(true);
+    });
+
+    describe('資料異動驗證項（R4 — dbConnections）', () => {
+      const DB_CONN_CONFIG = JSON.stringify({ dbConnections: [{ id: 'c1', label: 'MAIN', server: 'localhost' }] });
+
+      it('backend + 專案有 dbConnections → 清單含 be-data-verification', async () => {
+        seedTask(testDb, 'backend', 'task-1', DB_CONN_CONFIG);
+        const plan = JSON.parse((await callTool(server, 'get_verification_plan', { taskId: 'task-1' })).content[0].text);
+        const item = plan.items.find((i: any) => i.id === 'be-data-verification');
+        expect(item).toBeDefined();
+        expect(item.item).toContain('query_external_db');
+        expect(item.how).toContain('describe_table');
+      });
+
+      it('fullstack + 專案有 dbConnections → 清單含 be-data-verification', async () => {
+        seedTask(testDb, 'fullstack', 'task-1', DB_CONN_CONFIG);
+        const plan = JSON.parse((await callTool(server, 'get_verification_plan', { taskId: 'task-1' })).content[0].text);
+        expect(plan.items.map((i: any) => i.id)).toContain('be-data-verification');
+      });
+
+      it('無 dbConnections（未設定 / 空陣列）→ 不出現', async () => {
+        seedTask(testDb, 'backend', 'task-1', JSON.stringify({ dbConnections: [] }));
+        const plan = JSON.parse((await callTool(server, 'get_verification_plan', { taskId: 'task-1' })).content[0].text);
+        expect(plan.items.map((i: any) => i.id)).not.toContain('be-data-verification');
+      });
+
+      it('frontend 任務即使專案有 dbConnections 也不出現', async () => {
+        seedTask(testDb, 'frontend', 'task-1', DB_CONN_CONFIG);
+        const plan = JSON.parse((await callTool(server, 'get_verification_plan', { taskId: 'task-1' })).content[0].text);
+        expect(plan.items.map((i: any) => i.id)).not.toContain('be-data-verification');
+      });
     });
 
     describe('unit test command items (config_json testCommand)', () => {
@@ -237,6 +269,19 @@ describe('verification-tools', () => {
       await report([{ item: 'fe-tsc', passed: true, note: '順帶一提 fe-unit-tests 還沒跑' }]);
       expect(findLatestUnitTestVerification(testDb as any, 'task-1', feReq)).toBeNull();
     });
+
+    it('listVerificationEntries：最新在前，note 不混入 item，跨多次回報全數列出（R5 共用解析器）', async () => {
+      seedTask(testDb, 'frontend');
+      await report([{ item: 'fe-tsc', passed: true }, { item: 'fe-browser', passed: false, note: 'console error — 待修' }]);
+      await report([{ item: 'fe-browser', passed: true, note: '修復後通過' }]);
+
+      const entries = listVerificationEntries(testDb as any, 'task-1');
+      expect(entries).toEqual([
+        { item: 'fe-browser', passed: true },   // 最新回報在前
+        { item: 'fe-tsc', passed: true },
+        { item: 'fe-browser', passed: false },
+      ]);
+    });
   });
 
   describe('get_test_baseline_plan', () => {
@@ -287,6 +332,9 @@ describe('verification-tools', () => {
       expect(text).toContain('create_task(projectId="proj-1"');
       expect(text).toContain('taskType="refactor"');
       expect(text).toContain('update_task_status(taskId, "in_progress")');
+      // R2 配套：create_task 後存派工快照——讓基線修復任務通過「執行計畫/派工記錄」完成閘門
+      expect(text).toContain('save_task_dispatch(taskId, 對應 side 的 Fixer Prompt)');
+      expect(text).toContain('執行計畫/派工記錄');
       // 三分類（每條失敗強制分類）
       expect(text).toContain('每條失敗強制三分類');
       expect(text).toContain('測試化石');

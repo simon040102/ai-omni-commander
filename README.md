@@ -93,7 +93,7 @@ claude      # 另開終端，任何資料夾皆可
 ```
 列專案 → 同步 Asana → 選任務 → 自動判軌（bug 無規格→light / 規格驅動→full）
 → 抓規格（SVN + 本地規格資料夾雙來源）→ 抽規格檢查表（checklist）
-→ [full 軌] Flow-Gated 流程圖閘門 A/B → 開發
+→ [full 軌] Flow-Gated 開工閘（規格理解確認，原閘門 A）/ 完工閘（實作邏輯對齊，原閘門 B）→ 開發
 → 程式預檢（run_spec_compliance）→ AI 回對（獨立 agent 逐項驗證，missing=0）
 → 驗收（get_verification_plan + 證據上傳）→ completed（閘門放行）
 ```

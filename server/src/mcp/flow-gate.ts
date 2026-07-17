@@ -69,6 +69,11 @@ export interface FlowGateState {
 
 export const GATE_B_MAX_FAILURES = 3;
 
+// ── 對外顯示名稱（R1 閘門直白命名）──
+// 內部識別字（gateA/gateB/flow_state keys/gate="A"|"B" 參數）不變，僅對外文案改用直白名稱。
+export const GATE_A_LABEL = '開工閘（規格理解確認）';
+export const GATE_B_LABEL = '完工閘（實作邏輯對齊）';
+
 // ── state persistence ───────────────────────────────────────
 
 export function resolveRole(role?: string | null): FlowRole {
@@ -268,9 +273,9 @@ export function getCompletionBlockers(state: FlowGateState | null): GateBlockRea
   for (const [role, rs] of requiredRoles) {
     if (rs.gateB?.passed === true) continue;
     if (!rs.plan) blockers.push({ role, missing: 'plan-flow 未儲存（save_task_flow flowType="plan"）' });
-    else if (rs.gateA?.passed !== true) blockers.push({ role, missing: '閘門 A 未通過（report_flow_check gate="A"）' });
+    else if (rs.gateA?.passed !== true) blockers.push({ role, missing: `${GATE_A_LABEL}未通過（report_flow_check gate="A"）` });
     else if (!rs.code) blockers.push({ role, missing: 'code-flow 未儲存（save_task_flow flowType="code"）' });
-    else blockers.push({ role, missing: '閘門 B 未通過（report_flow_check gate="B"）' });
+    else blockers.push({ role, missing: `${GATE_B_LABEL}未通過（report_flow_check gate="B"）` });
   }
   return blockers;
 }

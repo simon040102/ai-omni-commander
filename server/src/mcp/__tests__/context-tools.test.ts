@@ -108,8 +108,8 @@ describe('context-tools', () => {
       expect(data.flowGate.enabled).toBe(true);
       expect(data.flowGate.specFlowSaved).toBe(true);
       expect(data.flowGate.roles[0]).toMatchObject({ role: 'frontend', required: true, planFlowSaved: true, gateA: null });
-      // gate A not passed → nextSteps says report_flow_check gate A
-      expect(data.nextSteps).toContain('閘門 A 未通過');
+      // gate A not passed → nextSteps says report_flow_check gate A（R1 直白命名）
+      expect(data.nextSteps).toContain('開工閘（規格理解確認）未通過');
     });
 
     it('respects outputLimit and returns the most recent entries', async () => {

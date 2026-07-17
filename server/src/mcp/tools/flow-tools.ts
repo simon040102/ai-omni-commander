@@ -13,7 +13,7 @@ import { getMcpDb } from '../db.js';
 import { notifyWebServer } from '../notify.js';
 import {
   type FlowRole, type FlowType, type FlowGateState,
-  GATE_B_MAX_FAILURES, FLOW_COMPARE_RUBRIC, FLOW_NODE_LEVEL_SPEC,
+  GATE_B_MAX_FAILURES, GATE_A_LABEL, GATE_B_LABEL, FLOW_COMPARE_RUBRIC, FLOW_NODE_LEVEL_SPEC,
   resolveRole, mutateFlowState, getFlowState, getRoleState,
   saveFlowFile, readFlowFile, logTaskOutput, findFlowInOtherRoles,
 } from '../flow-gate.js';
@@ -40,7 +40,7 @@ function roleStatusLine(state: FlowGateState, role: FlowRole): string {
   const rs = state.roles[role];
   if (!rs) return `role=${role}: （無狀態）`;
   const flag = (v: boolean | undefined) => v === true ? '✅' : v === false ? '❌' : '—';
-  return `role=${role}: spec=${state.spec ? '✅' : '—'} plan=${rs.plan ? '✅' : '—'} code=${rs.code ? '✅' : '—'} | 閘門A=${flag(rs.gateA?.passed)} 閘門B=${flag(rs.gateB?.passed)} | B失敗 ${rs.gateBFailures}/${GATE_B_MAX_FAILURES}`;
+  return `role=${role}: spec=${state.spec ? '✅' : '—'} plan=${rs.plan ? '✅' : '—'} code=${rs.code ? '✅' : '—'} | 開工閘=${flag(rs.gateA?.passed)} 完工閘=${flag(rs.gateB?.passed)} | 完工閘失敗 ${rs.gateBFailures}/${GATE_B_MAX_FAILURES}`;
 }
 
 export function registerFlowTools(server: McpServer): void {
@@ -104,7 +104,7 @@ export function registerFlowTools(server: McpServer): void {
 
       if (resetLogged) {
         logTaskOutput(db, taskId, task.project_id,
-          `[RESET] 使用者同意重置閘門 B 失敗計數器（role=${flowRole}），重新進入比對循環。`);
+          `[RESET] 使用者同意重置${GATE_B_LABEL}失敗計數器（role=${flowRole}），重新進入比對循環。`);
       }
 
       notifyWebServer({
@@ -136,9 +136,9 @@ ${FLOW_NODE_LEVEL_SPEC}`);
             return ok(`plan-flow 已存檔（hash=${saved.hash}，role=${flowRole}）。閘門狀態已重置。
 ${roleStatusLine(state, flowRole)}
 
-## ⚠ 閘門 A：計畫涵蓋檢查（寫 code 之前必須完成）
+## ⚠ ${GATE_A_LABEL}：計畫涵蓋檢查（寫 code 之前必須完成）
 逐節點比對下方 spec-flow，確認 plan-flow **涵蓋規格的每個步驟與分支**。語意比對即可（措辭可不同），但規格的任何步驟/分支在計畫中完全沒有對應 → 不通過，先補計畫再重存。
-比對完成後呼叫 report_flow_check(taskId="${taskId}", gate="A", passed=…, diffs="…"${role ? `, role="${role}"` : ''})。**閘門 A 通過前不可開始寫 code。**
+比對完成後呼叫 report_flow_check(taskId="${taskId}", gate="A", passed=…, diffs="…"${role ? `, role="${role}"` : ''})。**${GATE_A_LABEL}通過前不可開始寫 code。**
 
 ### spec-flow（規格流程）
 \`\`\`mermaid
@@ -149,14 +149,14 @@ ${specContent}
 ${roleStatusLine(state, flowRole)}
 
 ## ⚠ 此任務有 SA/SD 規格文件，但 spec-flow 尚未儲存
-閘門 A 需要 spec-flow 才能做涵蓋檢查（**不會因缺 spec-flow 而降級為兩圖模式**）。
-下一步：讀取 SA/SD 規格文件，畫出規格流程圖，以 save_task_flow(taskId="${taskId}", flowType="spec") 儲存，然後再回報閘門 A。
+${GATE_A_LABEL}需要 spec-flow 才能做涵蓋檢查（**不會因缺 spec-flow 而降級為兩圖模式**）。
+下一步：讀取 SA/SD 規格文件，畫出規格流程圖，以 save_task_flow(taskId="${taskId}", flowType="spec") 儲存，然後再回報${GATE_A_LABEL}（gate="A"）。
 （雙角色任務：先用 get_task_flows 確認另一 role 是否已畫過 spec-flow，已存在就沿用不重畫。）`);
         }
         return ok(`plan-flow 已存檔（hash=${saved.hash}，role=${flowRole}）。閘門狀態已重置。
 ${roleStatusLine(state, flowRole)}
 
-## ⚠ 閘門 A（兩圖模式）
+## ⚠ ${GATE_A_LABEL}（兩圖模式）
 此任務無 SA/SD 規格文件，採**兩圖模式**（plan↔code）。
 請對照**任務描述**做自洽檢查：plan-flow 是否涵蓋任務要求的每個行為與邊界條件？
 檢查完成後呼叫 report_flow_check(taskId="${taskId}", gate="A", passed=…${role ? `, role="${role}"` : ''})。`);
@@ -165,7 +165,7 @@ ${roleStatusLine(state, flowRole)}
       // ft === 'code'
       const rs = getRoleState(state, flowRole);
       if (rs.gateBFailures >= GATE_B_MAX_FAILURES) {
-        return ok(`code-flow 已存檔（hash=${saved.hash}，role=${flowRole}），但閘門 B 已失敗 ${rs.gateBFailures}/${GATE_B_MAX_FAILURES} 次。
+        return ok(`code-flow 已存檔（hash=${saved.hash}，role=${flowRole}），但${GATE_B_LABEL}已失敗 ${rs.gateBFailures}/${GATE_B_MAX_FAILURES} 次。
 
 ## ⚠ [NEEDS_HUMAN] 停止自動修正
 請向使用者回報累積的差異清單，由使用者裁示：
@@ -178,12 +178,12 @@ ${roleStatusLine(state, flowRole)}
       const planContent = rs.plan ? readFlowFile(task.project_id, rs.plan.hash) : null;
       const mode = specContent ? '三方比對（code↔plan、code↔spec）' : '兩圖模式（code↔plan）';
 
-      return ok(`code-flow 已存檔（hash=${saved.hash}，role=${flowRole}）。閘門 B 已重置，目前失敗 ${rs.gateBFailures}/${GATE_B_MAX_FAILURES} 次。
+      return ok(`code-flow 已存檔（hash=${saved.hash}，role=${flowRole}）。${GATE_B_LABEL}已重置，目前失敗 ${rs.gateBFailures}/${GATE_B_MAX_FAILURES} 次。
 ${roleStatusLine(state, flowRole)}
 
-## ⚠ 閘門 B：${mode}（跑測試之前必須完成）
+## ⚠ ${GATE_B_LABEL}：${mode}（跑測試之前必須完成）
 建議由**主 session（orchestrator）**執行比對，不要由寫 code 的 subagent 自評。
-比對完成後呼叫 report_flow_check(taskId="${taskId}", gate="B", passed=…, diffs="…"${role ? `, role="${role}"` : ''})。**閘門 B 通過前不可跑測試、不可標記 completed。**
+比對完成後呼叫 report_flow_check(taskId="${taskId}", gate="B", passed=…, diffs="…"${role ? `, role="${role}"` : ''})。**${GATE_B_LABEL}通過前不可跑測試、不可標記 completed。**
 
 ${FLOW_COMPARE_RUBRIC}
 ${planContent ? `
@@ -202,7 +202,7 @@ ${specContent}
   // ── report_flow_check ─────────────────────────────────────
   server.tool(
     'report_flow_check',
-    'Report the result of a flow-gate semantic comparison (done by you, the LLM). gate="A": plan-flow covers spec-flow (before coding). gate="B": code-flow matches plan-flow and spec-flow (before testing). Structural preconditions are enforced: gate A requires a saved plan-flow; gate B requires gate A passed and a saved code-flow.',
+    'Report the result of a flow-gate semantic comparison (done by you, the LLM). gate="A" 開工閘（規格理解確認）: plan-flow covers spec-flow (before coding). gate="B" 完工閘（實作邏輯對齊）: code-flow matches plan-flow and spec-flow (before testing). Structural preconditions are enforced: 開工閘 (gate="A") requires a saved plan-flow; 完工閘 (gate="B") requires 開工閘 passed and a saved code-flow.',
     {
       taskId: z.string().describe('The task ID'),
       gate: z.enum(['A', 'B']).describe('Which gate this check is for'),
@@ -231,17 +231,17 @@ ${specContent}
 
       if (gate === 'A') {
         if (state?.specExpected && !state.spec) {
-          return err(`Error: 閘門 A 前置條件不足 — 此任務有 SA/SD 規格文件，但 spec-flow 尚未儲存。請先讀取規格畫出 spec-flow 並以 save_task_flow(flowType="spec") 儲存（不可降級為兩圖模式）。`);
+          return err(`Error: ${GATE_A_LABEL}前置條件不足 — 此任務有 SA/SD 規格文件，但 spec-flow 尚未儲存。請先讀取規格畫出 spec-flow 並以 save_task_flow(flowType="spec") 儲存（不可降級為兩圖模式）。`);
         }
         if (!rs?.plan) {
-          return err(`Error: 閘門 A 前置條件不足 — role=${flowRole} 的 plan-flow 尚未儲存。請先 save_task_flow(flowType="plan") 再回報閘門 A。${roleHint('plan')}`);
+          return err(`Error: ${GATE_A_LABEL}前置條件不足 — role=${flowRole} 的 plan-flow 尚未儲存。請先 save_task_flow(flowType="plan") 再回報${GATE_A_LABEL}（gate="A"）。${roleHint('plan')}`);
         }
       } else {
         if (rs?.gateA?.passed !== true) {
-          return err(`Error: 閘門 B 前置條件不足 — role=${flowRole} 的閘門 A 尚未通過。請先完成 plan-flow 涵蓋檢查（report_flow_check gate="A"）。${roleHint('plan')}`);
+          return err(`Error: ${GATE_B_LABEL}前置條件不足 — role=${flowRole} 的${GATE_A_LABEL}尚未通過。請先完成 plan-flow 涵蓋檢查（report_flow_check gate="A"）。${roleHint('plan')}`);
         }
         if (!rs.code) {
-          return err(`Error: 閘門 B 前置條件不足 — role=${flowRole} 的 code-flow 尚未儲存。請先 save_task_flow(flowType="code") 再回報閘門 B。${roleHint('code')}`);
+          return err(`Error: ${GATE_B_LABEL}前置條件不足 — role=${flowRole} 的 code-flow 尚未儲存。請先 save_task_flow(flowType="code") 再回報${GATE_B_LABEL}（gate="B"）。${roleHint('code')}`);
         }
       }
 
@@ -263,7 +263,7 @@ ${specContent}
       const newRs = getRoleState(newState, flowRole);
 
       // Log check result + diffs to task outputs (same channel as report_output)
-      const gateLabel = gate === 'A' ? '閘門A(計畫涵蓋)' : '閘門B(實作比對)';
+      const gateLabel = gate === 'A' ? '開工閘(規格理解確認)' : '完工閘(實作邏輯對齊)';
       logTaskOutput(db, taskId, task.project_id,
         `[FLOW_GATE] ${gateLabel} role=${flowRole} → ${passed ? '通過 ✅' : `不通過 ❌（第 ${newRs.gateBFailures} 次失敗）`}${diffs ? `\n差異清單：\n${diffs}` : ''}`);
 
@@ -275,30 +275,30 @@ ${specContent}
       // ── next-step instruction injection ──
       if (gate === 'A') {
         if (passed) {
-          return ok(`閘門 A 通過 ✅（role=${flowRole}）。
+          return ok(`${GATE_A_LABEL}通過 ✅（role=${flowRole}）。
 
 ## 下一步：開始實作
 - 嚴格照 plan-flow 的步驟與分支實作
 - 複雜任務（多欄位表單、多驗證規則）建議先產**心智圖細節覆蓋清單**：save_task_flow(flowType="mindmap")
-- 實作完成後，從**實際程式碼**反推 code-flow（業務步驟層），以 save_task_flow(taskId="${taskId}", flowType="code"${role ? `, role="${role}"` : ''}) 儲存，進入閘門 B`);
+- 實作完成後，從**實際程式碼**反推 code-flow（業務步驟層），以 save_task_flow(taskId="${taskId}", flowType="code"${role ? `, role="${role}"` : ''}) 儲存，進入${GATE_B_LABEL}`);
         }
-        return ok(`閘門 A 不通過 ❌（role=${flowRole}），差異已記錄。
+        return ok(`${GATE_A_LABEL}不通過 ❌（role=${flowRole}），差異已記錄。
 
 ## 下一步：補計畫
-依差異清單補齊 plan-flow 缺漏的步驟/分支，重新 save_task_flow(flowType="plan"${role ? `, role="${role}"` : ''})（重存會重置閘門狀態），再重新回報閘門 A。**尚不可開始寫 code。**`);
+依差異清單補齊 plan-flow 缺漏的步驟/分支，重新 save_task_flow(flowType="plan"${role ? `, role="${role}"` : ''})（重存會重置閘門狀態），再重新回報${GATE_A_LABEL}（gate="A"）。**尚不可開始寫 code。**`);
       }
 
       // gate B
       if (passed) {
-        return ok(`閘門 B 通過 ✅（role=${flowRole}），失敗計數已歸零。
+        return ok(`${GATE_B_LABEL}通過 ✅（role=${flowRole}），失敗計數已歸零。
 
 ## 下一步：跑測試
 現在才可以執行測試（build / lint / 單元測試 / 煙霧測試）。
-**測試全部通過後**，呼叫 update_task_status(taskId="${taskId}", status="completed", summary="...") 結案。測試失敗屬於實作問題：修復後若影響業務流程，需重存 code-flow 再過一次閘門 B；純技術修復（不動業務步驟）可直接重跑測試。`);
+**測試全部通過後**，呼叫 update_task_status(taskId="${taskId}", status="completed", summary="...") 結案。測試失敗屬於實作問題：修復後若影響業務流程，需重存 code-flow 再過一次${GATE_B_LABEL}；純技術修復（不動業務步驟）可直接重跑測試。`);
       }
 
       if (newRs.gateBFailures >= GATE_B_MAX_FAILURES) {
-        return ok(`閘門 B 不通過 ❌（role=${flowRole}），已達失敗上限 ${newRs.gateBFailures}/${GATE_B_MAX_FAILURES}。
+        return ok(`${GATE_B_LABEL}不通過 ❌（role=${flowRole}），已達失敗上限 ${newRs.gateBFailures}/${GATE_B_MAX_FAILURES}。
 
 ## ⚠ [NEEDS_HUMAN] 停止自動修正
 請彙整全部差異清單向使用者回報，由使用者裁示：
@@ -307,13 +307,13 @@ ${specContent}
 不要繼續自動修正。`);
       }
 
-      return ok(`閘門 B 不通過 ❌（role=${flowRole}），第 ${newRs.gateBFailures}/${GATE_B_MAX_FAILURES} 次失敗，差異已記錄。
+      return ok(`${GATE_B_LABEL}不通過 ❌（role=${flowRole}），第 ${newRs.gateBFailures}/${GATE_B_MAX_FAILURES} 次失敗，差異已記錄。
 
 ## 下一步：修正循環
 1. 依差異清單修正程式碼（必修項優先）
 2. 從修正後的程式碼**重新反推** code-flow
 3. save_task_flow(taskId="${taskId}", flowType="code"${role ? `, role="${role}"` : ''}) 重存
-4. 重新比對並回報閘門 B（剩 ${GATE_B_MAX_FAILURES - newRs.gateBFailures} 次機會）`);
+4. 重新比對並回報${GATE_B_LABEL}（gate="B"，剩 ${GATE_B_MAX_FAILURES - newRs.gateBFailures} 次機會）`);
     },
   );
 

@@ -13,7 +13,7 @@ AI-OmniCommander 是一個 **MCP Server**，為外部 Claude Code session 提供
 ```
 列專案 → 同步 Asana → 選任務 → 自動判軌（bug 無規格→light / 規格驅動→full）
 → 抓規格（SVN + 本地規格資料夾雙來源）→ 抽規格檢查表（checklist）
-→ [full 軌] Flow-Gated 流程圖閘門 A/B → 開發
+→ [full 軌] Flow-Gated 開工閘（規格理解確認，原閘門 A）/ 完工閘（實作邏輯對齊，原閘門 B）→ 開發
 → 程式預檢（run_spec_compliance）→ AI 回對（獨立 agent 逐項驗證，missing=0）
 → 驗收（get_verification_plan + 證據上傳）→ completed（閘門放行）
 ```
@@ -29,10 +29,14 @@ AI-OmniCommander 是一個 **MCP Server**，為外部 Claude Code session 提供
 
 ### 完成閘門
 
-`update_task_status(taskId, "completed")` 受兩道閘門管制：
+`update_task_status(taskId, "completed")` 受六道閘門管制：
 
-1. **Flow gate B**（full 軌）：程式碼流程圖與計畫流程圖比對通過
-2. **AI 規格回對閘門**：最新一次 AI 回對（ai_review run）missing=0
+1. **完工閘（實作邏輯對齊）**（full 軌）：程式碼流程圖與計畫/規格流程圖比對通過
+2. **檢查表存在**：有軌道的任務必須有規格檢查表，防「空跑結案」
+3. **AI 規格回對閘門**：最新一次 AI 回對（ai_review run）missing=0（含 staleness 防護）
+4. **單元測試閘門**：專案有設 testCommand 時，「單元測試全數通過」驗收項最新回報 passed=true
+5. **執行計畫/派工記錄閘門**：開發任務（frontend/backend/fullstack）必須有 `get_execution_plan` 的 track、`[TRACK]` 稽核行或 `save_task_dispatch` 的 `[DISPATCH]` 快照其一
+6. **驗收 FAIL 擋結案**：任何驗收項最新一筆回報為 FAIL 即拒絕（從未回報的項目不擋）
 
 `skipFlowGate=true` + `skipReason` 可覆寫，**限使用者明確同意**，會記 `[SKIP]` 供稽核。
 
@@ -56,7 +60,7 @@ AI-OmniCommander 是一個 **MCP Server**，為外部 Claude Code session 提供
 - `get_execution_plan` — 取得任務完整執行計畫（自動判 full/light 軌，自動注入規格閱讀／規格遵循／後端效能／後端安全規範）— **開工第一步**
 - `list_pending_tasks` — 待辦任務清單（可用 taskType / label / keyword / section / tag / statuses 過濾，含 sourceRef）
 - `get_task` — 取任務詳情（documents 預設不回傳，`includeDocuments=true` 才含）
-- `update_task_status` — 更新任務狀態（in_progress / completed / failed…）；completed 受 flow gate B + AI 回對閘門管制
+- `update_task_status` — 更新任務狀態（in_progress / completed / failed…）；completed 受六道完成閘門管制（完工閘 / 檢查表 / AI 回對 / 單元測試 / 執行計畫 / 驗收 FAIL）
 - `update_task` — 更新任務欄位（title / label / taskType / tags / section；status 不在白名單）
 - `next_task` — 推薦下一個可做任務（依賴已完成 + bug 優先）+ 備選清單
 - `resume_task` — 接手舊任務的一站式脈絡恢復
@@ -108,7 +112,7 @@ AI-OmniCommander 是一個 **MCP Server**，為外部 Claude Code session 提供
 ### Flow-Gated 流程圖（4）
 
 - `save_task_flow` — 儲存流程圖（spec / plan / code / mindmap）
-- `report_flow_check` — 回報流程圖閘門 A/B 比對結果
+- `report_flow_check` — 回報開工閘/完工閘（gate="A"/"B"）比對結果
 - `get_task_flows` — 列出任務已存的流程圖
 - `save_sa_flow` — 儲存 SA 文件的 Mermaid 流程圖快取
 

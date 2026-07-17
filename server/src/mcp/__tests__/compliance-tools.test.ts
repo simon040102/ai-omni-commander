@@ -1,8 +1,9 @@
-import { describe, it, expect, beforeEach, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { runMigrations } from '../../db/schema.js';
 
 let testDb: Database.Database;
@@ -612,6 +613,100 @@ describe('compliance-tools', () => {
       expect(text).toContain('SearchBar.tsx');
       expect(text).toContain('## 引擎預檢種子');
       expect(text).toContain('src/Index.tsx:1');
+    });
+  });
+
+  describe('get_compliance_review_plan — SA 流程圖回對（R3）', () => {
+    let tmpDataDir: string;
+    let savedDbPath: string | undefined;
+
+    const SA_CONTENT = '# SA 規格 WA05 代理人設定\n查詢作業流程：輸入條件後查詢，依有無資料決定顯示清單或查無資料訊息。';
+    const SA_FLOW_MMD = 'flowchart TD\n  A[輸入查詢條件] --> B{有無資料}\n  B -->|有| C[顯示清單]\n  B -->|無| D[顯示查無資料]';
+
+    beforeEach(() => {
+      // SA flow cache 依 DB_PATH 解析 data/sa-flows —— 指向隔離 temp dir
+      tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omni-saflow-'));
+      savedDbPath = process.env['DB_PATH'];
+      process.env['DB_PATH'] = path.join(tmpDataDir, 'omni.db');
+    });
+
+    afterEach(() => {
+      if (savedDbPath === undefined) delete process.env['DB_PATH'];
+      else process.env['DB_PATH'] = savedDbPath;
+      fs.rmSync(tmpDataDir, { recursive: true, force: true });
+    });
+
+    /** 綁 SA 文件到任務 + 寫入內容 hash 對應的 sa-flows cache 檔（沿用 ExecutionPipeline 命名慣例） */
+    function seedSaDocWithFlow(content = SA_CONTENT, mermaid = SA_FLOW_MMD) {
+      testDb.prepare(`
+        INSERT INTO documents (id, project_id, filename, file_path, doc_type, parsed_text)
+        VALUES ('doc-sa', 'proj-1', 'SPEC_WA05.md', '/nonexistent/SPEC_WA05.md', 'SA', ?)
+      `).run(content);
+      testDb.prepare("INSERT INTO task_documents (task_id, document_id) VALUES ('task-1', 'doc-sa')").run();
+      const hash = createHash('sha256').update(content).digest('hex').slice(0, 16);
+      const flowsDir = path.join(tmpDataDir, 'sa-flows');
+      fs.mkdirSync(flowsDir, { recursive: true });
+      fs.writeFileSync(path.join(flowsDir, `proj-1-${hash}-flow.mmd`), mermaid, 'utf-8');
+    }
+
+    it('full 軌 + 有 SA flow → 注入「流程回對」節：mermaid 內嵌 + logic 補項指示 + 缺路徑判 missing', async () => {
+      seedProject(testDb);
+      seedTask(testDb);
+      await callTool(server, 'save_spec_checklist', { taskId: 'task-1', items: [UI_ITEM] });
+      seedSaDocWithFlow();
+
+      const text = (await callTool(server, 'get_compliance_review_plan', { taskId: 'task-1' })).content[0].text;
+      expect(text).toContain('## 流程回對（SA 流程圖 → 程式路徑）');
+      expect(text).toContain('輸入查詢條件'); // mermaid 內嵌
+      expect(text).toContain('itemType="logic"');
+      expect(text).toContain('sourceRef="SA flow SPEC_WA05.md"');
+      expect(text).toContain('**append，不可用 replace**');
+      expect(text).toContain('找不到對應程式路徑的分支判 missing');
+      // 節位在絕對禁止之前（仍是 reviewer prompt 的一部分）
+      expect(text.indexOf('## 流程回對')).toBeLessThan(text.indexOf('## 絕對禁止'));
+    });
+
+    it('mermaid 超過內嵌上限 → 改附檔案絕對路徑（不內嵌）', async () => {
+      seedProject(testDb);
+      seedTask(testDb);
+      await callTool(server, 'save_spec_checklist', { taskId: 'task-1', items: [UI_ITEM] });
+      const hugeMermaid = 'flowchart TD\n' + Array.from({ length: 500 }, (_, i) => `  N${i}[節點編號第${i}步驟] --> N${i + 1}`).join('\n');
+      expect(hugeMermaid.length).toBeGreaterThan(6000);
+      seedSaDocWithFlow(SA_CONTENT, hugeMermaid);
+
+      const text = (await callTool(server, 'get_compliance_review_plan', { taskId: 'task-1' })).content[0].text;
+      expect(text).toContain('## 流程回對（SA 流程圖 → 程式路徑）');
+      expect(text).toContain('未內嵌');
+      expect(text).toContain('sa-flows'); // 附檔案路徑
+      expect(text).not.toContain('N499'); // mermaid 本體不內嵌
+    });
+
+    it('light 軌 → 整節不出現（即使 SA flow 存在）', async () => {
+      seedProject(testDb);
+      seedTask(testDb);
+      testDb.prepare(`UPDATE tasks SET flow_state = ? WHERE id = 'task-1'`).run(
+        JSON.stringify({ roles: {}, track: 'light', trackReason: '自動判定' }),
+      );
+      await callTool(server, 'save_spec_checklist', { taskId: 'task-1', items: [UI_ITEM] });
+      seedSaDocWithFlow();
+
+      const text = (await callTool(server, 'get_compliance_review_plan', { taskId: 'task-1' })).content[0].text;
+      expect(text).toContain('LIGHT 軌');
+      expect(text).not.toContain('## 流程回對');
+    });
+
+    it('無 SA flow cache（SA 文件存在但沒產生過流程圖）→ 整節不出現', async () => {
+      seedProject(testDb);
+      seedTask(testDb);
+      await callTool(server, 'save_spec_checklist', { taskId: 'task-1', items: [UI_ITEM] });
+      testDb.prepare(`
+        INSERT INTO documents (id, project_id, filename, file_path, doc_type, parsed_text)
+        VALUES ('doc-sa', 'proj-1', 'SPEC_WA05.md', '/nonexistent/SPEC_WA05.md', 'SA', ?)
+      `).run(SA_CONTENT);
+      testDb.prepare("INSERT INTO task_documents (task_id, document_id) VALUES ('task-1', 'doc-sa')").run();
+
+      const text = (await callTool(server, 'get_compliance_review_plan', { taskId: 'task-1' })).content[0].text;
+      expect(text).not.toContain('## 流程回對');
     });
   });
 

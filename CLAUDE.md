@@ -248,7 +248,7 @@ MCP Server（stdio，由 Claude Code 經 .mcp.json spawn）與 Web Server（Expr
 - **Asana / 其他**：`sync_asana_tasks`, `list_asana_projects`, `get_asana_task_comments`, `get_skill_gen_plan`, `query_external_db`, `health_check`
 
 特殊行為註記（行為規則）：
-- **`update_task_status` 完成閘門**：`completed` 受 flow gate B + AI 規格回對閘門（最新 ai_review run missing=0）+ 單元測試閘門（專案有設 `frontendTestCommand`/`backendTestCommand` 時，對應 side 的「單元測試全數通過」驗收項最新一筆回報必須 passed=true；既有測試不是全綠先用 `get_test_baseline_plan` 修基線）管制；`skipFlowGate=true` + `skipReason` 可覆寫全部閘門，**限使用者明確同意**，會記 `[SKIP]` 供稽核
+- **`update_task_status` 完成閘門（六道）**：`completed` 受以下閘門管制——(1) **完工閘（實作邏輯對齊，原閘門 B）**（flow-gated 任務）；(2) **檢查表存在**（有軌道的任務必須有規格檢查表）；(3) **AI 規格回對**（最新 ai_review run missing=0，含 staleness 防護）；(4) **單元測試**（專案有設 `frontendTestCommand`/`backendTestCommand` 時，對應 side 的「單元測試全數通過」驗收項最新一筆回報必須 passed=true；既有測試不是全綠先用 `get_test_baseline_plan` 修基線）；(5) **執行計畫/派工記錄**（frontend/backend/fullstack 任務必須有 `get_execution_plan` 的 track、`[TRACK]` 稽核行或 `save_task_dispatch` 的 `[DISPATCH]` 快照其一）；(6) **驗收 FAIL 擋結案**（任何驗收項最新一筆 `report_verification_result` 為 FAIL 即拒絕，從未回報的項目不擋）。`skipFlowGate=true` + `skipReason` 可覆寫全部閘門，**限使用者明確同意**，會記 `[SKIP]` 供稽核。開工閘（規格理解確認，原閘門 A）在寫 code 前由 `report_flow_check(gate="A")` 把關
 - **`fetch_svn_specs` 雙來源**：從 SVN **加上**專案設定的本地 `specFolders` 合併撈取；git 資料夾先安全 `git pull --ff-only`（dirty → 跳過 pull + 警告）
 - **`get_execution_plan` 自動判軌**：full / light 軌（見「選擇任務後」的任務軌道說明），並自動注入規格閱讀／規格遵循／後端效能／後端安全四項規範
 

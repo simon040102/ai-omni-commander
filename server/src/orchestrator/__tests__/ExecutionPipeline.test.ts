@@ -382,6 +382,37 @@ describe('ExecutionPipeline', () => {
       expect(plan.prompt).toContain('mcp__omni-commander__report_verification_evidence(taskId="t-be", filePath=...)');
     });
 
+    it('R4：專案有 dbConnections → backend plan 注入資料異動驗證；frontend 不注入', async () => {
+      createProject({
+        id: 'p-db', name: 'DB Verify Test', workingDir: '/tmp/dbv',
+        configJson: JSON.stringify({ dbConnections: [{ id: 'c1', label: 'MAIN', server: 'localhost' }] }),
+      });
+      testDb.prepare(`
+        INSERT INTO tasks (id, project_id, title, description, label, task_type)
+        VALUES ('t-db-be', 'p-db', 'WA05 儲存', '實作儲存 API', 'backend', 'feature')
+      `).run();
+      testDb.prepare(`
+        INSERT INTO tasks (id, project_id, title, description, label, task_type)
+        VALUES ('t-db-fe', 'p-db', 'WA05 畫面', '實作查詢頁', 'frontend', 'feature')
+      `).run();
+
+      const bePlan = await pipeline.buildExecutionPlan('t-db-be');
+      expect(bePlan.prompt).toContain('## 資料異動驗證（強制 — 專案已綁定外部 DB）');
+      expect(bePlan.prompt).toContain('mcp__omni-commander__query_external_db');
+      expect(bePlan.prompt).toContain('欄位名以 describe_table 為準，嚴禁猜');
+
+      const fePlan = await pipeline.buildExecutionPlan('t-db-fe');
+      expect(fePlan.prompt).not.toContain('## 資料異動驗證');
+    });
+
+    it('R4：專案無 dbConnections → backend plan 不注入資料異動驗證', async () => {
+      createTask('p-nodb', 't-nodb', 'backend', 'feature');
+
+      const plan = await pipeline.buildExecutionPlan('t-nodb');
+      expect(plan.prompt).not.toContain('## 資料異動驗證');
+      expect(plan.prompt).toContain('## 效能分析'); // 其他 backend 規範照舊
+    });
+
     it('bug plan 修復策略含步驟 0（fetch_task_attachments + get_asana_task_comments）', async () => {
       createTask('p-bug', 't-bug', 'frontend', 'bug');
 

@@ -10,7 +10,7 @@ vi.mock('../db.js', () => ({
 }));
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { registerDbTools, validateSelectSql } from '../tools/db-tools.js';
+import { registerDbTools, validateSelectSql, validateWhereClause, validateTableIdentifier } from '../tools/db-tools.js';
 import { callTool } from './test-helpers.js';
 
 function freshDb(): Database.Database {
@@ -66,6 +66,51 @@ describe('validateSelectSql (A5 SQL guard)', () => {
     expect(validateSelectSql('SELECT * FROM t WHERE id IN (SELECT id FROM u) UNION SELECT 1 FROM v; TRUNCATE TABLE w')).toBeTruthy();
     expect(validateSelectSql('SELECT 1 MERGE INTO x')).toBeTruthy();
   });
+
+  it('rejects xp_ system procedures', () => {
+    expect(validateSelectSql("SELECT 1 WHERE 1=1 OR xp_cmdshell('dir') = 1")).toContain('xp_');
+  });
+});
+
+describe('validateTableIdentifier (R4 count/sample guard)', () => {
+  it('allows plain identifiers and schema-qualified names', () => {
+    expect(validateTableIdentifier('Users')).toBeNull();
+    expect(validateTableIdentifier('dbo.Users')).toBeNull();
+    expect(validateTableIdentifier('_tmp_table_2')).toBeNull();
+  });
+
+  it('rejects injection-shaped table names', () => {
+    expect(validateTableIdentifier('Users; DROP TABLE x')).toBeTruthy();
+    expect(validateTableIdentifier('Users]--')).toBeTruthy();
+    expect(validateTableIdentifier('a.b.c')).toBeTruthy();
+    expect(validateTableIdentifier('Users WHERE 1=1')).toBeTruthy();
+    expect(validateTableIdentifier('')).toBeTruthy();
+  });
+});
+
+describe('validateWhereClause (R4 count/sample guard)', () => {
+  it('allows ordinary filter fragments', () => {
+    expect(validateWhereClause("STATUS = 'A' AND CREATE_DATE >= '2026-01-01'")).toBeNull();
+    expect(validateWhereClause('AMOUNT > 100 OR (QTY BETWEEN 1 AND 5)')).toBeNull();
+    expect(validateWhereClause('')).toBeNull();
+  });
+
+  it('allows forbidden keywords inside string literals', () => {
+    expect(validateWhereClause("MESSAGE = 'please do not DELETE me'")).toBeNull();
+  });
+
+  it('rejects semicolons and comments', () => {
+    expect(validateWhereClause("1=1; DROP TABLE x")).toContain('Semicolon');
+    expect(validateWhereClause("1=1 -- comment")).toContain('comments');
+    expect(validateWhereClause('1=1 /* block */')).toContain('comments');
+  });
+
+  it('rejects destructive keywords and xp_ procedures', () => {
+    expect(validateWhereClause('1=1 OR (DELETE FROM x)')).toBeTruthy();
+    expect(validateWhereClause("EXISTS (SELECT 1 FROM t) AND UPDATE x SET y = 1")).toBeTruthy();
+    expect(validateWhereClause("xp_cmdshell('dir') = 1")).toContain('xp_');
+    expect(validateWhereClause("1=1 WAITFOR DELAY '0:0:10'")).toContain('WAITFOR');
+  });
 });
 
 describe('query_external_db tool wiring', () => {
@@ -109,5 +154,40 @@ describe('query_external_db tool wiring', () => {
     });
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('not found');
+  });
+
+  it('count/sample require tableName', async () => {
+    seedProjectWithDb();
+    for (const action of ['count', 'sample']) {
+      const result = await callTool(server, 'query_external_db', {
+        projectId: 'p1', connectionLabel: 'TYL_DOC', action,
+      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('tableName is required');
+    }
+  });
+
+  it('count rejects an injection-shaped tableName before attempting any connection', async () => {
+    seedProjectWithDb();
+    const result = await callTool(server, 'query_external_db', {
+      projectId: 'p1', connectionLabel: 'TYL_DOC', action: 'count', tableName: 'Users; DROP TABLE x',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('Invalid table name');
+  });
+
+  it('count/sample reject a hostile where clause before attempting any connection', async () => {
+    seedProjectWithDb();
+    const semi = await callTool(server, 'query_external_db', {
+      projectId: 'p1', connectionLabel: 'TYL_DOC', action: 'count', tableName: 'Users', where: "1=1; DROP TABLE x",
+    });
+    expect(semi.isError).toBe(true);
+    expect(semi.content[0].text).toContain('Semicolon');
+
+    const kw = await callTool(server, 'query_external_db', {
+      projectId: 'p1', connectionLabel: 'TYL_DOC', action: 'sample', tableName: 'Users', where: 'DELETE FROM x',
+    });
+    expect(kw.isError).toBe(true);
+    expect(kw.content[0].text).toContain('Forbidden keyword');
   });
 });

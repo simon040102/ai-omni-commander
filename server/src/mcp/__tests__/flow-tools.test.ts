@@ -117,7 +117,7 @@ describe('flow-gated development', () => {
       setFlowState(testDb, 'task-1', { specExpected: true, roles: { default: { required: true, gateBFailures: 0 } } });
       await callTool(server, 'save_task_flow', { taskId: 'task-1', flowType: 'spec', mermaidContent: MMD });
       const result = await callTool(server, 'save_task_flow', { taskId: 'task-1', flowType: 'plan', mermaidContent: MMD2 });
-      expect(result.content[0].text).toContain('閘門 A');
+      expect(result.content[0].text).toContain('開工閘（規格理解確認）'); // R1 直白命名
       expect(result.content[0].text).toContain('查詢資料'); // spec content inlined
     });
 
@@ -126,7 +126,7 @@ describe('flow-gated development', () => {
       const result = await callTool(server, 'save_task_flow', { taskId: 'task-1', flowType: 'plan', mermaidContent: MMD });
       expect(result.content[0].text).toContain('spec-flow 尚未儲存');
       expect(result.content[0].text).toContain('不會因缺 spec-flow 而降級');
-      expect(result.content[0].text).not.toContain('閘門 A（兩圖模式）');
+      expect(result.content[0].text).not.toContain('開工閘（規格理解確認）（兩圖模式）');
     });
 
     it('plan response uses two-flow mode when specExpected=false', async () => {
@@ -240,7 +240,7 @@ describe('flow-gated development', () => {
       });
       const result = await callTool(server, 'report_flow_check', { taskId: 'task-1', gate: 'B', passed: true });
       expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain('閘門 A 尚未通過');
+      expect(result.content[0].text).toContain('開工閘（規格理解確認）尚未通過');
     });
 
     it('rejects gate B without code-flow', async () => {
@@ -279,6 +279,7 @@ describe('flow-gated development', () => {
     it('gate A pass records state and instructs to implement', async () => {
       readyForGateA();
       const result = await callTool(server, 'report_flow_check', { taskId: 'task-1', gate: 'A', passed: true });
+      expect(result.content[0].text).toContain('開工閘（規格理解確認）通過'); // R1 直白命名
       expect(result.content[0].text).toContain('開始實作');
       expect(getFlowState(testDb, 'task-1')!.roles.default!.gateA!.passed).toBe(true);
     });
@@ -307,6 +308,7 @@ describe('flow-gated development', () => {
     it('gate B pass resets the failure counter and unlocks testing', async () => {
       readyForGateB(2);
       const result = await callTool(server, 'report_flow_check', { taskId: 'task-1', gate: 'B', passed: true });
+      expect(result.content[0].text).toContain('完工閘（實作邏輯對齊）通過'); // R1 直白命名
       expect(result.content[0].text).toContain('跑測試');
       const rs = getFlowState(testDb, 'task-1')!.roles.default!;
       expect(rs.gateB!.passed).toBe(true);
@@ -338,6 +340,18 @@ describe('flow-gated development', () => {
       testDb.prepare("UPDATE tasks SET status = 'in_progress' WHERE id = ?").run(taskId);
     }
 
+    /** 塞 [DISPATCH] 派工快照——通過「執行計畫/派工記錄」完成閘門（R2），不影響 flow gate 判定 */
+    function seedDispatch(taskId = 'task-1') {
+      testDb.prepare(`
+        INSERT OR IGNORE INTO agents (id, project_id, role, status, model, current_task_id)
+        VALUES (?, 'proj-1', 'backend', 'running', 'external', ?)
+      `).run(`mcp-${taskId}`, taskId);
+      testDb.prepare(`
+        INSERT INTO agent_outputs (agent_id, task_id, stream_type, content)
+        VALUES (?, ?, 'system', '[DISPATCH] {"at":"2026-01-01T00:00:00Z","meta":null,"prompt":"test dispatch"}')
+      `).run(`mcp-${taskId}`, taskId);
+    }
+
     it('rejects completed when gate B not passed', async () => {
       inProgress();
       setFlowState(testDb, 'task-1', {
@@ -363,6 +377,7 @@ describe('flow-gated development', () => {
 
     it('allows completed when every required role passed gate B', async () => {
       inProgress();
+      seedDispatch(); // 通過執行計畫閘門（R2）
       setFlowState(testDb, 'task-1', {
         roles: { default: { required: true, gateBFailures: 0, plan: { hash: 'x', savedAt: 'now' }, code: { hash: 'y', savedAt: 'now' }, gateA: { passed: true, checkedAt: 'now' }, gateB: { passed: true, checkedAt: 'now' } } },
       });
@@ -391,8 +406,9 @@ describe('flow-gated development', () => {
       expect(getFlowState(testDb, 'task-1')!.skipped?.reason).toContain('純設定變更');
     });
 
-    it('does not gate tasks that never went through get_execution_plan', async () => {
+    it('does not flow-gate tasks that never went through get_execution_plan (dispatched via save_task_dispatch)', async () => {
       inProgress();
+      seedDispatch(); // 有派工記錄 → 通過執行計畫閘門（R2）；flow gate 因 flow_required=0 不適用
       const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
       expect(result.isError).toBeUndefined();
     });

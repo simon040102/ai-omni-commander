@@ -99,31 +99,53 @@ function unitTestItem(req: RequiredUnitTestItem): VerificationItem {
   };
 }
 
+/** 單筆 [VERIFICATION] 回報行的解析結果（item 為回報時使用的 id 或 item 文字）。 */
+export interface VerificationEntry {
+  item: string;
+  passed: boolean;
+}
+
+/**
+ * 解析此任務所有 report_verification_result 寫入的 [VERIFICATION] 回報行，
+ * **最新在前**（同一驗收項可能出現多次——呼叫端取第一個命中即為最新一筆）。
+ * 格式：`- [PASS|FAIL] {item}[ — {note}]`——只取 item 部分，避免 note 誤中。
+ * 單元測試閘門與驗收結果閘門共用此解析器（單一真相，避免規則漂移）。
+ */
+export function listVerificationEntries(
+  db: ReturnType<typeof getMcpDb>,
+  taskId: string,
+): VerificationEntry[] {
+  const rows = db.prepare(`
+    SELECT content FROM agent_outputs
+    WHERE task_id = ? AND stream_type = 'system' AND content LIKE '[VERIFICATION]%'
+    ORDER BY id DESC
+  `).all(taskId) as Array<{ content: string }>;
+  const entries: VerificationEntry[] = [];
+  for (const row of rows) {
+    for (const line of row.content.split('\n')) {
+      const m = /^- \[(PASS|FAIL)\] (.*)$/.exec(line);
+      if (!m) continue;
+      const itemField = (m[2] ?? '').split(' — ')[0]!.trim();
+      if (!itemField) continue;
+      entries.push({ item: itemField, passed: m[1] === 'PASS' });
+    }
+  }
+  return entries;
+}
+
 /**
  * 從 agent_outputs 找此任務**最新一筆**針對指定單測驗收項的 report_verification_result
- * 回報（解析 report_verification_result 寫入的 [VERIFICATION] 文字格式；item 欄位
- * 支援 id 或 item 文字，與該工具的回報約定一致）。找不到 → null。
+ * 回報（item 欄位支援 id 或 item 文字，與該工具的回報約定一致）。找不到 → null。
  */
 export function findLatestUnitTestVerification(
   db: ReturnType<typeof getMcpDb>,
   taskId: string,
   req: RequiredUnitTestItem,
 ): { passed: boolean } | null {
-  const rows = db.prepare(`
-    SELECT content FROM agent_outputs
-    WHERE task_id = ? AND stream_type = 'system' AND content LIKE '[VERIFICATION]%'
-    ORDER BY id DESC
-  `).all(taskId) as Array<{ content: string }>;
   const itemText = unitTestItemText(req.command);
-  for (const row of rows) {
-    for (const line of row.content.split('\n')) {
-      const m = /^- \[(PASS|FAIL)\] (.*)$/.exec(line);
-      if (!m) continue;
-      // 格式：`- [PASS|FAIL] {item}[ — {note}]`——只比對 item 部分，避免 note 誤中
-      const itemField = (m[2] ?? '').split(' — ')[0]!.trim();
-      if (itemField === req.id || itemField === itemText) {
-        return { passed: m[1] === 'PASS' };
-      }
+  for (const entry of listVerificationEntries(db, taskId)) {
+    if (entry.item === req.id || entry.item === itemText) {
+      return { passed: entry.passed };
     }
   }
   return null;
@@ -152,6 +174,16 @@ const BACKEND_ITEMS: VerificationItem[] = [
   },
 ];
 
+/**
+ * 資料異動驗證項（R4）——專案有綁定外部 DB（config_json.dbConnections 非空）且
+ * 任務含後端面（backend/fullstack；default label 回傳完整清單時也附上）才出現。
+ */
+export const BE_DATA_VERIFICATION_ITEM: VerificationItem = {
+  id: 'be-data-verification',
+  item: '資料異動驗證：query_external_db 確認新增/修改/刪除真實落地',
+  how: '用 query_external_db 的 count/sample 驗證資料真實落地：新增後查得到該筆、修改後 sample 確認欄位值正確、刪除後 count 查不到；欄位名以 describe_table 為準，嚴禁用猜的',
+};
+
 const FRONTEND_ITEMS: VerificationItem[] = [
   {
     id: 'fe-tsc',
@@ -165,20 +197,22 @@ const FRONTEND_ITEMS: VerificationItem[] = [
   },
 ];
 
-export function getVerificationItems(label: string, testCommands?: VerificationTestCommands): { items: VerificationItem[]; note: string | null } {
+export function getVerificationItems(label: string, testCommands?: VerificationTestCommands, hasDbConnections = false): { items: VerificationItem[]; note: string | null } {
   // 該任務 side 的 testCommand 有設定 → 驗收清單自動前置「單元測試全數通過」項；沒設定不出現。
   // 前置哪些項與 update_task_status 的單元測試閘門共用 getRequiredUnitTestItems（單一真相）。
+  // 專案有綁定外部 DB（dbConnections）→ 後端清單追加「資料異動驗證」項（R4）。
   const unitItems = getRequiredUnitTestItems(label, testCommands).map(unitTestItem);
+  const backendItems = hasDbConnections ? [...BACKEND_ITEMS, BE_DATA_VERIFICATION_ITEM] : BACKEND_ITEMS;
   switch (label) {
     case 'backend':
-      return { items: [...unitItems, ...BACKEND_ITEMS], note: null };
+      return { items: [...unitItems, ...backendItems], note: null };
     case 'frontend':
       return { items: [...unitItems, ...FRONTEND_ITEMS], note: null };
     case 'fullstack':
-      return { items: [...unitItems, ...BACKEND_ITEMS, ...FRONTEND_ITEMS], note: null };
+      return { items: [...unitItems, ...backendItems, ...FRONTEND_ITEMS], note: null };
     default:
       return {
-        items: [...unitItems, ...BACKEND_ITEMS, ...FRONTEND_ITEMS],
+        items: [...unitItems, ...backendItems, ...FRONTEND_ITEMS],
         note: `label "${label}" 沒有專屬驗收清單，回傳前端+後端完整清單，請挑適用項目執行（不適用的項目回報 passed=true + note="N/A"）。`,
       };
   }
@@ -189,7 +223,7 @@ export function registerVerificationTools(server: McpServer): void {
   // ── get_verification_plan ─────────────────────────────────
   server.tool(
     'get_verification_plan',
-    '取得任務的驗收清單（依 task label 決定：backend=撈全表靜態檢查/DDL 比對/API 煙霧測試/seed SQL；frontend=tsc --noEmit/Playwright；fullstack=兩者）。專案設定的 frontendTestCommand/backendTestCommand 有設定時，會自動前置「單元測試全數通過」驗收項——此項是完成閘門依據：update_task_status(completed) 要求該項最新一筆驗收回報 passed=true。**標記 completed 之前必須逐項執行並用 report_verification_result 回報結果。**',
+    '取得任務的驗收清單（依 task label 決定：backend=撈全表靜態檢查/DDL 比對/API 煙霧測試/seed SQL；frontend=tsc --noEmit/Playwright；fullstack=兩者）。專案設定的 frontendTestCommand/backendTestCommand 有設定時，會自動前置「單元測試全數通過」驗收項——此項是完成閘門依據：update_task_status(completed) 要求該項最新一筆驗收回報 passed=true。專案有綁定外部 DB（dbConnections）時，後端清單追加「資料異動驗證」項（query_external_db count/sample 確認新增/修改/刪除真實落地）。**標記 completed 之前必須逐項執行並用 report_verification_result 回報結果——任何驗收項最新一筆為 FAIL 會被完成閘門擋下。**',
     {
       taskId: z.string().describe('任務 ID'),
     },
@@ -204,8 +238,11 @@ export function registerVerificationTools(server: McpServer): void {
       // 專案設定的單元測試指令（frontendTestCommand / backendTestCommand）→ 前置單元測試驗收項
       const proj = db.prepare('SELECT config_json FROM projects WHERE id = ?').get(task.project_id) as { config_json: string | null } | undefined;
       const testCommands = parseTestCommands(proj?.config_json);
+      // 專案有綁定外部 DB（dbConnections）→ 後端清單追加「資料異動驗證」項（R4）
+      const dbConnections = parseJson<{ dbConnections?: unknown }>(proj?.config_json ?? null, {}).dbConnections;
+      const hasDbConnections = Array.isArray(dbConnections) && dbConnections.length > 0;
 
-      const { items, note } = getVerificationItems(task.label, testCommands);
+      const { items, note } = getVerificationItems(task.label, testCommands, hasDbConnections);
 
       return {
         content: [{
@@ -302,10 +339,11 @@ ${targets.map(t => `- ${sideLabel[t.side]}：\`${t.command}\` — workspace: ${t
 
 > **給 orchestrator 的指示：**
 > 1. 對每個 side 用 create_task(projectId="${projectId}", title="測試基線修復（${targets.map(t => t.side).join(' / ')}）", label=對應 side, taskType="refactor", description=...) 建立任務（taskType 用 refactor——整理既有測試，不是新功能）
-> 2. update_task_status(taskId, "in_progress") 後用 Agent tool 派 fixer agent，cwd 設為該 side 的 workspace 路徑
-> 3. 將下方對應 side 的 Fixer Prompt **原封不動**傳入（{TASK_ID} 替換為 create_task 回傳的任務 ID）。**此任務不要呼叫 get_execution_plan**——Fixer Prompt 即完整流程（基線修復不走規格驅動的開發軌，避免觸發 flow gate / 檢查表 / AI 回對閘門）
-> 4. fixer 回報有「真 bug」時，向使用者確認後另開 bug 任務，不要讓 fixer 順手修
-> 5. 基線全綠後告知使用者：此專案的單元測試強制已可安心啟用（testCommand 已設定，閘門自動生效）
+> 2. create_task 後呼叫 save_task_dispatch(taskId, 對應 side 的 Fixer Prompt) 存派工快照——這既讓任務通過「執行計畫/派工記錄」完成閘門，也讓中斷後可用 resume_task 取回 prompt 續派
+> 3. update_task_status(taskId, "in_progress") 後用 Agent tool 派 fixer agent，cwd 設為該 side 的 workspace 路徑
+> 4. 將下方對應 side 的 Fixer Prompt **原封不動**傳入（{TASK_ID} 替換為 create_task 回傳的任務 ID）。**此任務不要呼叫 get_execution_plan**——Fixer Prompt 即完整流程（基線修復不走規格驅動的開發軌，避免觸發 flow gate / 檢查表 / AI 回對閘門）
+> 5. fixer 回報有「真 bug」時，向使用者確認後另開 bug 任務，不要讓 fixer 順手修
+> 6. 基線全綠後告知使用者：此專案的單元測試強制已可安心啟用（testCommand 已設定，閘門自動生效）
 
 ---
 

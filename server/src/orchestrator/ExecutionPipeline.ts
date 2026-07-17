@@ -69,6 +69,18 @@ export function extractTestCommands(config: ProjectConfig | null | undefined): T
 }
 
 /**
+ * 資料異動驗證（後端限定，R4）— 專案 config 有 dbConnections 時才注入。
+ * CRUD 實作完成後用 query_external_db（count/sample）驗證資料真實落地。
+ */
+const BACKEND_DB_VERIFICATION_SECTION = `## 資料異動驗證（強制 — 專案已綁定外部 DB）
+
+實作 CRUD 後用 mcp__omni-commander__query_external_db 驗證資料真實落地：
+- 新增 → count/sample 查得到該筆
+- 修改 → sample 確認欄位值正確
+- 刪除 → count 查不到
+- 欄位名以 describe_table 為準，嚴禁猜`;
+
+/**
  * 安全弱點檢查（後端限定）— 通用版（stack 中性）。
  */
 const BACKEND_SECURITY_SECTION = `## 安全檢查（完成實作後逐項確認）
@@ -322,6 +334,7 @@ export class ExecutionPipeline {
       testOptions,
       extraPrompt,
       testCommands,
+      hasDbConnections: (projectConfig?.dbConnections?.length ?? 0) > 0,
       saFlowResult: saFlowResult ?? undefined,
       svnSpecFetch: { attempted: specFetch.attempted, functionCode: specFetch.functionCode || undefined, error: specFetch.error, warnings: specFetch.warnings },
     });
@@ -446,6 +459,7 @@ export class ExecutionPipeline {
       testOptions,
       extraPrompt,
       testCommands,
+      hasDbConnections: (projectConfig?.dbConnections?.length ?? 0) > 0,
       saFlowResult: saFlowResult ?? undefined,
       svnSpecFetch: { attempted: specFetch.attempted, functionCode: specFetch.functionCode || undefined, error: specFetch.error, warnings: specFetch.warnings },
     });
@@ -562,6 +576,7 @@ export class ExecutionPipeline {
       testOptions: opts?.testOptions,
       extraPrompt,
       testCommands,
+      hasDbConnections: (projectConfig?.dbConnections?.length ?? 0) > 0,
       saFlowResult: saFlowResult ?? undefined,
       svnSpecFetch: { attempted: specFetch.attempted, functionCode: specFetch.functionCode || undefined, error: specFetch.error, warnings: specFetch.warnings },
     });
@@ -686,6 +701,8 @@ export class ExecutionPipeline {
     extraPrompt?: string;
     /** 專案設定的單元測試指令（frontendTestCommand / backendTestCommand），注入「單元測試（強制流程）」區塊 */
     testCommands?: TestCommands;
+    /** 專案 config 有 dbConnections 時為 true → backend role 注入「資料異動驗證」規範（R4） */
+    hasDbConnections?: boolean;
     saFlowResult?: { fullFlow: string; relevantFlow: string; flowPath: string } | null;
     /**
      * Auto spec fetch outcome (SVN + local spec folders) — attempted=true means
@@ -797,6 +814,7 @@ export class ExecutionPipeline {
       projectId: opts.projectId,
       track: opts.track,
       testCommands: opts.testCommands,
+      hasDbConnections: opts.hasDbConnections,
     });
     parts.push(taskPrompt);
 
@@ -1173,9 +1191,9 @@ ${flowDiagram}
     title: string,
     description: string,
     taskType: TaskType,
-    promptOpts: { role?: string; testOptions?: TestOptions; reportTaskId?: string; realTaskId?: string; projectId?: string; track?: ExecutionTrack; testCommands?: TestCommands } = {},
+    promptOpts: { role?: string; testOptions?: TestOptions; reportTaskId?: string; realTaskId?: string; projectId?: string; track?: ExecutionTrack; testCommands?: TestCommands; hasDbConnections?: boolean } = {},
   ): string {
-    const { role, testOptions, reportTaskId, realTaskId, projectId, track, testCommands } = promptOpts;
+    const { role, testOptions, reportTaskId, realTaskId, projectId, track, testCommands, hasDbConnections } = promptOpts;
     const taskId = realTaskId ?? reportTaskId;
     const typeLabels: Record<TaskType, string> = {
       bug: 'Bug Fix',
@@ -1185,9 +1203,10 @@ ${flowDiagram}
       other: 'Task',
     };
 
-    // Backend-only mandatory sections（來自專案規範：效能分析 + 安全檢查）
+    // Backend-only mandatory sections（來自專案規範：效能分析 + 安全檢查；
+    // 專案 config 有 dbConnections 時追加資料異動驗證——R4）
     const backendSections = role === 'backend'
-      ? `${BACKEND_PERFORMANCE_SECTION}\n\n${BACKEND_SECURITY_SECTION}\n\n`
+      ? `${BACKEND_PERFORMANCE_SECTION}\n\n${BACKEND_SECURITY_SECTION}\n\n${hasDbConnections ? `${BACKEND_DB_VERIFICATION_SECTION}\n\n` : ''}`
       : '';
 
     return `# ${typeLabels[taskType]}: ${title}
