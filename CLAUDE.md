@@ -172,6 +172,7 @@ if task.label == 'backend' and config.backendExtraPrompt:
   - **Asana 已存在的任務**（已有 taskId）→ 直接 `update_task_status(taskId, "in_progress")`
   - **使用者口述的新任務**（沒有 taskId）→ 先 `create_task(projectId, title, label, ...)`，用回傳的 taskId，再 `update_task_status(taskId, "in_progress")`
 - Agent tool 派 subagent，prompt 包含所有收集到的上下文
+- **流水線並行**：任務 A 進入 AI 回對（獨立背景 agent）後，orchestrator 不必乾等——可立即開始備料/派工任務 B。回對結果回來再收 A 的尾。前端+後端雙 agent 並行照舊
 - subagent 用 `report_output` / `report_milestone` 回報進度
 - 完成後 `update_task_status(taskId, "completed")`
 
@@ -206,7 +207,7 @@ subagent 回報完成後，**我（orchestrator）必須自己驗證**，不能�
 
 #### 通用（前端/後端都要）— 規格回對兩步流程
 0a. **程式預檢**：`run_spec_compliance(taskId)` 用程式比對 checklist 與程式碼，抓文字/路徑錯字（advisory，不解鎖完成閘門；有正當理由的項目用 `waive_checklist_item` 豁免並附理由）
-0b. **AI 回對（完成閘門依據）**：`get_compliance_review_plan(taskId)` 取得派工計畫 → 派**獨立的 AI 審查 subagent**（絕不可由寫 code 的 implementer 自評）讀規格原文 + checklist + 實際程式碼逐項判定（含 logic 項目，matched 必附 file+line 證據）→ `save_compliance_review` 寫回。**最新 AI 回對 missing=0 才可標 completed**；missing>0 → 交回 implementer 修正後重新派 AI 回對
+0b. **AI 回對（完成閘門依據）**：`get_compliance_review_plan(taskId)` 取得派工計畫 → 派**獨立的 AI 審查 subagent**（絕不可由寫 code 的 implementer 自評）讀規格原文 + checklist + 實際程式碼逐項判定（含 logic 項目，matched 必附 file+line 證據）→ `save_compliance_review` 寫回。**最新 AI 回對 missing=0 才可標 completed**；missing>0 → 交回 implementer 修正後重新派 AI 回對。**修正後的重審會自動走增量模式**（get_compliance_review_plan 偵測上輪 missing>0 會帶「增量重審」指示）：reviewer 只重判上輪 missing / 新增 / 有疑慮項，其餘上輪 matched 項由 `save_compliance_review(carryForward=true)` 程式重驗證據自動沿用——不需整份重審，閘門標準不變
 
 #### 後端任務
 1. **靜態檢查**：grep 資料存取層有沒有「撈全表 + 記憶體過濾」的查詢（專案技術棧的具體禁用寫法見該專案 extraPrompt / 專案筆記）

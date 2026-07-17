@@ -1398,7 +1398,9 @@ ${caseSourceLine}
    每條案例標注對應的 checklist itemId 或規格出處
 3. **失敗案例的預期結果必須有規格出處**：錯誤訊息、驗證規則是規格寫的才能斷言；規格沒定義的失敗行為 → 呼叫 mcp__omni-commander__report_spec_gap(${tidComma}category=..., description=...) 記錄，該案例先不寫或只斷言「不得 crash」這類中性行為——**嚴禁編造預期值**（編出來的預期值會被測試固化成「正確答案」）
 4. **寫測試 → 跑到綠**：測試名稱或註解標注對應的 itemId/規格出處——之後 AI 回對 logic 項可直接引用測試檔的 file+line 當證據
-5. **完成前全套再跑一次**：測試指令：${commandNote}
+5. **測試分層（開發迴圈快、結案全套）**：
+   - 開發迴圈：修改-驗證迴圈中，跑**與本任務相關的測試檔**即可（如 jest/vitest 的路徑過濾、gradle 的 --tests 過濾），加快迭代
+   - 結案前：**完成前必須跑全套**（專案設定的測試指令原樣執行）——測試指令：${commandNote}。全綠才回報 report_verification_result passed——**閘門認的是全套結果，相關測試綠不等於全套綠**（撞到既有的**無關失敗**依第 7 條處理：本任務相關測試全綠即可 passed=true，note 誠實列出無關失敗）
 6. **禁裝擋板**：測試指令執行失敗且原因是**框架/套件不存在**（command not found、找不到模組/類別路徑）→ **嚴禁自行安裝任何套件或修改建置檔**（package.json / pom.xml / build.gradle / lockfile 一律不可動）。這代表專案設定與 workspace 實況不符：report_output 記錄後標 failed，由使用者處理。「修復重試最多 3 次」僅適用於**測試本身的失敗**（斷言不過、程式 bug）
 7. **只准新增/修改與本任務直接相關的測試**：跑全套時撞到既有的**無關失敗** → 不可順手修（你沒有那些功能的規格脈絡，亂修會把潛在 bug 固化成斷言）——用 mcp__omni-commander__report_output(${tidComma}content="...") 記錄無關失敗清單，並建議使用者執行 get_test_baseline_plan 做基線修復。這些無關失敗**不阻擋**你回報自己任務的測試結果：自己任務相關的測試全綠即可回報 passed=true，note 必列無關失敗清單（report_verification_result 的 note 註明）`;
   }

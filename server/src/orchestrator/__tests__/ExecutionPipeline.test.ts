@@ -658,6 +658,22 @@ describe('ExecutionPipeline', () => {
       expect(plan.prompt).not.toContain('pnpm vitest run');
     });
 
+    it('測試分層（S3）：開發迴圈跑相關測試檔、完成前必跑全套（閘門認全套結果）', async () => {
+      createTask('p-ut-layer', 't-ut-layer', 'frontend', 'feature', TEST_CMD_CONFIG);
+
+      const plan = await pipeline.buildExecutionPlan('t-ut-layer');
+
+      // 開發迴圈：相關測試檔即可（路徑過濾加快迭代）
+      expect(plan.prompt).toContain('與本任務相關的測試檔');
+      expect(plan.prompt).toContain('路徑過濾、gradle 的 --tests 過濾');
+      // 結案前：全套原樣執行，全綠才回報 passed
+      expect(plan.prompt).toContain('完成前必須跑全套');
+      expect(plan.prompt).toContain('測試指令：`pnpm vitest run`');
+      expect(plan.prompt).toContain('閘門認的是全套結果，相關測試綠不等於全套綠');
+      // 舊措辭移除
+      expect(plan.prompt).not.toContain('完成前全套再跑一次');
+    });
+
     it('禁裝擋板（G2）：框架不存在嚴禁自行安裝或改建置檔，重試 3 次僅適用測試本身失敗——與 MCP 常數同文', async () => {
       createTask('p-ut-guard', 't-ut-guard', 'backend', 'feature', TEST_CMD_CONFIG);
 

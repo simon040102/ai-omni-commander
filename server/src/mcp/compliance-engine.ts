@@ -49,6 +49,9 @@ export interface ItemResult {
   note?: string;
   /** 引擎 × AI 分歧偵測：只出現在 ai_review run，且只在最新 engine run 對同一項的判定與 AI 相反時才有值 */
   engineStatus?: 'matched' | 'missing';
+  /** 增量回對（save_compliance_review carryForward）：此項沿用上輪 ai_review 的 matched 判定
+   *  （原證據經程式重驗仍有效）——只出現在 carryForward 產生的 ai_review run */
+  carriedForward?: boolean;
 }
 
 export interface ComplianceSummary {

@@ -16,8 +16,16 @@ vi.mock('../notify.js', () => ({
   notifyWebServer: vi.fn().mockResolvedValue(true),
 }));
 
+// task-tools（真實閘門測試用）在 module top-level import svn-status——mock 掉避免碰真實 svn CLI
+vi.mock('../svn-status.js', () => ({
+  getSvnCredentials: vi.fn().mockReturnValue({ username: 'user', password: 'pass' }),
+  isSvnCliAvailable: vi.fn().mockReturnValue(true),
+  fetchRemoteLastModified: vi.fn().mockReturnValue(null),
+}));
+
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { registerComplianceTools } from '../tools/compliance-tools.js';
+import { registerTaskTools } from '../tools/task-tools.js';
 import { notifyWebServer } from '../notify.js';
 import { callTool } from './test-helpers.js';
 
@@ -616,6 +624,110 @@ describe('compliance-tools', () => {
       expect(text).toContain('## 引擎預檢種子');
       expect(text).toContain('src/Index.tsx:1');
     });
+
+    describe('增量重審段（S1 配套）', () => {
+      /** 全量第一輪：rows[0] matched（真實證據）、其餘 missing */
+      async function seedFirstReview(extraMissingNote = '排序方向不符') {
+        await callTool(server, 'save_spec_checklist', {
+          taskId: 'task-1',
+          items: [UI_ITEM, { itemType: 'logic', content: '依建立日期倒序' }],
+        });
+        const rows = itemIds();
+        await callTool(server, 'save_compliance_review', {
+          taskId: 'task-1',
+          results: [
+            { itemId: rows[0].id, status: 'matched', evidence: [{ file: 'src/Index.tsx', line: 1 }] },
+            { itemId: rows[1].id, status: 'missing', note: extraMissingNote },
+          ],
+        });
+        return rows;
+      }
+
+      it('首輪回對（無 ai_review run，只有 engine 預檢）→ plan 完全無增量段', async () => {
+        seedProject(testDb);
+        seedTask(testDb);
+        await callTool(server, 'save_spec_checklist', { taskId: 'task-1', items: [UI_ITEM] });
+        await callTool(server, 'run_spec_compliance', { taskId: 'task-1' });
+
+        const text = (await callTool(server, 'get_compliance_review_plan', { taskId: 'task-1' })).content[0].text;
+        expect(text).not.toContain('增量重審');
+        expect(text).not.toContain('carryForward');
+      });
+
+      it('上輪 ai_review missing>0 → plan 含增量段：上輪 missing 清單 + staleness 新增項 + carryForward/revalidationFailed 指示', async () => {
+        seedProject(testDb);
+        seedTask(testDb);
+        const rows = await seedFirstReview();
+        // 把上輪 run 回溯一小時，再新增檢查項 → staleness 項（created_at 嚴格晚於 run_at）
+        testDb.prepare("UPDATE spec_compliance_runs SET run_at = datetime('now', '-1 hour') WHERE task_id = 'task-1'").run();
+        await callTool(server, 'save_spec_checklist', {
+          taskId: 'task-1',
+          items: [{ itemType: 'ui_text', content: '事後新增文字' }],
+        });
+
+        const text = (await callTool(server, 'get_compliance_review_plan', { taskId: 'task-1' })).content[0].text;
+        expect(text).toContain('## 增量重審');
+        expect(text).toContain('missing=1');
+        // 上輪 missing 項清單（itemId + content + note 摘要）
+        expect(text).toContain(rows[1].id);
+        expect(text).toContain('依建立日期倒序');
+        expect(text).toContain('排序方向不符');
+        // staleness 新增項
+        expect(text).toContain('staleness');
+        expect(text).toContain('事後新增文字');
+        // 寫回指示：carryForward + revalidationFailed 補判重提
+        expect(text).toContain('save_compliance_review(taskId="task-1", carryForward=true');
+        expect(text).toContain('只提交你重判的項目');
+        expect(text).toContain('revalidationFailed');
+        // orchestrator 指示也有增量段
+        expect(text).toContain('> 5. 本次為**增量重審**');
+        // 標準不放寬
+        expect(text).toContain('不是放寬');
+      });
+
+      it('上輪 ai_review missing=0 → 無增量段（乾淨前輪不需要重審指示）', async () => {
+        seedProject(testDb);
+        seedTask(testDb);
+        await callTool(server, 'save_spec_checklist', { taskId: 'task-1', items: [UI_ITEM] });
+        const rows = itemIds();
+        await callTool(server, 'save_compliance_review', {
+          taskId: 'task-1',
+          results: [{ itemId: rows[0].id, status: 'matched', evidence: [{ file: 'src/Index.tsx', line: 1 }] }],
+        });
+
+        const text = (await callTool(server, 'get_compliance_review_plan', { taskId: 'task-1' })).content[0].text;
+        expect(text).not.toContain('## 增量重審');
+      });
+
+      it('上輪 run 之後檢查表被整份取代（[CHECKLIST_REPLACE]）→ 無增量段，走全量（與 save_compliance_review 拒絕條件一致）', async () => {
+        seedProject(testDb);
+        seedTask(testDb);
+        await seedFirstReview();
+        await callTool(server, 'save_spec_checklist', {
+          taskId: 'task-1',
+          items: [{ itemType: 'ui_text', content: '重抽後的新項', side: 'frontend' }],
+          replace: true,
+        });
+
+        const text = (await callTool(server, 'get_compliance_review_plan', { taskId: 'task-1' })).content[0].text;
+        expect(text).not.toContain('## 增量重審');
+        expect(text).not.toContain('carryForward=true');
+      });
+
+      it('light 軌 plan 也帶增量段（missing>0 前輪）', async () => {
+        seedProject(testDb);
+        seedTask(testDb);
+        testDb.prepare(`UPDATE tasks SET flow_state = ? WHERE id = 'task-1'`).run(
+          JSON.stringify({ roles: {}, track: 'light', trackReason: '自動判定' }),
+        );
+        await seedFirstReview();
+
+        const text = (await callTool(server, 'get_compliance_review_plan', { taskId: 'task-1' })).content[0].text;
+        expect(text).toContain('LIGHT 軌');
+        expect(text).toContain('## 增量重審');
+        expect(text).toContain('save_compliance_review(taskId="task-1", carryForward=true');
+      });
+    });
   });
 
   describe('get_compliance_review_plan — SA 流程圖回對（R3）', () => {
@@ -989,6 +1101,356 @@ describe('compliance-tools', () => {
         const items = JSON.parse(run.results_json) as Array<Record<string, unknown>>;
         expect(items.every(i => !('engineStatus' in i))).toBe(true);
       });
+    });
+
+    describe('carryForward 增量回對 (S1)', () => {
+      function aiRuns(taskId = 'task-1') {
+        return testDb.prepare(
+          "SELECT * FROM spec_compliance_runs WHERE task_id = ? AND source = 'ai_review' ORDER BY run_at ASC, rowid ASC"
+        ).all(taskId) as Array<{ id: string; matched: number; missing: number; results_json: string }>;
+      }
+
+      it('上輪 matched + 證據仍有效 → 自動沿用（carriedForward=true 計入涵蓋）；上輪 missing 本次重判 matched → run 反映', async () => {
+        const rows = await seedChecklist(); // [UI_ITEM(matched-able), logic 依建立日期倒序]
+        // 第一輪（全量）：A matched、B missing
+        await callTool(server, 'save_compliance_review', {
+          taskId: 'task-1',
+          results: [
+            { itemId: rows[0].id, status: 'matched', evidence: [{ file: 'src/Index.tsx', line: 1 }], note: '標題渲染於 h1' },
+            { itemId: rows[1].id, status: 'missing', note: '排序未實作' },
+          ],
+        });
+
+        // 第二輪（增量）：只提交上輪 missing 的 B（判 matched）——A 不提交，由程式重驗沿用
+        const result = await callTool(server, 'save_compliance_review', {
+          taskId: 'task-1',
+          carryForward: true,
+          results: [{ itemId: rows[1].id, status: 'matched', evidence: [{ file: 'src/Index.tsx', line: 1 }], note: '排序已修' }],
+        });
+        expect(result.isError).toBeUndefined();
+        expect(result.content[0].text).toContain('missing=0');
+        expect(result.content[0].text).toContain('沿用上輪判定');
+        expect(result.content[0].text).toContain('1 項沿用');
+
+        const runs = aiRuns();
+        expect(runs).toHaveLength(2);
+        expect(runs[1]).toMatchObject({ matched: 2, missing: 0 });
+        // results_json 保持陣列形狀，沿用項與重判項並列，沿用項多 carriedForward 欄位
+        const items = JSON.parse(runs[1].results_json) as Array<{ itemId: string; status: string; evidence?: Array<{ file: string; line: number }>; carriedForward?: boolean }>;
+        expect(Array.isArray(items)).toBe(true);
+        const carried = items.find(i => i.itemId === rows[0].id)!;
+        expect(carried.status).toBe('matched');
+        expect(carried.carriedForward).toBe(true);
+        expect(carried.evidence).toEqual([{ file: 'src/Index.tsx', line: 1 }]); // 沿用原證據
+        const rejudged = items.find(i => i.itemId === rows[1].id)!;
+        expect(rejudged.status).toBe('matched');
+        expect(rejudged.carriedForward).toBeUndefined();
+      });
+
+      it('上輪證據已失效（改檔案內容使 ±10 行不再含目標）→ revalidationFailed 整批拒收、不寫 run', async () => {
+        const mutPath = path.join(feRoot, 'src', 'Mutable.tsx');
+        fs.writeFileSync(mutPath, '<h1>沿用重驗目標文字</h1>\n', 'utf-8');
+        try {
+          const rows = await seedChecklist([
+            { itemType: 'ui_text', content: '沿用重驗目標文字', side: 'frontend' },
+            { itemType: 'logic', content: '修復後預期行為' },
+          ]);
+          // 第一輪：M matched（Mutable.tsx:1）、L missing
+          await callTool(server, 'save_compliance_review', {
+            taskId: 'task-1',
+            results: [
+              { itemId: rows[0].id, status: 'matched', evidence: [{ file: 'src/Mutable.tsx', line: 1 }] },
+              { itemId: rows[1].id, status: 'missing' },
+            ],
+          });
+          // implementer 改了檔案：目標文字消失（±10 行窗口不再命中）
+          fs.writeFileSync(
+            mutPath,
+            ['// 文字已被移除', ...Array.from({ length: 25 }, (_, i) => `const y_${i} = ${i};`)].join('\n'),
+            'utf-8',
+          );
+
+          // 第二輪（增量）：只提交 L——M 的沿用重驗必須失敗且整批拒收
+          const result = await callTool(server, 'save_compliance_review', {
+            taskId: 'task-1',
+            carryForward: true,
+            results: [{ itemId: rows[1].id, status: 'matched', evidence: [{ file: 'src/Index.tsx', line: 1 }] }],
+          });
+          expect(result.isError).toBe(true);
+          expect(result.content[0].text).toContain('revalidationFailed');
+          expect(result.content[0].text).toContain('不得沿用');
+          expect(result.content[0].text).toContain(rows[0].id);
+          expect(result.content[0].text).toContain('src/Mutable.tsx:1');
+          // 整批拒收——沒有第二筆 run
+          expect(aiRuns()).toHaveLength(1);
+
+          // 把失效項納入重判後重新提交（照指示）→ 成功
+          const retry = await callTool(server, 'save_compliance_review', {
+            taskId: 'task-1',
+            carryForward: true,
+            results: [
+              { itemId: rows[0].id, status: 'missing', note: '文字已從程式碼移除' },
+              { itemId: rows[1].id, status: 'matched', evidence: [{ file: 'src/Index.tsx', line: 1 }] },
+            ],
+          });
+          expect(retry.isError).toBeUndefined();
+          expect(aiRuns()).toHaveLength(2);
+        } finally {
+          fs.rmSync(mutPath, { force: true });
+        }
+      });
+
+      it('無前一輪 ai_review run（只有 engine 預檢）→ 拒絕 carryForward', async () => {
+        const rows = await seedChecklist([UI_ITEM]);
+        await callTool(server, 'run_spec_compliance', { taskId: 'task-1' }); // engine run 不算前輪
+
+        const result = await callTool(server, 'save_compliance_review', {
+          taskId: 'task-1',
+          carryForward: true,
+          results: [{ itemId: rows[0].id, status: 'matched', evidence: [{ file: 'src/Index.tsx', line: 1 }] }],
+        });
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain('前一輪');
+        expect(result.content[0].text).toContain('全量');
+        expect(aiRuns()).toHaveLength(0);
+      });
+
+      it('[CHECKLIST_REPLACE] 晚於上輪 run（檢查表被整份取代）→ 拒絕 carryForward 要求全量', async () => {
+        const rows = await seedChecklist([UI_ITEM, MISSING_ITEM]);
+        // 第一輪全量
+        await callTool(server, 'save_compliance_review', {
+          taskId: 'task-1',
+          results: [
+            { itemId: rows[0].id, status: 'matched', evidence: [{ file: 'src/Index.tsx', line: 1 }] },
+            { itemId: rows[1].id, status: 'missing' },
+          ],
+        });
+        // 上輪 run 之後整份取代檢查表（真實路徑：save_spec_checklist replace 會寫 [CHECKLIST_REPLACE] 稽核）
+        await callTool(server, 'save_spec_checklist', {
+          taskId: 'task-1',
+          items: [{ itemType: 'ui_text', content: '代理人設定作業', side: 'frontend' }],
+          replace: true,
+        });
+        const newRow = testDb.prepare("SELECT id FROM spec_checklist_items WHERE task_id = 'task-1' AND waived = 0").get() as { id: string };
+
+        const result = await callTool(server, 'save_compliance_review', {
+          taskId: 'task-1',
+          carryForward: true,
+          results: [{ itemId: newRow.id, status: 'matched', evidence: [{ file: 'src/Index.tsx', line: 1 }] }],
+        });
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain('整份取代');
+        expect(result.content[0].text).toContain('CHECKLIST_REPLACE');
+        expect(aiRuns()).toHaveLength(1);
+      });
+
+      it('沿用 + 提交聯集仍缺項 → 涵蓋驗證照樣拒（上輪 missing 項不會被沿用）', async () => {
+        const rows = await seedChecklist([
+          UI_ITEM,
+          { itemType: 'logic', content: '依建立日期倒序' },
+          { itemType: 'logic', content: '刪除需二次確認' },
+        ]);
+        // 第一輪：A matched、B/C missing
+        await callTool(server, 'save_compliance_review', {
+          taskId: 'task-1',
+          results: [
+            { itemId: rows[0].id, status: 'matched', evidence: [{ file: 'src/Index.tsx', line: 1 }] },
+            { itemId: rows[1].id, status: 'missing' },
+            { itemId: rows[2].id, status: 'missing' },
+          ],
+        });
+        // 第二輪（增量）：只提交 B——C 既非提交也非沿用（上輪 missing）→ 缺項拒
+        const result = await callTool(server, 'save_compliance_review', {
+          taskId: 'task-1',
+          carryForward: true,
+          results: [{ itemId: rows[1].id, status: 'matched', evidence: [{ file: 'src/Index.tsx', line: 1 }] }],
+        });
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain('未判定');
+        expect(result.content[0].text).toContain(rows[2].id);
+        expect(result.content[0].text).toContain('上輪 missing');
+        expect(aiRuns()).toHaveLength(1);
+      });
+
+      it('logic 項一律不沿用：上輪 matched 的 logic 未提交 → 缺項拒；重提含 logic → 成功且無沿用標記', async () => {
+        const rows = await seedChecklist(); // [UI_ITEM(ui_text), logic 依建立日期倒序]
+        // 第一輪：兩項都 matched（logic 也 matched）
+        await callTool(server, 'save_compliance_review', {
+          taskId: 'task-1',
+          results: [
+            { itemId: rows[0].id, status: 'matched', evidence: [{ file: 'src/Index.tsx', line: 1 }] },
+            { itemId: rows[1].id, status: 'matched', evidence: [{ file: 'src/Index.tsx', line: 1 }], note: '排序邏輯已確認' },
+          ],
+        });
+        // 第二輪（增量）：只提交 ui_text——logic 上輪雖 matched 但不得沿用 → 缺項拒
+        const result = await callTool(server, 'save_compliance_review', {
+          taskId: 'task-1',
+          carryForward: true,
+          results: [{ itemId: rows[0].id, status: 'matched', evidence: [{ file: 'src/Index.tsx', line: 1 }] }],
+        });
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain(rows[1].id);
+        expect(aiRuns()).toHaveLength(1);
+
+        // 把 logic 納入重判後重提 → 成功；logic 是重判項不是沿用項
+        const retry = await callTool(server, 'save_compliance_review', {
+          taskId: 'task-1',
+          carryForward: true,
+          results: [
+            { itemId: rows[0].id, status: 'matched', evidence: [{ file: 'src/Index.tsx', line: 1 }] },
+            { itemId: rows[1].id, status: 'matched', evidence: [{ file: 'src/Index.tsx', line: 1 }], note: '重判確認' },
+          ],
+        });
+        expect(retry.isError).toBeUndefined();
+        const items = JSON.parse(aiRuns()[1]!.results_json) as Array<{ itemId: string; carriedForward?: boolean }>;
+        expect(items.find(i => i.itemId === rows[1].id)?.carriedForward).toBeUndefined();
+      });
+
+      it('workspace 未設定（無法程式重驗）→ 拒絕 carryForward', async () => {
+        testDb.prepare(`INSERT INTO projects (id, name, working_dir) VALUES ('proj-cw', 'P', '/tmp/cw')`).run();
+        seedTask(testDb, 'task-cw', 'proj-cw', 'frontend');
+        await callTool(server, 'save_spec_checklist', { taskId: 'task-cw', items: [UI_ITEM] });
+        const row = testDb.prepare("SELECT id FROM spec_checklist_items WHERE task_id = 'task-cw'").get() as { id: string };
+        // 第一輪（無 workspace → 證據未經程式驗證，照舊寫入）
+        await callTool(server, 'save_compliance_review', {
+          taskId: 'task-cw',
+          results: [{ itemId: row.id, status: 'matched', evidence: [{ file: 'src/Whatever.tsx', line: 1 }] }],
+        });
+        // 第二輪 carryForward：重驗做不到 → 拒
+        const result = await callTool(server, 'save_compliance_review', {
+          taskId: 'task-cw',
+          carryForward: true,
+          results: [{ itemId: row.id, status: 'matched', evidence: [{ file: 'src/Whatever.tsx', line: 1 }] }],
+        });
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain('無法開檔驗證');
+        expect(aiRuns('task-cw')).toHaveLength(1);
+      });
+
+      it('鏈式沿用：第三輪沿用「第二輪的沿用項」時仍每輪重驗——證據失效照樣 revalidationFailed', async () => {
+        const chainPath = path.join(feRoot, 'src', 'Chain.tsx');
+        fs.writeFileSync(chainPath, '<h1>鏈式沿用目標文字</h1>\n', 'utf-8');
+        try {
+          const rows = await seedChecklist([
+            { itemType: 'ui_text', content: '鏈式沿用目標文字', side: 'frontend' },
+            { itemType: 'logic', content: '修復後預期行為' },
+          ]);
+          // 第一輪（全量）：A matched（Chain.tsx:1）、B missing
+          await callTool(server, 'save_compliance_review', {
+            taskId: 'task-1',
+            results: [
+              { itemId: rows[0].id, status: 'matched', evidence: [{ file: 'src/Chain.tsx', line: 1 }] },
+              { itemId: rows[1].id, status: 'missing' },
+            ],
+          });
+          // 第二輪（增量）：B 重判 matched，A 沿用（重驗通過）
+          const r2 = await callTool(server, 'save_compliance_review', {
+            taskId: 'task-1',
+            carryForward: true,
+            results: [{ itemId: rows[1].id, status: 'matched', evidence: [{ file: 'src/Index.tsx', line: 1 }] }],
+          });
+          expect(r2.isError).toBeUndefined();
+          expect(aiRuns()).toHaveLength(2);
+
+          // implementer 又改壞了 Chain.tsx（目標文字消失）
+          fs.writeFileSync(
+            chainPath,
+            ['// 文字已移除', ...Array.from({ length: 25 }, (_, i) => `const z_${i} = ${i};`)].join('\n'),
+            'utf-8',
+          );
+
+          // 第三輪（增量）：A 現在是「第二輪的沿用項」——沿用鏈仍必須每輪重驗 → 失效整批拒收
+          const r3 = await callTool(server, 'save_compliance_review', {
+            taskId: 'task-1',
+            carryForward: true,
+            results: [{ itemId: rows[1].id, status: 'matched', evidence: [{ file: 'src/Index.tsx', line: 1 }] }],
+          });
+          expect(r3.isError).toBe(true);
+          expect(r3.content[0].text).toContain('revalidationFailed');
+          expect(r3.content[0].text).toContain(rows[0].id);
+          expect(aiRuns()).toHaveLength(2); // 第三輪未寫入
+        } finally {
+          fs.rmSync(chainPath, { force: true });
+        }
+      });
+
+      it('上輪 run 之後某 matched 項被 waive → carryForward 時既不沿用也不要求涵蓋', async () => {
+        const rows = await seedChecklist(); // [UI_ITEM, logic]
+        // 第一輪：A matched、B missing
+        await callTool(server, 'save_compliance_review', {
+          taskId: 'task-1',
+          results: [
+            { itemId: rows[0].id, status: 'matched', evidence: [{ file: 'src/Index.tsx', line: 1 }] },
+            { itemId: rows[1].id, status: 'missing' },
+          ],
+        });
+        // A 在上輪之後被豁免
+        await callTool(server, 'waive_checklist_item', { itemId: rows[0].id, reason: 'Phase 2 才做' });
+
+        // 第二輪（增量）：只提交 B——A 已豁免,不需沿用也不算缺項
+        const result = await callTool(server, 'save_compliance_review', {
+          taskId: 'task-1',
+          carryForward: true,
+          results: [{ itemId: rows[1].id, status: 'matched', evidence: [{ file: 'src/Index.tsx', line: 1 }] }],
+        });
+        expect(result.isError).toBeUndefined();
+
+        const runs = aiRuns();
+        expect(runs).toHaveLength(2);
+        const items = JSON.parse(runs[1].results_json) as Array<{ itemId: string; carriedForward?: boolean }>;
+        // A 不以沿用身分出現在 run 的 matched/missing 判定中
+        expect(items.find(i => i.itemId === rows[0].id && i.carriedForward)).toBeUndefined();
+      });
+    });
+  });
+
+  describe('carryForward × 完成閘門相容（真實閘門測試）', () => {
+    it('carryForward 產生的 run missing=0 → update_task_status(completed) 放行；missing>0 照樣擋', async () => {
+      registerTaskTools(server); // 同一 server 掛上 update_task_status（同一 mock DB）
+      seedProject(testDb);
+      seedTask(testDb);
+      testDb.prepare("UPDATE tasks SET status = 'in_progress' WHERE id = 'task-1'").run();
+      // R2 執行計畫/派工記錄閘門：塞 [DISPATCH] 稽核行
+      testDb.prepare(`
+        INSERT INTO agents (id, project_id, role, status, model, current_task_id)
+        VALUES ('mcp-task-1', 'proj-1', 'frontend', 'running', 'external', 'task-1')
+      `).run();
+      testDb.prepare(`
+        INSERT INTO agent_outputs (agent_id, task_id, stream_type, content)
+        VALUES ('mcp-task-1', 'task-1', 'system', '[DISPATCH] {"at":"2026-01-01T00:00:00Z","meta":null,"prompt":"test dispatch"}')
+      `).run();
+
+      await callTool(server, 'save_spec_checklist', {
+        taskId: 'task-1',
+        items: [UI_ITEM, { itemType: 'logic', content: '依建立日期倒序' }],
+      });
+      const rows = testDb.prepare("SELECT id FROM spec_checklist_items WHERE task_id = 'task-1' ORDER BY created_at ASC, rowid ASC")
+        .all() as Array<{ id: string }>;
+
+      // 第一輪：missing=1 → 閘門擋
+      await callTool(server, 'save_compliance_review', {
+        taskId: 'task-1',
+        results: [
+          { itemId: rows[0].id, status: 'matched', evidence: [{ file: 'src/Index.tsx', line: 1 }] },
+          { itemId: rows[1].id, status: 'missing', note: '排序未實作' },
+        ],
+      });
+      const blocked = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      expect(blocked.isError).toBe(true);
+      expect(blocked.content[0].text).toContain('規格回對未通過');
+
+      // 第二輪（增量 carryForward）：missing=0 → 閘門放行
+      const review = await callTool(server, 'save_compliance_review', {
+        taskId: 'task-1',
+        carryForward: true,
+        results: [{ itemId: rows[1].id, status: 'matched', evidence: [{ file: 'src/Index.tsx', line: 1 }], note: '排序已修' }],
+      });
+      expect(review.isError).toBeUndefined();
+
+      const done = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed', summary: '完工' });
+      expect(done.isError).toBeUndefined();
+      const status = (testDb.prepare("SELECT status FROM tasks WHERE id = 'task-1'").get() as { status: string }).status;
+      expect(status).toBe('completed');
     });
   });
 });
