@@ -1,5 +1,4 @@
 import type { SpecModeHandler } from './SpecModeHandler.js';
-import type { CreativeModeHandler } from './CreativeModeHandler.js';
 import type { ExecutionPipeline } from './ExecutionPipeline.js';
 import type { TestOptions } from '@omni/shared';
 import { getProject } from '../db/queries/projects.js';
@@ -9,13 +8,12 @@ const logger = createChildLogger('MasterOrchestrator');
 
 /**
  * Top-level orchestrator that delegates to the unified ExecutionPipeline.
- * Retains references to SpecModeHandler (for document handling) and
- * CreativeModeHandler (for interview flow) for backward compatibility.
+ * Retains a reference to SpecModeHandler (for document handling) for
+ * backward compatibility.
  */
 export class MasterOrchestrator {
   constructor(
     private specHandler: SpecModeHandler,
-    private creativeHandler: CreativeModeHandler,
     private pipeline: ExecutionPipeline,
   ) {}
 
@@ -52,17 +50,8 @@ export class MasterOrchestrator {
     }
   }
 
-  /** Start creative mode interview (legacy, kept for backward compat) */
-  async startInterview(projectId: string, requirement: string): Promise<void> {
-    await this.creativeHandler.startInterview(projectId, requirement);
-  }
-
   getSpecHandler(): SpecModeHandler {
     return this.specHandler;
-  }
-
-  getCreativeHandler(): CreativeModeHandler {
-    return this.creativeHandler;
   }
 
   getPipeline(): ExecutionPipeline {

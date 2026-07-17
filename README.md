@@ -100,15 +100,15 @@ claude      # 另開終端，任何資料夾皆可
 
 配套機制：規格缺口記錄（`report_spec_gap`）、專案經驗筆記（自動注入 execution plan）、規格異動偵測（`check_spec_changes`，Asana 同步後自動跑）、SA/SD 一致性檢查（`check_spec_consistency`）、`resume_task` 接手舊任務、`next_task` 推薦。
 
-## MCP 工具（52 個 + start_task prompt）
+## MCP 工具（54 個 + start_task prompt）
 
 | 分組 | 工具 |
 |------|------|
-| 任務 / 執行計畫 | `get_execution_plan`, `list_pending_tasks`, `get_task`, `update_task_status`, `update_task`, `next_task`, `resume_task`, `get_task_outputs`, `create_task`, `add_task_dependency`, `remove_task_dependency` |
+| 任務 / 執行計畫 | `get_execution_plan`, `list_pending_tasks`, `get_task`, `update_task_status`, `update_task`, `next_task`, `resume_task`, `get_task_outputs`, `save_task_dispatch`, `create_task`, `add_task_dependency`, `remove_task_dependency` |
 | 文件 / 規格 | `fetch_svn_specs`, `get_documents`, `read_document`, `search_documents`, `find_axure_snapshot`, `fetch_task_attachments` |
 | 規格缺口 | `report_spec_gap`, `list_spec_gaps`, `resolve_spec_gap`, `check_spec_changes`, `check_spec_consistency` |
 | 規格回對 | `save_spec_checklist`, `get_spec_checklist`, `waive_checklist_item`, `run_spec_compliance`, `get_compliance_review_plan`, `save_compliance_review` |
-| 驗收 | `get_verification_plan`, `report_verification_result`, `report_verification_evidence` |
+| 驗收 | `get_verification_plan`, `get_test_baseline_plan`, `report_verification_result`, `report_verification_evidence` |
 | 專案筆記 | `save_project_note`, `list_project_notes`, `archive_project_note` |
 | Flow-Gated 流程圖 | `save_task_flow`, `report_flow_check`, `get_task_flows`, `save_sa_flow` |
 | Asana | `sync_asana_tasks`, `list_asana_projects`, `get_asana_task_comments` |

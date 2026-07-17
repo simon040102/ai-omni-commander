@@ -13,19 +13,14 @@ import { ContractWatcher } from './eventbus/ContractWatcher.js';
 import { AgentManager } from './agent/AgentManager.js';
 import { TaskDispatcher } from './orchestrator/TaskDispatcher.js';
 import { SpecModeHandler } from './orchestrator/SpecModeHandler.js';
-import { CreativeModeHandler } from './orchestrator/CreativeModeHandler.js';
 import { ExecutionPipeline } from './orchestrator/ExecutionPipeline.js';
 import { MasterOrchestrator } from './orchestrator/MasterOrchestrator.js';
-import { QuickModeHandler } from './orchestrator/QuickModeHandler.js';
 import { WorkspaceScanner } from './workspace/WorkspaceScanner.js';
-import { SkillGenerator } from './workspace/SkillGenerator.js';
 import { OmniWebSocketServer } from './websocket/WebSocketServer.js';
 import { registerHandlers } from './websocket/MessageRouter.js';
 import { AsanaMcpClient } from './asana/AsanaMcpClient.js';
 import { AsanaSyncService } from './asana/AsanaSyncService.js';
 import { TaskClassifier } from './orchestrator/TaskClassifier.js';
-import { CodeReviewAgent } from './review/CodeReviewAgent.js';
-import { ReviewTrigger } from './review/ReviewTrigger.js';
 import { RetryHandler } from './review/RetryHandler.js';
 import { SvnSpecService, extractFunctionCode } from './svn/SvnSpecService.js';
 
@@ -66,7 +61,7 @@ async function main() {
   // Do NOT set NODE_TLS_REJECT_UNAUTHORIZED globally — it disables TLS for ALL requests
 
   const config = getConfig();
-  logger.info({ port: config.port }, 'Starting AI-OmniCommander (SDK mode)');
+  logger.info({ port: config.port }, 'Starting AI-OmniCommander');
 
   // Loud warning when binding beyond loopback — the HTTP/WS surface has NO
   // authentication: anyone on the LAN could read specs/credentials and drive tasks.
@@ -134,7 +129,6 @@ async function main() {
   });
 
   const specHandler = new SpecModeHandler(agentManager, dispatcher, contextSync, eventBus);
-  const creativeHandler = new CreativeModeHandler(agentManager, dispatcher, contextSync, eventBus);
   const specCacheDir = path.join(path.dirname(config.dbPath), 'spec-cache');
   const pipeline = new ExecutionPipeline(agentManager, eventBus, specHandler.getDocumentParser(), specCacheDir);
 
@@ -143,17 +137,13 @@ async function main() {
   const svnSpecService = new SvnSpecService(specHandler.getDocumentParser(), svnCacheDir);
   pipeline.setSvnSpecService(svnSpecService);
 
-  const orchestrator = new MasterOrchestrator(specHandler, creativeHandler, pipeline);
-  const quickModeHandler = new QuickModeHandler(agentManager, eventBus);
+  const orchestrator = new MasterOrchestrator(specHandler, pipeline);
 
   // v2: Workspace services
   const workspaceScanner = new WorkspaceScanner();
-  const skillGenerator = new SkillGenerator(agentManager);
 
-  // v3: Code review and auto-retry
-  // Note: ReviewTrigger (separate review agent) replaced by self-review in AgentManager.handleAgentComplete
-  // const codeReviewAgent = new CodeReviewAgent(agentManager, eventBus, contextSync);
-  // const _reviewTrigger = new ReviewTrigger(eventBus, codeReviewAgent);
+  // v3: Auto-retry
+  // Note: separate review agent (CodeReviewAgent/ReviewTrigger) replaced by self-review in AgentManager.handleAgentComplete
   const _retryHandler = new RetryHandler(eventBus, pipeline);
 
   // Load Asana PAT from DB, or persist ENV value to DB for portability
@@ -195,7 +185,7 @@ async function main() {
     res.json({
       ok: true,
       status: 'ok',
-      mode: 'sdk',
+      mode: config.agentBackend,
       uptime: process.uptime(),
       activeAgents: agentManager.getActiveAgents().length,
       projectRoot: config.projectRoot.replace(/\\/g, '/'),
@@ -758,32 +748,12 @@ async function main() {
   wsServerRef = wsServer;
 
   // 5. Create sync service (needs wsServer)
-  const asanaSyncService = new AsanaSyncService(asanaClient, taskClassifier, pipeline, wsServer);
+  const asanaSyncService = new AsanaSyncService(asanaClient, taskClassifier, wsServer);
   asanaSyncService.setSvnSpecService(svnSpecService);
   asanaSyncService.setDocumentParser(specHandler.getDocumentParser());
 
   // 6. Register WebSocket message handlers
-  registerHandlers(wsServer, orchestrator, agentManager, workspaceScanner, skillGenerator, asanaClient, asanaSyncService, quickModeHandler, svnSpecService, specHandler.getDocumentParser());
-
-  // ── Asana sync REST endpoint (for MCP tool) ──────────────────
-  app.post('/api/asana-sync/:projectId', async (req, res) => {
-    const projectId = req.params['projectId'];
-    if (!projectId) { res.status(400).json({ error: 'Missing projectId' }); return; }
-    try {
-      const result = await asanaSyncService.syncOnce(projectId);
-      res.json(result);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      res.status(500).json({ error: msg });
-    }
-  });
-
-  app.get('/api/asana-sync/:projectId/status', (req, res) => {
-    const projectId = req.params['projectId'];
-    if (!projectId) { res.status(400).json({ error: 'Missing projectId' }); return; }
-    const lastSync = asanaSyncService.getLastSyncAt(projectId);
-    res.json({ projectId, lastSyncAt: lastSync || null });
-  });
+  registerHandlers(wsServer, orchestrator, agentManager, workspaceScanner, asanaClient, asanaSyncService, svnSpecService, specHandler.getDocumentParser());
 
   // ── Spec gaps endpoints (backs the Web UI 待補規格 panel) ──────
   app.get('/api/spec-gaps/:projectId', (req, res) => {
@@ -1133,25 +1103,6 @@ async function main() {
       timestamp: event.timestamp,
       payload: event.payload,
     } as WsMessage);
-  });
-
-  // Wire creative mode interview events to WebSocket
-  creativeHandler.onInterview((type, data) => {
-    if (type === 'question') {
-      wsServer.broadcast({
-        type: 'interview.question',
-        id: genId(),
-        timestamp: new Date().toISOString(),
-        payload: data,
-      } as WsMessage);
-    } else if (type === 'specDraft') {
-      wsServer.broadcast({
-        type: 'interview.specDraft',
-        id: genId(),
-        timestamp: new Date().toISOString(),
-        payload: data,
-      } as WsMessage);
-    }
   });
 
   // 7. Start contract watcher (uses a default project ID for now)

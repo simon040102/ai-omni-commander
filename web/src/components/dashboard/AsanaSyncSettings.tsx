@@ -102,24 +102,22 @@ export function AsanaSyncSettings({ open, onClose }: AsanaSyncSettingsProps) {
             </select>
           </div>
 
-          {/* Auto-execute rules */}
+          {/* Auto-execute rules — 已停用（legacy spawn 派工已移除，執行走外部 Claude Code session + MCP） */}
           <div>
-            <label className="block text-[10px] text-muted-foreground mb-1.5">Auto-execute rules</label>
-            <div className="space-y-1.5">
+            <label className="block text-[10px] text-muted-foreground mb-1.5">
+              Auto-execute rules
+              <span className="ml-1 text-yellow-500">（已停用——同步只匯入任務，執行請走外部 Claude Code session + MCP）</span>
+            </label>
+            <div className="space-y-1.5 opacity-50">
               {(['bug', 'feature', 'refactor', 'other'] as const).map(type => (
-                <label key={type} className="flex items-center justify-between cursor-pointer select-none">
+                <label key={type} className="flex items-center justify-between cursor-not-allowed select-none">
                   <span className="text-xs capitalize">{type}</span>
                   <div className="flex items-center gap-2">
-                    <span className="text-[10px] text-muted-foreground">
-                      {config.autoExecuteRules[type] ? 'auto execute' : 'import only'}
-                    </span>
+                    <span className="text-[10px] text-muted-foreground">import only</span>
                     <input
                       type="checkbox"
                       checked={config.autoExecuteRules[type]}
-                      onChange={(e) => setConfig({
-                        ...config,
-                        autoExecuteRules: { ...config.autoExecuteRules, [type]: e.target.checked },
-                      })}
+                      disabled
                       className="rounded border-border accent-primary w-3.5 h-3.5"
                     />
                   </div>
@@ -128,13 +126,13 @@ export function AsanaSyncSettings({ open, onClose }: AsanaSyncSettingsProps) {
             </div>
           </div>
 
-          {/* Max concurrent agents */}
-          <div>
-            <label className="block text-[10px] text-muted-foreground mb-1">Max concurrent agents</label>
+          {/* Max concurrent agents — 已停用（僅供 auto-execute 使用，auto-execute 已移除） */}
+          <div className="opacity-50">
+            <label className="block text-[10px] text-muted-foreground mb-1">Max concurrent agents（已停用）</label>
             <select
               value={config.maxConcurrentAgents}
-              onChange={(e) => setConfig({ ...config, maxConcurrentAgents: Number(e.target.value) })}
-              className="w-full bg-muted border border-border rounded-md px-2 py-1.5 text-xs outline-none focus:border-primary"
+              disabled
+              className="w-full bg-muted border border-border rounded-md px-2 py-1.5 text-xs outline-none focus:border-primary cursor-not-allowed"
             >
               {[1, 2, 3, 4, 5].map(n => (
                 <option key={n} value={n}>{n}</option>

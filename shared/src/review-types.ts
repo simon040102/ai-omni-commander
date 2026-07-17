@@ -1,5 +1,6 @@
 /**
- * Structured review result from CodeReviewAgent.
+ * Structured review result from the agent self-review flow
+ * (AgentManager.handleAgentComplete).
  */
 export interface ReviewIssue {
   severity: 'critical' | 'warning' | 'info';

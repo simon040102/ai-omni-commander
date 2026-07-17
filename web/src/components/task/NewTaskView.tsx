@@ -147,12 +147,15 @@ ${quickTask.useWorkspaceSkills ? '請先讀取工作目錄中的 CLAUDE.md 和 .
     }).catch(() => {});
   }, []);
 
-  // Spec Mode handler — auto-creates project, uploads docs, starts execution
+  // Spec Mode handler — creates project + uploads docs, then generates an MCP
+  // command for the user to paste into Claude Code (legacy spawn execution removed;
+  // 執行一律走外部 Claude Code session + MCP)
   const handleSpecStart = useCallback(() => {
     if (!client || !specWorkspacePath.trim() || specDocuments.length === 0) return;
 
     const projectId = crypto.randomUUID();
     const projectName = generateProjectName();
+    const workspacePath = specWorkspacePath.trim();
 
     // Create lightweight project
     client.send({
@@ -162,13 +165,13 @@ ${quickTask.useWorkspaceSkills ? '請先讀取工作目錄中的 CLAUDE.md 和 .
       payload: {
         projectId,
         name: projectName,
-        workingDir: specWorkspacePath.trim(),
+        workingDir: workspacePath,
         frontendPath: null,
-        backendPath: specWorkspacePath.trim(),
+        backendPath: workspacePath,
       },
     });
 
-    // Upload documents
+    // Upload documents (stored in the project so the external session can read them via MCP)
     for (const doc of specDocuments) {
       client.send({
         type: 'project.uploadDocument',
@@ -184,27 +187,34 @@ ${quickTask.useWorkspaceSkills ? '請先讀取工作目錄中的 CLAUDE.md 和 .
       });
     }
 
-    // Start execution
-    client.send({
-      type: 'project.startExecution',
-      id: crypto.randomUUID(),
-      timestamp: new Date().toISOString(),
-      payload: {
-        projectId,
-        model,
-      },
-    });
+    // Generate MCP command instead of sending project.startExecution (legacy spawn path)
+    const docList = specDocuments.map(d => `- [${d.docType}] ${d.filename}`).join('\n');
+    const command = `請用 omni-commander MCP 執行以下 Spec 開發任務。
+
+Workspace：\`${workspacePath}\`
+Project ID：\`${projectId}\`（專案「${projectName}」已建立，規格文件已上傳）
+
+已上傳的規格文件：
+${docList}
+
+## 執行步驟
+1. mcp__omni-commander__get_documents(projectId="${projectId}") 確認規格文件已就緒
+2. mcp__omni-commander__create_task(projectId="${projectId}", title="...", label="backend", taskType="feature") 依規格建立任務
+3. mcp__omni-commander__get_execution_plan(taskId) 取得執行計畫，並嚴格照回傳流程執行（規格用 read_document 讀取；規格沒定義的用 report_spec_gap 記錄）
+4. 完成後依閘門流程驗收（get_verification_plan → AI 規格回對 missing=0 → update_task_status completed）`;
+
+    setMcpCommand(command);
 
     // Save path to recent
     fetch('/api/recent-paths', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: specWorkspacePath.trim() }),
+      body: JSON.stringify({ path: workspacePath }),
     }).catch(() => {});
 
-    addToast({ type: 'success', title: '已開始 Spec 執行', message: `"${projectName}"` });
+    addToast({ type: 'success', title: '專案與規格已建立', message: `"${projectName}" — 請複製 MCP 指令到 Claude Code 執行` });
     setShowForm(false);
-  }, [client, specWorkspacePath, specDocuments, model, generateProjectName, addToast]);
+  }, [client, specWorkspacePath, specDocuments, generateProjectName, addToast]);
 
   const handleDeleteProject = useCallback((projectId: string) => {
     client?.send({
@@ -372,7 +382,7 @@ ${quickTask.useWorkspaceSkills ? '請先讀取工作目錄中的 CLAUDE.md 和 .
                   className="group inline-flex items-center gap-2 px-6 py-3 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-600/50 disabled:cursor-not-allowed text-white rounded-lg text-sm font-semibold shadow-lg shadow-blue-600/20 hover:shadow-blue-500/30 transition-all"
                 >
                   <IconPlay className="w-4 h-4" />
-                  Start Spec Execution
+                  建立專案並產生 MCP 指令
                 </button>
               </div>
             )}

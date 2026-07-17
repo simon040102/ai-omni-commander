@@ -4,7 +4,7 @@
 
 AI-OmniCommander 是一個 **MCP Server**，為外部 Claude Code session 提供任務管理與開發脈絡：Asana 任務同步、SVN + 本地資料夾規格文件雙來源、規格檢查表與 AI 規格回對閘門、驗收清單、Web UI 即時監控。
 
-執行模型：**orchestrator（外部 Claude Code session）透過 MCP 工具取得脈絡，再用 Agent tool 派 subagent 到各專案 workspace 開發**。OmniCommander 本身不 spawn 任何 AI 程序（舊的 spawn 路徑已停用，見文末「Legacy 模式」）。
+執行模型：**orchestrator（外部 Claude Code session）透過 MCP 工具取得脈絡，再用 Agent tool 派 subagent 到各專案 workspace 開發**。舊的 spawn 派工路徑預設由 `ALLOW_LEGACY_SPAWN` 硬閘停用（未設此環境變數時任何 spawn 入口都會擋下），見文末「Legacy 模式」。
 
 ---
 
@@ -49,9 +49,9 @@ AI-OmniCommander 是一個 **MCP Server**，為外部 Claude Code session 提供
 
 ---
 
-## 二、MCP 工具一覽（52 個）
+## 二、MCP 工具一覽（54 個）
 
-### 任務 / 執行計畫（11）
+### 任務 / 執行計畫（12）
 
 - `get_execution_plan` — 取得任務完整執行計畫（自動判 full/light 軌，自動注入規格閱讀／規格遵循／後端效能／後端安全規範）— **開工第一步**
 - `list_pending_tasks` — 待辦任務清單（可用 taskType / label / keyword / section / tag / statuses 過濾，含 sourceRef）
@@ -61,6 +61,7 @@ AI-OmniCommander 是一個 **MCP Server**，為外部 Claude Code session 提供
 - `next_task` — 推薦下一個可做任務（依賴已完成 + bug 優先）+ 備選清單
 - `resume_task` — 接手舊任務的一站式脈絡恢復
 - `get_task_outputs` — 取回任務歷史回報記錄（新 session 恢復脈絡用）
+- `save_task_dispatch` — 存派工快照（中斷復原用；`resume_task` 會帶回最近一次派工 prompt）
 - `create_task` — 建立任務
 - `add_task_dependency` — 加任務依賴（同專案、防自依賴、防重複、防循環）
 - `remove_task_dependency` — 移除任務依賴
@@ -91,9 +92,10 @@ AI-OmniCommander 是一個 **MCP Server**，為外部 Claude Code session 提供
 - `get_compliance_review_plan` — 取得 **AI 回對**派工計畫（派獨立 reviewer agent，implementer 不可自評）
 - `save_compliance_review` — 寫回 AI 回對結果；**最新回對 missing=0 才可標 completed**
 
-### 驗收（3）
+### 驗收（4）
 
 - `get_verification_plan` — 依任務 label 取驗收清單（後端：findAll / DDL / API 煙霧測試 / seed SQL；前端：tsc / Playwright）
+- `get_test_baseline_plan` — 既有單元測試不是全綠時，取得測試基線修復計畫（先修基線再開發）
 - `report_verification_result` — 回報逐項驗收結果
 - `report_verification_evidence` — 上傳驗收證據檔（如 Playwright 截圖），存進任務記錄
 
@@ -195,7 +197,7 @@ Web Server (:3457) + Vite (:5174)。MCP 每次寫入操作會 POST `/api/mcp-not
 
 早期版本由 Web UI 直接 spawn Claude Code CLI 子程序執行任務（Spec Mode / Creative Mode / Quick Mode、master / architect / backend / frontend / devops / testing / review 角色、SDK / `claude -p` 派工）。
 
-**這條路徑已禁用**：現行執行一律走**外部 Claude Code session + MCP 工具 + Agent tool 派 subagent**。相關程式碼（AgentManager、SpecModeHandler、CreativeModeHandler 等）僅供歷史參考，細節見 `ARCHITECTURE.md` 標注「Legacy」的章節。
+**這條路徑預設由 `ALLOW_LEGACY_SPAWN` 硬閘停用**（AgentManager / ExecutionPipeline 在 spawn 前檢查，未設環境變數即 throw）：現行執行一律走**外部 Claude Code session + MCP 工具 + Agent tool 派 subagent**。相關程式碼（AgentManager、SpecModeHandler 等）僅供歷史參考與硬閘後的殘留能力，細節見 `ARCHITECTURE.md` 標注「Legacy」的章節。
 
 ---
 

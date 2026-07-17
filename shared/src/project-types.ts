@@ -72,11 +72,11 @@ export interface SvnCredentials {
 }
 
 export interface ProjectConfig {
-  maxConcurrentAgents?: number;
-  defaultModel?: string;
-  autoReview?: boolean;
+  /**
+   * @deprecated Legacy plan-approval gate — only read by AgentManager's spawn
+   * path (legacy, gated by ALLOW_LEGACY_SPAWN). Kept for old config_json rows.
+   */
   planConfig?: PlanConfig;
-  autoExecuteConfig?: { bug: boolean; feature: boolean; refactor: boolean };
   asanaSyncConfig?: AsanaSyncConfig;
   svnConfig?: SvnConfig;
   specFolders?: SpecFolderConfig[];

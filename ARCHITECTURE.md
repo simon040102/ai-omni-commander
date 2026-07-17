@@ -52,8 +52,7 @@ Claude Code / Claude Desktop
 │ Zustand stores ◄──────────────── │ ◄──────────────────►│ WebSocketServer ► MessageRouter        │
 │ Dashboard / Terminal / Setup     │                     │           │                              │
 └──────────────────────────────────┘                     │     MasterOrchestrator                   │
-                                                         │     ├─ SpecModeHandler (spec mode)       │
-                                                         │     └─ CreativeModeHandler (creative)    │
+                                                         │     └─ SpecModeHandler (spec mode)       │
                                                          │           │                              │
                                                          │     AgentManager                         │
                                                          │     ├─ AgentProcess (Claude CLI child)   │
@@ -91,15 +90,13 @@ Claude Code / Claude Desktop
 | `AgentManager.ts` | Manages all agent processes. `startAgent()` creates DB record + spawns `AgentProcess`. Handles completion, errors, markers (`[NEEDS_HUMAN]`, `[ENTITY_CHANGED]`). Auto-completes project when all agents finish. |
 | `AgentProcess.ts` | Wraps a single Claude Code CLI child process. `spawn()` launches `claude --print --output-format stream-json --input-format stream-json`. `sendInput()` sends follow-up instructions via stdin. |
 | `AgentRoles.ts` | Defines system prompts and allowed tools for each role (`master`, `architect`, `backend`, `frontend`, `devops`, `testing`, `review`). |
-| `StreamParser.ts` | Parses newline-delimited JSON from Claude's stdout into typed `ClaudeStreamMessage` events. |
 
 #### `server/src/orchestrator/` — Execution orchestration（spawn 類 handler 為 Legacy——已禁用 SDK/claude -p 派工，僅供歷史參考；ExecutionPipeline 的 prompt 組裝仍為 get_execution_plan 的真相來源）
 | File | Purpose |
 |------|---------|
-| `MasterOrchestrator.ts` | Routes between Spec and Creative modes. Entry point: `start(projectId)`. |
+| `MasterOrchestrator.ts` | Thin wrapper over ExecutionPipeline + SpecModeHandler. Entry point: `start(projectId)`.（CreativeModeHandler / QuickModeHandler 已於 P3 清理移除） |
 | `SpecModeHandler.ts` | **Spec mode workflow**: Gets uploaded documents, routes them by type (SA/SD) to workspace agents. Frontend gets SA+SD, Backend gets SD only. Each agent's `cwd` is set to its workspace path so it auto-discovers CLAUDE.md/.claude/ skills. |
-| `CreativeModeHandler.ts` | **Creative mode**: Architect agent interviews user, generates SA/SD, then hands off to execution. |
-| `TaskDispatcher.ts` | Legacy task queue (used by creative mode). Respects dependency graphs. |
+| `TaskDispatcher.ts` | Legacy task queue. Respects dependency graphs. |
 | `DependencyGraph.ts` | Topological sort for task dependencies. |
 | `FullstackController.ts` | **Fullstack mode**: 4-phase execution for `fullstack` label tasks. Phase 1: FE+BE parallel agents. Phase 2: wait both. Phase 3a: coordinator analyzes reports. Phase 3b: Playwright integration test (optional). Phase 4: fix agents if needed. Uses `skipTaskStatusUpdate` to prevent subagents from marking task completed. |
 
@@ -131,11 +128,10 @@ Claude Code / Claude Desktop
 | `WebSocketServer.ts` | WS server. Handles client connections, message routing, `send()`, `broadcast()`. Supports `initialStateProvider` and `postConnectionHandler`. |
 | `MessageRouter.ts` | Registers all WS message handlers. Key handlers: `project.create`, `project.uploadDocument`, `project.startExecution`, `agent.command`, `agent.action`, `project.getState`. On new connection: sends `projects.list` + full state for executing projects + historical agent outputs. |
 
-#### `server/src/review/` — Code review（Legacy——已禁用 SDK/claude -p 派工，僅供歷史參考）
+#### `server/src/review/` — Code review（Legacy——spawn 派工由 ALLOW_LEGACY_SPAWN 硬閘停用）
 | File | Purpose |
 |------|---------|
-| `CodeReviewAgent.ts` | Spawns a read-only review agent after tasks complete. |
-| `ReviewTrigger.ts` | Listens for task completion events to trigger reviews. |
+| `RetryHandler.ts` | Listens for task-failure events to retry via ExecutionPipeline（CodeReviewAgent / ReviewTrigger 已於 P3 清理移除，改由 AgentManager 自審流程取代）. |
 
 ### `web/` — Frontend (React + Vite + Tailwind + Zustand)
 
@@ -155,7 +151,7 @@ Claude Code / Claude Desktop
 #### `web/src/components/layout/`
 | File | Purpose |
 |------|---------|
-| `AppShell.tsx` | Main layout. View switcher (setup/dashboard/tasks/events). Auto-switches to dashboard when agents start. |
+| `AppShell.tsx` | Main layout. View switcher（home/setup/new-task/tasks/spec-governance/mockup/db-explorer/internal-db/settings/global-settings；agents/events 已隱藏）。localStorage 還原時隱藏 view 會落回 tasks；不再 auto-switch。 |
 | `Header.tsx` | Top bar with project name, mode badge, status, connection indicator. |
 | `Sidebar.tsx` | Navigation, project list, status summary. Clicking a project sends `project.getState` to load its full state. |
 
@@ -183,7 +179,7 @@ Claude Code / Claude Desktop
 #### `server/src/asana/` — Asana integration
 | File | Purpose |
 |------|---------|
-| `AsanaMcpClient.ts` | MCP-based Asana API client. |
+| `AsanaMcpClient.ts` | Asana API client（名稱歷史遺留：實作為直接呼叫 Asana REST API，並非 MCP client）. |
 | `AsanaSyncService.ts` | Syncs Asana tasks to local DB. Stores `parent_name` (e.g., `OV0101`) for SVN spec matching. |
 
 ### `web/src/components/agents/`
@@ -197,12 +193,7 @@ Claude Code / Claude Desktop
 | `GlobalSettings.tsx` | Global settings page: SVN credentials, Asana PAT. |
 | `ProjectSettings.tsx` | Per-project settings: SVN spec paths (frontend/backend), Asana project link. |
 
-### `web/src/components/asana/`
-| File | Purpose |
-|------|---------|
-| `AsanaTaskPanel.tsx` | Displays Asana tasks with sync status. |
-
-## Key Flows（Legacy——已禁用 SDK/claude -p 派工，僅供歷史參考）
+## Key Flows（Legacy——spawn 派工由 ALLOW_LEGACY_SPAWN 硬閘停用，僅供歷史參考）
 
 ### Spec Mode (primary flow)
 1. User creates project with workspaces (label + path)
@@ -251,25 +242,18 @@ data/uploads/{projectId}/             ← project-level (SVN downloads, SpecMode
 ### PDF Handling
 PDF file paths are passed in the prompt; agents use Claude's Read tool to read them natively (supports images).
 
-## Available Skills (`.claude/skills/`)
+## Available Skills
 
-Superpowers skill framework is installed. Key skills:
+本 repo 的 `.claude/skills/` 只有兩個專案 skill：
 
 | Skill | Purpose |
 |-------|---------|
-| `brainstorming` | Visual brainstorming companion with local server |
-| `dispatching-parallel-agents` | Launch multiple subagents in parallel |
-| `executing-plans` | Execute a written plan step by step |
-| `finishing-a-development-branch` | Checklist for completing a feature branch |
-| `receiving-code-review` | Process and respond to code review feedback |
-| `requesting-code-review` | Request structured code review from a subagent |
-| `subagent-driven-development` | Spec → implement → review via subagents |
-| `systematic-debugging` | Root cause analysis with structured debugging |
-| `test-driven-development` | TDD cycle with anti-patterns guide |
-| `using-git-worktrees` | Parallel development with git worktrees |
-| `verification-before-completion` | Checklist before marking work done |
-| `writing-plans` | Create structured implementation plans |
-| `writing-skills` | Best practices for writing Claude skills |
-| `using-superpowers` | Overview of all available skills |
+| `crawl-axure-snapshots` | Two-phase Axure crawler（座標 JSON → styled HTML） |
+| `execute-project-task` | 互動式任務執行流程（列任務 → 收集規格 → 派 subagent） |
 
-Use `/brainstorming`, `/systematic-debugging`, etc. to invoke.
+Superpowers 相關內容在 repo 內的實際位置：
+
+- `server/src/skills/superpowers/` — 注入 subagent prompt 用的方法論片段（`brainstorm.md` / `debugging.md` / `tdd.md`，由 `loadSuperpowersPrompt()` 載入）
+- `docs/superpowers/` — 設計文件（`plans/`、`specs/`；本地產物，`docs/*` 被 .gitignore 排除，fresh clone 不會有）
+
+`/brainstorming`、`/systematic-debugging` 等完整 superpowers skill 來自使用者環境安裝的 superpowers plugin，不在本 repo 版控內。

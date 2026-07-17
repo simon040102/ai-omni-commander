@@ -28,22 +28,6 @@ export function ProjectSetup({ onViewChange }: ProjectSetupProps) {
   const [feScanResult, setFeScanResult] = useState<{ hasClaudeMd: boolean; skills: { name: string }[] } | null>(null);
   const [beScanResult, setBeScanResult] = useState<{ hasClaudeMd: boolean; skills: { name: string }[] } | null>(null);
 
-  // Asana import (from AsanaTaskPanel "Import to Project")
-  const hasCheckedAsanaImport = useRef(false);
-  useEffect(() => {
-    if (hasCheckedAsanaImport.current) return;
-    hasCheckedAsanaImport.current = true;
-    const stored = sessionStorage.getItem('asana_import_task');
-    if (stored) {
-      try {
-        const task = JSON.parse(stored);
-        if (task.name) setName(task.name.slice(0, 50));
-        sessionStorage.removeItem('asana_import_task');
-        addToast({ type: 'info', title: '已匯入 Asana 任務', message: `任務：${task.name}` });
-      } catch { /* ignore */ }
-    }
-  }, [addToast]);
-
   // Auto-check Asana connection on mount
   const hasCheckedAsana = useRef(false);
   useEffect(() => {

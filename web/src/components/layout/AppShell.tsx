@@ -1,9 +1,8 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import { Header } from './Header';
 import { Sidebar } from './Sidebar';
 import { ToastContainer } from '../ui/ToastContainer';
 import { useWebSocket } from '../../hooks/useWebSocket';
-import { useProjectStore } from '../../stores/projectStore';
 import { useWsStore } from '../../stores/wsStore';
 import { initTabNotification } from '../../lib/tabNotification';
 
@@ -27,19 +26,31 @@ interface AppShellProps {
 
 const VIEW_STORAGE_KEY = 'omni_current_view';
 
-export function AppShell({ children }: AppShellProps) {
-  const [currentView, setCurrentView] = useState<View>(() => {
-    const saved = localStorage.getItem(VIEW_STORAGE_KEY) as View | null;
-    return saved ?? 'home';
-  });
-  const [sidebarPinned, setSidebarPinned] = useState(true); // true = open (default), false = collapsed with hover
-  const agents = useProjectStore(s => s.agents);
-  const hasAutoSwitched = useRef(false);
-  const userHasNavigated = useRef(false);
+/** Views hidden from navigation (MCP 模式下 Agents/Events 已隱藏) — restoring
+ *  into them from localStorage would strand the user on an unreachable page. */
+const HIDDEN_VIEWS: readonly View[] = ['agents', 'events'];
 
-  // Wrap setCurrentView to track user-initiated navigation
+const ALL_VIEWS: readonly View[] = [
+  'home', 'setup', 'new-task', 'tasks', 'agents', 'events', 'db-explorer',
+  'internal-db', 'settings', 'global-settings', 'mockup', 'spec-governance',
+];
+
+/** Resolve the initial view from the persisted value: hidden views fall back
+ *  to the dashboard (tasks); unknown/corrupted values and nothing persisted →
+ *  home. Exported for tests. */
+export function resolveInitialView(saved: string | null): View {
+  if (!saved || !ALL_VIEWS.includes(saved as View)) return 'home';
+  if (HIDDEN_VIEWS.includes(saved as View)) return 'tasks';
+  return saved as View;
+}
+
+export function AppShell({ children }: AppShellProps) {
+  const [currentView, setCurrentView] = useState<View>(() =>
+    resolveInitialView(localStorage.getItem(VIEW_STORAGE_KEY)),
+  );
+  const [sidebarPinned, setSidebarPinned] = useState(true); // true = open (default), false = collapsed with hover
+
   const handleViewChange = (view: View) => {
-    userHasNavigated.current = true;
     setCurrentView(view);
     localStorage.setItem(VIEW_STORAGE_KEY, view);
   };
@@ -52,13 +63,8 @@ export function AppShell({ children }: AppShellProps) {
     initTabNotification();
   }, []);
 
-  // Auto-switch to dashboard when agents appear (only on initial load, not after user navigation)
-  useEffect(() => {
-    if (agents.length > 0 && !hasAutoSwitched.current && !userHasNavigated.current && (currentView === 'home' || currentView === 'setup')) {
-      hasAutoSwitched.current = true;
-      setCurrentView('agents');
-    }
-  }, [agents.length, currentView]);
+  // NOTE: legacy auto-switch to the (now hidden) agents view was removed —
+  // agents only appear via external MCP sessions, so no auto-navigation.
 
   return (
     <div className="h-screen flex flex-col bg-background">

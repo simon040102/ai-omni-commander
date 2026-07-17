@@ -38,14 +38,6 @@ export const projectHandlers: HandlerMap = {
     useProjectStore.getState().setDocuments(docProjectId, documents);
   },
 
-  // Server cleared all documents for a project (project.clearDocuments) — clear the store too
-  'project.documentsCleared': (payload) => {
-    const clearedProjectId = payload['projectId'] as string;
-    if (clearedProjectId) {
-      useProjectStore.getState().setDocuments(clearedProjectId, []);
-    }
-  },
-
   'project.agentOutputs': (payload) => {
     // Bulk load historical outputs for an agent (from DB)
     const bulkAgentId = payload['agentId'] as string;

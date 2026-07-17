@@ -2,7 +2,7 @@
 	"name": "ai-omni-commander",
 	"version": "1.0.0",
 	"private": true,
-	"description": "AI-OmniCommander: Dual-mode collaborative development system orchestrating multiple Claude Code instances",
+	"description": "AI-OmniCommander: MCP server providing task management and execution context (specs, gates, verification) to external Claude Code sessions",
 	"workspaces": [
 		"shared",
 		"server",

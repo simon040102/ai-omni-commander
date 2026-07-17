@@ -46,8 +46,14 @@ server/_*.mjs
 # npm lockfile (this repo uses pnpm)
 package-lock.json
 
-docs/
-!docs/axure-snapshots/
+# docs/* (not docs/) — an excluded parent directory cannot have children re-included,
+# so the entries are ignored individually and the kept ones negated below.
+docs/*
+!docs/archive/
 !docs/操作手冊.md
 !docs/功能說明.md
+# axure-snapshots: keep the crawler script tracked; generated snapshot HTML/images stay ignored
+!docs/axure-snapshots/
+docs/axure-snapshots/*
+!docs/axure-snapshots/crawl-axure.mjs
 *.zip

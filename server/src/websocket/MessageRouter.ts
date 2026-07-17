@@ -1,16 +1,14 @@
 import type { WebSocket } from 'ws';
 import type {
   WsMessage, WsCreateProject, WsUploadDocument,
-  WsStartExecution, WsStartQuickTask, WsInterviewResponse, WsInterviewConfirm,
-  WsAgentAction, WsAgentCommand, WsAgentResume, WsInterventionResolve, WsTaskOverride,
+  WsStartExecution,
+  WsAgentAction, WsAgentCommand, WsAgentResume, WsInterventionResolve,
   WsDeleteProject, WsUpdateProject, WsDeleteAgent, WsUpdateAgent, WsAddAgent,
-  WsDeleteDocument, WsPlanAction, WsAsanaFetchTasks, WsAsanaFetchMyProjectTasks, WsAsanaFetchProjects, WsAsanaCheckConnection, WsAsanaFetchTaskStories,
+  WsPlanAction, WsAsanaFetchTasks, WsAsanaFetchMyProjectTasks, WsAsanaFetchProjects, WsAsanaCheckConnection, WsAsanaFetchTaskStories,
   WsAsanaSyncNow, WsAsanaUpdateSyncConfig,
   WsTaskCreate, WsTaskDelete, WsTaskUpdate, WsTaskBulkDeleteBySource,
-  WsWorkspaceScan, WsWorkspaceGenerateSkills,
+  WsWorkspaceScan,
   WsSvnBrowse, WsSvnPreview,
-  WsMockupReload,
-  WsMockupCrawlAll,
   AgentRole,
 } from '@omni/shared';
 import type { SvnConfig } from '@omni/shared';
@@ -26,7 +24,6 @@ import type { OmniWebSocketServer } from './WebSocketServer.js';
 import type { AsanaMcpClient } from '../asana/AsanaMcpClient.js';
 import type { AsanaSyncService } from '../asana/AsanaSyncService.js';
 import type { WorkspaceScanner } from '../workspace/WorkspaceScanner.js';
-import type { SkillGenerator } from '../workspace/SkillGenerator.js';
 import { createProject, listProjects, getProject, deleteProject, updateProject } from '../db/queries/projects.js';
 import { getTasksByProject, getDependencies, updateTask, createTask, deleteTask, updateTaskFields, deleteTasksBySource, getTask } from '../db/queries/tasks.js';
 import { getAgentsByProject, deleteAgent, updateAgent as updateAgentDb } from '../db/queries/agents.js';
@@ -41,8 +38,11 @@ import { genId } from '../utils/uuid.js';
 import { createChildLogger } from '../utils/logger.js';
 import { loadSuperpowersPrompt } from '../skills/superpowers/index.js';
 import type { SuperpowersFeature } from '@omni/shared';
-import type { QuickModeHandler } from '../orchestrator/QuickModeHandler.js';
 import type { DocumentParser } from '../documents/DocumentParser.js';
+import { getDb } from '../db/connection.js';
+// logTaskOutput is a pure db function (mcp/flow-gate) — reused so the Web UI
+// [SKIP] audit trail lands in the same agent_outputs stream as the MCP gates.
+import { logTaskOutput } from '../mcp/flow-gate.js';
 import { mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 
@@ -56,10 +56,8 @@ export function registerHandlers(
   orchestrator: MasterOrchestrator,
   agentManager: AgentManager,
   workspaceScanner: WorkspaceScanner,
-  skillGenerator: SkillGenerator,
   asanaClient?: AsanaMcpClient,
   asanaSyncService?: AsanaSyncService,
-  quickModeHandler?: QuickModeHandler,
   svnSpecService?: SvnSpecService,
   documentParser?: DocumentParser,
 ): void {
@@ -108,47 +106,6 @@ export function registerHandlers(
     sendProjectState(wsServer, ws, project.id, orchestrator);
   });
 
-  // PROJECT.CLEAR_DOCUMENTS
-  wsServer.registerHandler('project.clearDocuments', async (msg: WsMessage, ws: WebSocket) => {
-    const { payload } = msg as unknown as { payload: { projectId: string } };
-    const specHandler = orchestrator.getSpecHandler();
-    const count = await specHandler.clearDocuments(payload.projectId);
-    logger.info({ projectId: payload.projectId, deletedCount: count }, 'Documents cleared for new execution');
-    wsServer.send(ws, {
-      type: 'project.documentsCleared',
-      id: genId(),
-      timestamp: new Date().toISOString(),
-      payload: { projectId: payload.projectId, deletedCount: count },
-    } as WsMessage);
-  });
-
-  // PROJECT.DELETE_DOCUMENT
-  wsServer.registerHandler('project.deleteDocument', async (msg: WsMessage) => {
-    const { payload } = msg as WsDeleteDocument;
-    const specHandler = orchestrator.getSpecHandler();
-    const deletedDoc = await specHandler.getDocumentParser().deleteDocument(payload.documentId);
-
-    if (deletedDoc) {
-      logger.info({ projectId: payload.projectId, documentId: payload.documentId, filename: deletedDoc.filename }, 'Document deleted');
-      await specHandler.removeDocumentFromWorkspaces(payload.projectId, deletedDoc.filename, deletedDoc.docType);
-
-      const docs = specHandler.getDocumentParser().getDocuments(payload.projectId);
-      wsServer.broadcast({
-        type: 'project.documents',
-        id: genId(),
-        timestamp: new Date().toISOString(),
-        payload: {
-          projectId: payload.projectId,
-          documents: docs.map(d => ({
-            id: d.id,
-            filename: d.filename,
-            docType: d.docType,
-          })),
-        },
-      } as WsMessage);
-    }
-  });
-
   // PROJECT.UPLOAD_DOCUMENT
   wsServer.registerHandler('project.uploadDocument', async (msg: WsMessage) => {
     const { payload } = msg as WsUploadDocument;
@@ -191,65 +148,6 @@ export function registerHandlers(
       testOptions: payload.testOptions,
       executionRunId: payload.executionRunId,
     });
-  });
-
-  // PROJECT.START_QUICK_TASK
-  wsServer.registerHandler('project.startQuickTask', async (msg: WsMessage, ws: WebSocket) => {
-    const { payload } = msg as WsStartQuickTask;
-    if (!quickModeHandler) {
-      wsServer.send(ws, {
-        type: 'error',
-        id: genId(),
-        timestamp: new Date().toISOString(),
-        payload: { code: 'QUICK_MODE_UNAVAILABLE', message: 'Quick mode handler not configured' },
-      } as WsMessage);
-      return;
-    }
-
-    // Find the most recently created project matching this workingDir to associate the quick task
-    const allProjects = listProjects();
-    const project = allProjects
-      .filter(p => p.workingDir === payload.workingDir)
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
-
-    if (!project) {
-      wsServer.send(ws, {
-        type: 'error',
-        id: genId(),
-        timestamp: new Date().toISOString(),
-        payload: { code: 'NO_PROJECT', message: 'No project found for this workspace. Create a project first.' },
-      } as WsMessage);
-      return;
-    }
-
-    await quickModeHandler.execute(project.id, {
-      type: payload.taskType,
-      description: payload.description,
-      errorLog: payload.errorLog,
-      relatedFiles: payload.relatedFiles,
-      role: payload.role,
-      useWorkspaceSkills: payload.useWorkspaceSkills,
-    }, payload.model);
-  });
-
-  // PROJECT.PAUSE
-  wsServer.registerHandler('project.pause', async (msg: WsMessage) => {
-    const { payload } = msg as unknown as { payload: { projectId: string } };
-    await agentManager.stopAllForProject(payload.projectId);
-  });
-
-  // INTERVIEW.USER_RESPONSE
-  wsServer.registerHandler('interview.userResponse', (msg: WsMessage) => {
-    const { payload } = msg as WsInterviewResponse;
-    orchestrator.getCreativeHandler().handleUserResponse(payload.projectId, payload.message);
-  });
-
-  // INTERVIEW.CONFIRM_SPEC
-  wsServer.registerHandler('interview.confirmSpec', async (msg: WsMessage) => {
-    const { payload } = msg as WsInterviewConfirm;
-    await orchestrator.getCreativeHandler().handleSpecConfirmation(
-      payload.projectId, payload.confirmed, payload.modifications,
-    );
   });
 
   // AGENT.ACTION
@@ -566,31 +464,6 @@ export function registerHandlers(
     }
   });
 
-  // TASK.OVERRIDE
-  wsServer.registerHandler('task.override', async (msg: WsMessage) => {
-    const { payload } = msg as WsTaskOverride;
-    let newStatus: string;
-    switch (payload.action) {
-      case 'retry':
-        updateTask(payload.taskId, { status: 'queued', retryCount: 0 });
-        newStatus = 'queued';
-        break;
-      case 'skip':
-        updateTask(payload.taskId, { status: 'completed', resultSummary: 'Skipped by user' });
-        newStatus = 'completed';
-        break;
-      default:
-        return;
-    }
-    // Broadcast task status change to frontend
-    wsServer.broadcast({
-      type: 'task.statusChange',
-      id: genId(),
-      timestamp: new Date().toISOString(),
-      payload: { taskId: payload.taskId, newStatus },
-    } as WsMessage);
-  });
-
   // PROJECT.DELETE
   wsServer.registerHandler('project.delete', async (msg: WsMessage) => {
     const { payload } = msg as WsDeleteProject;
@@ -743,6 +616,14 @@ export function registerHandlers(
     const safeTaskType = payload.taskType && validTaskTypes.includes(payload.taskType as typeof validTaskTypes[number])
       ? payload.taskType as typeof validTaskTypes[number]
       : payload.taskType ? 'other' : undefined;
+
+    // 稽核：Web UI 的 task.update 可直接寫 completed（使用者親手操作＝同意），
+    // 不擋，但比照 MCP 的 [SKIP] 機制留一筆稽核行進 agent_outputs。
+    // 目前 UI 沒有直接標 completed 的入口（TaskList 只送 pending reset）——
+    // 此稽核是對第三方 WS client / 未來 UI 的防禦。
+    const wasNotCompleted = payload.status === 'completed'
+      && (() => { const prev = getTask(payload.taskId); return !!prev && prev.status !== 'completed'; })();
+
     updateTaskFields(payload.taskId, {
       title: payload.title,
       description: payload.description,
@@ -753,6 +634,18 @@ export function registerHandlers(
       preferredModel: payload.preferredModel,
       parentName: payload.parentName,
     });
+
+    // 更新成功後才寫稽核——避免 update throw 時留下狀態沒真的改的假紀錄
+    if (wasNotCompleted) {
+      const nowTask = getTask(payload.taskId);
+      if (nowTask?.status === 'completed') {
+        try {
+          logTaskOutput(getDb(), payload.taskId, nowTask.projectId, '[SKIP] 使用者由 Web UI 直接標記 completed，未經閘門（flow gate / AI 規格回對 / 單元測試）檢查');
+        } catch (err) {
+          logger.warn({ err, taskId: payload.taskId }, 'Failed to write [SKIP] audit for direct completed');
+        }
+      }
+    }
     logger.info({ taskId: payload.taskId, projectId: payload.projectId }, 'Task updated');
 
     const tasks = getTasksByProject(payload.projectId);
@@ -819,28 +712,6 @@ export function registerHandlers(
         id: genId(),
         timestamp: new Date().toISOString(),
         payload: { code: 'workspace.scan_failed', message: (err as Error).message },
-      } as WsMessage);
-    }
-  });
-
-  // WORKSPACE.GENERATE_SKILLS
-  wsServer.registerHandler('workspace.generateSkills', async (msg: WsMessage, ws: WebSocket) => {
-    const { payload } = msg as WsWorkspaceGenerateSkills;
-    try {
-      const agentId = await skillGenerator.generate(
-        payload.projectId,
-        payload.path,
-        payload.workspaceType,
-      );
-      logger.info({ agentId, projectId: payload.projectId, workspaceType: payload.workspaceType }, 'Skill generation started');
-
-      sendProjectState(wsServer, ws, payload.projectId, orchestrator);
-    } catch (err) {
-      wsServer.send(ws, {
-        type: 'error',
-        id: genId(),
-        timestamp: new Date().toISOString(),
-        payload: { code: 'workspace.generate_failed', message: (err as Error).message },
       } as WsMessage);
     }
   });
@@ -1460,100 +1331,6 @@ export function registerHandlers(
       timestamp: new Date().toISOString(),
       payload: { projects },
     } as WsMessage;
-  });
-
-  // MOCKUP.RELOAD — spawn axure agent to re-crawl selected pages
-  wsServer.registerHandler('mockup.reload', async (msg: WsMessage, _ws: WebSocket) => {
-    const { projectId, filenames, axshareUrl } = (msg as WsMockupReload).payload;
-    const project = getProject(projectId);
-    if (!project) return;
-
-    const fileList = filenames.map(f => `- ${f}`).join('\n');
-    const prompt = `Use the /crawl-axure-snapshots skill to re-crawl the following Axure snapshot pages.
-
-IMPORTANT: Use ONLY mcp__playwright__browser_navigate and mcp__playwright__browser_evaluate. Do NOT use browser_take_screenshot or browser_resize — the workflow is pure JS coordinate analysis, no screenshots needed. Do NOT run playwright via Node.js scripts or npm/npx.
-
-Axure Share base URL: ${axshareUrl}
-Project ID: ${projectId}
-Output directory: docs/axure-snapshots/${projectId}/
-
-Pages to re-crawl (filenames tell you the module and page type):
-${fileList}
-
-For each filename like "sb01-查詢.html" (module: sb01, page type: 查詢):
-1. browser_close → close any existing browser
-2. browser_navigate → direct .html URL for the page
-3. browser_evaluate → hide chrome elements
-4. browser_evaluate → JS Step 1: field labels sorted by y coordinate
-5. browser_evaluate → JS Step 2: x coordinates for same-row fields
-6. browser_evaluate → JS Step 3: input/select/textarea types, options, defaults
-7. browser_evaluate → JS Step 3.5: large custom components (height > 80px, non-standard tags)
-8. Write semantic HTML from JS data, save with Write tool to docs/axure-snapshots/${projectId}/{filename}
-9. browser_evaluate → JS Step 4: verify buttons
-
-Context compaction recovery: if your context was compacted and you are unsure which pages remain, run:
-  Bash: ls docs/axure-snapshots/${projectId}/
-Then compare with the full sitemap page list and continue with the pages not yet saved.
-
-Browser stuck rule: if the browser fails or hangs 3 times in total (across all pages), stop immediately and end with [TASK_COMPLETE] noting which pages were completed.
-
-When all pages are saved, end with [TASK_COMPLETE].`;
-
-    await agentManager.startAgent({
-      projectId,
-      role: 'axure',
-      prompt,
-      workingDir: getConfig().projectRoot,
-    });
-  });
-
-  // MOCKUP.CRAWL_ALL — initial crawl: fetch sitemap then crawl all pages
-  wsServer.registerHandler('mockup.crawlAll', async (msg: WsMessage, _ws: WebSocket) => {
-    const { projectId, axshareUrl, existingFiles } = (msg as WsMockupCrawlAll).payload;
-    const project = getProject(projectId);
-    if (!project) return;
-
-    const skipSection = existingFiles && existingFiles.length > 0
-      ? `\nAlready crawled (SKIP these):\n${existingFiles.map(f => `- ${f}`).join('\n')}\n`
-      : '';
-
-    const prompt = `Use the /crawl-axure-snapshots skill to crawl ALL pages from this Axure Share project.
-
-IMPORTANT: Use ONLY mcp__playwright__browser_navigate and mcp__playwright__browser_evaluate (Playwright MCP tools). Do NOT use browser_take_screenshot or browser_resize — the workflow is pure JS coordinate analysis, no screenshots needed. Do NOT run playwright via Node.js scripts or npm/npx.
-
-Axure Share URL: ${axshareUrl}
-Project ID: ${projectId}
-Output directory: docs/axure-snapshots/${projectId}/${skipSection}
-
-Workflow per page (Method A from the skill — pure JS, no screenshots):
-1. browser_close → close any existing browser
-2. browser_navigate → direct .html URL for the page (preferred over shell URL)
-3. browser_evaluate → hide chrome elements
-4. browser_evaluate → JS Step 1: get all field labels sorted by y coordinate
-5. browser_evaluate → JS Step 2: get x coordinates for fields that appear to be on the same row
-6. browser_evaluate → JS Step 3: get input/select/textarea types, options, default values
-7. browser_evaluate → JS Step 3.5: detect large custom components (WYSIWYG editors, file widgets) by height > 80px filter
-8. Write semantic HTML based on the JS coordinate data (NOT from screenshots)
-9. Write tool → save to docs/axure-snapshots/${projectId}/{module_code}-{page_type}.html
-10. browser_evaluate → JS Step 4: verify button list matches HTML
-
-To get all page names: navigate to the Axure Share base URL and run:
-  () => { const flat = []; const walk = (nodes) => nodes.forEach(n => { flat.push({name: n.pageName, id: n.id, url: n.url}); if (n.children) walk(n.children); }); walk(window.$axure.document.sitemap.rootNodes); return flat; }
-
-Context compaction recovery: if your context was compacted and you are unsure which pages remain, run:
-  Bash: ls docs/axure-snapshots/${projectId}/
-Then compare with the full sitemap page list and continue with the pages not yet saved.
-
-Browser stuck rule: if the browser fails or hangs 3 times in total (across all pages), stop immediately and end with [TASK_COMPLETE] noting which pages were completed.
-
-When all pages are saved, end with [TASK_COMPLETE].`;
-
-    await agentManager.startAgent({
-      projectId,
-      role: 'axure',
-      prompt,
-      workingDir: getConfig().projectRoot,
-    });
   });
 
   wsServer.setPostConnectionHandler((ws) => {

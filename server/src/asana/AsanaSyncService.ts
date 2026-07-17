@@ -1,7 +1,6 @@
 import type { AsanaSyncConfig, ProjectConfig } from '@omni/shared';
 import type { AsanaMcpClient } from './AsanaMcpClient.js';
 import type { TaskClassifier } from '../orchestrator/TaskClassifier.js';
-import type { ExecutionPipeline } from '../orchestrator/ExecutionPipeline.js';
 import type { OmniWebSocketServer } from '../websocket/WebSocketServer.js';
 import type { SvnSpecService } from '../svn/SvnSpecService.js';
 import type { DocumentParser } from '../documents/DocumentParser.js';
@@ -39,7 +38,6 @@ export class AsanaSyncService {
   constructor(
     private asanaClient: AsanaMcpClient,
     private classifier: TaskClassifier,
-    private pipeline: ExecutionPipeline,
     private wsServer: OmniWebSocketServer,
   ) {}
 
@@ -146,13 +144,14 @@ export class AsanaSyncService {
       }
     }
     const syncConfig = config?.asanaSyncConfig;
+    // autoExecuteRules 仍會被讀取（僅為記錄），但不再觸發任何 spawn 派工 —
+    // 執行一律走外部 Claude Code session + MCP。
     const autoExecuteRules = syncConfig?.autoExecuteRules || { bug: false, feature: false, refactor: false, testing: false, other: false };
-    const maxConcurrent = syncConfig?.maxConcurrentAgents || 2;
 
     let newTasks = 0;
     let updatedTasks = 0;
     let removedTasks = 0;
-    let autoExecuted = 0;
+    const autoExecuted = 0;
 
     // --- 1. Compute mutations (async classification happens here, DB writes deferred) ---
     const pendingUpdates: Array<{ taskId: string; fields: Parameters<typeof updateTaskFields>[1] }> = [];
@@ -306,17 +305,12 @@ export class AsanaSyncService {
       payload: { projectId, tasks: finalTasks },
     } as WsMessage);
 
-    // --- 5. Auto-execute (after all sync writes committed) ---
+    // --- 5. Auto-execute removed (legacy spawn path) ---
+    // 任務已同步進本地 DB；執行請走外部 Claude Code session + MCP（get_execution_plan）。
     for (const task of createdTasks) {
-      const shouldAutoExecute = (autoExecuteRules as Record<string, boolean>)[task.taskType] || false;
-      if (shouldAutoExecute && autoExecuted < maxConcurrent) {
-        try {
-          await this.pipeline.executeTask(task.id);
-          autoExecuted++;
-          logger.info({ taskId: task.id }, 'Auto-executed Asana task');
-        } catch (err) {
-          logger.error({ err, taskId: task.id }, 'Failed to auto-execute task');
-        }
+      const wouldHaveAutoExecuted = (autoExecuteRules as Record<string, boolean>)[task.taskType] || false;
+      if (wouldHaveAutoExecuted) {
+        logger.info({ taskId: task.id, taskType: task.taskType }, '任務已同步（auto-execute 已停用）— 執行請走外部 Claude Code session + MCP');
       }
     }
 
