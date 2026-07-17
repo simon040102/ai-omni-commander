@@ -340,7 +340,7 @@ ${targets.map(t => `- ${sideLabel[t.side]}：\`${t.command}\` — workspace: ${t
 > **給 orchestrator 的指示：**
 > 1. 對每個 side 用 create_task(projectId="${projectId}", title="測試基線修復（${targets.map(t => t.side).join(' / ')}）", label=對應 side, taskType="refactor", description=...) 建立任務（taskType 用 refactor——整理既有測試，不是新功能）
 > 2. create_task 後呼叫 save_task_dispatch(taskId, 對應 side 的 Fixer Prompt) 存派工快照——這既讓任務通過「執行計畫/派工記錄」完成閘門，也讓中斷後可用 resume_task 取回 prompt 續派
-> 3. update_task_status(taskId, "in_progress") 後用 Agent tool 派 fixer agent，cwd 設為該 side 的 workspace 路徑
+> 3. update_task_status(taskId, "in_progress") 後用 Agent tool 派 fixer agent，cwd 設為該 side 的 workspace 路徑，**派工帶 model: "opus"**（「測試化石 vs 真 bug」分類判錯會把 bug 固化成斷言，不可因主 session 用較小模型而降級）
 > 4. 將下方對應 side 的 Fixer Prompt **原封不動**傳入（{TASK_ID} 替換為 create_task 回傳的任務 ID）。**此任務不要呼叫 get_execution_plan**——Fixer Prompt 即完整流程（基線修復不走規格驅動的開發軌，避免觸發 flow gate / 檢查表 / AI 回對閘門）
 > 5. fixer 回報有「真 bug」時，向使用者確認後另開 bug 任務，不要讓 fixer 順手修
 > 6. 基線全綠後告知使用者：此專案的單元測試強制已可安心啟用（testCommand 已設定，閘門自動生效）

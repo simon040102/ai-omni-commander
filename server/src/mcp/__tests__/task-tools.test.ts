@@ -268,6 +268,9 @@ describe('task-tools', () => {
       expect(state!.trackReason).toContain('自動判定');
       expect(state!.roles).toEqual({});
 
+      // 模型政策：light 軌建議 sonnet
+      expect(text).toContain('**建議派工模型（給 orchestrator）:** sonnet');
+
       // [TRACK] 留痕寫入 agent_outputs
       const outputs = testDb.prepare('SELECT content FROM agent_outputs WHERE task_id = ?').all('task-1') as Array<{ content: string }>;
       expect(outputs.some(o => o.content === '[TRACK] light — 自動判定：taskType=bug 且任務未綁定 SA/SD 規格文件')).toBe(true);
@@ -298,6 +301,17 @@ describe('task-tools', () => {
       expect(text).toContain('自動判定：taskType=feature');
       expect(text).toContain('Flow-Gated Development（強制工作流');
       expect(flowStateOf('task-1').flowRequired).toBe(1);
+      // 模型政策：full 軌建議 opus
+      expect(text).toContain('**建議派工模型（給 orchestrator）:** opus');
+    });
+
+    it('任務有設 preferredModel → 建議派工模型以它為準（覆寫軌道預設）', async () => {
+      testDb.prepare(`INSERT INTO tasks (id, project_id, title, label, task_type, preferred_model) VALUES ('task-pm', 'proj-1', 'SM27 查詢', 'frontend', 'bug', 'haiku')`).run();
+
+      const text = (await callTool(server, 'get_execution_plan', { taskId: 'task-pm' })).content[0].text;
+      // light 軌預設 sonnet，但 preferredModel=haiku 優先
+      expect(text).toContain('**建議派工模型（給 orchestrator）:** haiku');
+      expect(text).toContain('任務 preferredModel 指定');
     });
 
     it('track="full" 覆寫 light 自動判定（bug 無文件仍走 full）', async () => {

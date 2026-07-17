@@ -497,11 +497,14 @@ ${JSON.stringify(created, null, 2)}`, '（created 清單被截斷——用 get_s
     { title: 'Get Compliance Review Plan', readOnlyHint: true, openWorldHint: false },
     async ({ taskId }) => {
       const db = getMcpDb();
-      const task = db.prepare('SELECT id, project_id, title, description, label FROM tasks WHERE id = ?').get(taskId) as
-        { id: string; project_id: string; title: string; description: string | null; label: string } | undefined;
+      const task = db.prepare('SELECT id, project_id, title, description, label, preferred_model FROM tasks WHERE id = ?').get(taskId) as
+        { id: string; project_id: string; title: string; description: string | null; label: string; preferred_model: string | null } | undefined;
       if (!task) {
         return { content: [{ type: 'text' as const, text: `Error: Task "${taskId}" not found` }], isError: true };
       }
+      // 模型政策：reviewer 是全系統唯一「程式驗不了推理品質」的位置（logic 項判定），
+      // 一律建議 opus——與主 session 用什麼模型脫鉤；任務 preferredModel 有設則優先。
+      const reviewerModel = task.preferred_model?.trim() || 'opus';
 
       // 任務軌道（get_execution_plan 判軌後寫入 flow_state；無值 = full 向後相容）
       const track = getFlowState(db, taskId)?.track === 'light' ? 'light' : 'full';
@@ -626,7 +629,7 @@ ${seedLines.join('\n')}${seedTruncated ? '\n（種子清單已達大小上限截
 
       // 兩軌共用：orchestrator 派工指示 + 判定標準/寫回/禁令（證據要求、涵蓋要求、寧嚴勿鬆照舊）
       const orchestratorNote = `> **給 orchestrator 的指示：**
-> 1. 用 Agent tool 派出**一個獨立的 AI 回對 subagent**，cwd 設為上列 workspace 路徑（both 時擇一，prompt 中附上兩個路徑）
+> 1. 用 Agent tool 派出**一個獨立的 AI 回對 subagent**，cwd 設為上列 workspace 路徑（both 時擇一，prompt 中附上兩個路徑），**派工帶 model: "${reviewerModel}"**（reviewer 的 logic 判定沒有程式兜底，不可因主 session 用較小模型而降級${task.preferred_model ? '；此為任務 preferredModel 指定值' : ''}）
 > 2. **絕不可由寫 code 的 implementer 自評**——reviewer 必須是全新 context 的獨立 agent，沒看過 implementer 的任何回報
 > 3. 將以下 prompt 原封不動作為 subagent 任務傳入
 > 4. subagent 完成後檢查 save_compliance_review 的結果：missing=0 才可繼續結案流程；missing>0 → 把 missing 清單交回 implementer 修正，修正後**重新派 AI 回對**`;

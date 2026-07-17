@@ -95,6 +95,18 @@ A dual-mode AI collaborative development system. Originally orchestrated multipl
 
 ### 派 subagent 時必須做的事
 
+#### 0. 派工模型政策（與主 session 模型脫鉤，一律明確帶 `model` 參數）
+
+| 角色 | model | 理由 |
+|---|---|---|
+| AI 回對 reviewer | **`opus`（永遠）** | logic 項判定沒有程式兜底，最後防線不可降級 |
+| 基線修復 fixer | `opus` | 「化石 vs 真 bug」分類判錯會把 bug 固化成斷言 |
+| full 軌 implementer | `opus`（簡單規格可 `sonnet`） | 多檔推理與規格語意 |
+| light 軌 bug implementer | `sonnet` | 範圍小、閘門兜底 |
+| 煙霧測試類 | `sonnet` | 純機械操作 |
+
+任務有設 `preferredModel` 時以它為準（`get_execution_plan` / `get_compliance_review_plan` 的回應會帶建議模型，照著帶即可）。
+
 #### 1. 注入 Superpowers 方法論
 根據任務類型自動選擇：
 - **bug** → 告訴 subagent 使用 `/systematic-debugging` skill（先分析根因再修復）

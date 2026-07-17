@@ -335,6 +335,8 @@ describe('verification-tools', () => {
       // R2 配套：create_task 後存派工快照——讓基線修復任務通過「執行計畫/派工記錄」完成閘門
       expect(text).toContain('save_task_dispatch(taskId, 對應 side 的 Fixer Prompt)');
       expect(text).toContain('執行計畫/派工記錄');
+      // 模型政策：fixer 三分類判錯代價高，建議 opus
+      expect(text).toContain('model: "opus"');
       // 三分類（每條失敗強制分類）
       expect(text).toContain('每條失敗強制三分類');
       expect(text).toContain('測試化石');

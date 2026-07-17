@@ -367,12 +367,21 @@ ${lightFlowLine}
 
 `;
 
+          // 模型政策（給 orchestrator）：任務 preferredModel 優先；否則 light 軌小修 sonnet
+          // 即可（範圍小、閘門兜底），full 軌實作建議 opus（多檔推理與規格語意）。
+          const dispatchModel = task.preferred_model?.trim()
+            || (effectiveTrack === 'light' ? 'sonnet' : 'opus');
+          const dispatchModelReason = task.preferred_model?.trim()
+            ? '任務 preferredModel 指定'
+            : (effectiveTrack === 'light' ? 'light 軌小修，sonnet 足夠（閘門兜底）' : 'full 軌實作，建議 opus');
+
           const header = trackSection + `**Task ID:** ${task.id}
 **Role:** ${effectiveRole}
 **Workspace:** ${data.workingDir}
 **Frontend Path:** ${data.frontendPath || 'N/A'}
 **Backend Path:** ${data.backendPath || 'N/A'}
 **Model:** ${data.model}
+**建議派工模型（給 orchestrator）:** ${dispatchModel}（${dispatchModelReason}——Agent tool 派工時帶 model: "${dispatchModel}"）
 
 ## MCP 進度回報（必須執行）
 

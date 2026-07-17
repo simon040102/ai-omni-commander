@@ -449,6 +449,8 @@ describe('compliance-tools', () => {
       // 給 orchestrator：獨立 reviewer，不可 implementer 自評
       expect(text).toContain('獨立的 AI 回對 subagent');
       expect(text).toContain('絕不可由寫 code 的 implementer 自評');
+      // 模型政策：reviewer 一律建議 opus（與主 session 脫鉤）
+      expect(text).toContain('model: "opus"');
       // workspace + 規格文件路徑
       expect(text).toContain(feRoot);
       expect(text).toContain('/specs/SPEC_WA05.md');
