@@ -8,6 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { getMcpDb } from '../db.js';
 import { notifyWebServer } from '../notify.js';
 import { getAsanaPat, ASANA_API_BASE, truncateResponse, getDbPath } from '../helpers.js';
+import { listStalledTasks, DEFAULT_STALE_THRESHOLD_HOURS } from '../stale-tasks.js';
 import { TASK_LABELS, TASK_TYPES } from '@omni/shared';
 
 const PENDING_STATUSES = ['pending', 'queued', 'assigned'] as const;
@@ -26,18 +27,28 @@ export function registerInsightTools(server: McpServer): void {
   // ── next_task ─────────────────────────────────────────────
   server.tool(
     'next_task',
-    '推薦下一個可執行的任務。排除前置任務（task_dependencies）未完成的；bug 類型優先，其餘按建立時間。回傳推薦任務 + 最多 4 個備選，各附推薦理由。',
+    '推薦下一個可執行的任務。排除前置任務（task_dependencies）未完成的；bug 類型優先，其餘按建立時間。回傳推薦任務 + 最多 4 個備選，各附推薦理由。額外附一段 stalledTasks（疑似卡死的 in_progress 任務，停滯時數 ≥ 門檻），建議 resume_task 或標 failed——不影響推薦邏輯本身。',
     {
       projectId: z.string().describe('專案 ID'),
+      staleThresholdHours: z.number().int().positive().optional().describe(`疑似停滯任務的停滯時數門檻（小時，預設 ${DEFAULT_STALE_THRESHOLD_HOURS}）`),
     },
     { title: 'Next Task', readOnlyHint: true, openWorldHint: false },
-    async ({ projectId }) => {
+    async ({ projectId, staleThresholdHours }) => {
       const db = getMcpDb();
 
       const project = db.prepare('SELECT id FROM projects WHERE id = ?').get(projectId) as { id: string } | undefined;
       if (!project) {
         return { content: [{ type: 'text' as const, text: `Error: Project "${projectId}" not found` }], isError: true };
       }
+
+      // 疑似停滯任務（卡死偵測）——獨立於推薦邏輯，各回傳路徑都附上。即使沒有待辦
+      // 任務，卡在 in_progress 的舊任務也要被提醒（resume_task 或標 failed）。
+      const threshold = staleThresholdHours ?? DEFAULT_STALE_THRESHOLD_HOURS;
+      const stalledTasks = listStalledTasks(db, projectId, threshold);
+      const staleHint = stalledTasks.length > 0
+        ? `偵測到 ${stalledTasks.length} 個疑似卡死的 in_progress 任務（停滯 ≥ ${threshold}h）：建議對每個先 resume_task 恢復脈絡，確認無法接續就 update_task_status(status="failed")。`
+        : undefined;
+      const staleSection = { staleThresholdHours: threshold, stalledTasks, ...(staleHint ? { staleHint } : {}) };
 
       const statusPlaceholders = PENDING_STATUSES.map(() => '?').join(',');
       const pendingTotal = (db.prepare(
@@ -49,7 +60,7 @@ export function registerInsightTools(server: McpServer): void {
         const reason = anyTasks === 0
           ? '此專案沒有任何任務。可用 create_task 建立，或 sync_asana_tasks 同步 Asana。'
           : '沒有待處理任務（全部已完成、進行中或失敗）。用 list_pending_tasks(statuses=["in_progress","failed"]) 查看進行中/失敗的任務。';
-        return { content: [{ type: 'text' as const, text: JSON.stringify({ recommended: null, alternatives: [], reason }, null, 2) }] };
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ recommended: null, alternatives: [], reason, ...staleSection }, null, 2) }] };
       }
 
       // Unblocked pending tasks: no incomplete dependency
@@ -74,6 +85,7 @@ export function registerInsightTools(server: McpServer): void {
               recommended: null,
               alternatives: [],
               reason: `有 ${pendingTotal} 個待處理任務，但全部被未完成的前置任務擋住（blocked）。先完成前置任務，或用 list_pending_tasks 檢視依賴關係。`,
+              ...staleSection,
             }, null, 2),
           }],
         };
@@ -98,6 +110,7 @@ export function registerInsightTools(server: McpServer): void {
             recommended: describe(top!, true),
             alternatives: rest.map(t => describe(t, false)),
             pendingTotal,
+            ...staleSection,
           }, null, 2),
         }],
       };

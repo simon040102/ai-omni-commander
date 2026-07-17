@@ -148,6 +148,80 @@ describe('context-tools', () => {
     });
   });
 
+  describe('save_task_dispatch + resume_task lastDispatch', () => {
+    it('stores a [DISPATCH] snapshot and resume_task returns the most recent one parsed', async () => {
+      seed(testDb);
+
+      const r1 = await callTool(server, 'save_task_dispatch', {
+        taskId: 'task-1', prompt: '第一版 prompt', meta: { role: 'frontend' },
+      });
+      expect(r1.isError).toBeUndefined();
+
+      // stored in agent_outputs as a [DISPATCH]-prefixed system line
+      const rows = testDb.prepare(`SELECT content FROM agent_outputs WHERE agent_id = 'mcp-task-1' AND content LIKE '[DISPATCH]%'`).all() as any[];
+      expect(rows).toHaveLength(1);
+
+      // a second dispatch — resume_task must return the LATEST
+      await callTool(server, 'save_task_dispatch', {
+        taskId: 'task-1', prompt: '第二版 prompt', meta: { role: 'backend', model: 'opus' },
+      });
+
+      const data = JSON.parse((await callTool(server, 'resume_task', { taskId: 'task-1' })).content[0].text);
+      expect(data.lastDispatch).toBeDefined();
+      expect(data.lastDispatch.prompt).toBe('第二版 prompt');
+      expect(data.lastDispatch.meta).toEqual({ role: 'backend', model: 'opus' });
+      expect(data.lastDispatch.dispatchedAt).toBeTruthy();
+      expect(data.lastDispatch.savedAt).toBeTruthy();
+    });
+
+    it('resume_task omits lastDispatch when no snapshot exists (back-compat)', async () => {
+      seed(testDb);
+      const data = JSON.parse((await callTool(server, 'resume_task', { taskId: 'task-1' })).content[0].text);
+      expect(data.lastDispatch).toBeUndefined();
+    });
+
+    it('save_task_dispatch returns error for unknown task', async () => {
+      const result = await callTool(server, 'save_task_dispatch', { taskId: 'nope', prompt: 'x' });
+      expect(result.isError).toBe(true);
+    });
+
+    it('[DISPATCH] 快照排除在 recentOutputs 之外，且 lastDispatch 排在 recentOutputs 前面（防截斷）', async () => {
+      seed(testDb);
+      await callTool(server, 'save_task_dispatch', { taskId: 'task-1', prompt: '很長的派工 prompt'.repeat(10) });
+      // save_task_dispatch 已建 mcp-task-1 合成 agent——直接插一筆一般進度回報
+      testDb.prepare(`
+        INSERT INTO agent_outputs (agent_id, task_id, stream_type, content)
+        VALUES ('mcp-task-1', 'task-1', 'text', '一般進度回報')
+      `).run();
+
+      const text = (await callTool(server, 'resume_task', { taskId: 'task-1' })).content[0].text;
+      const data = JSON.parse(text);
+      // recentOutputs 不含 [DISPATCH] 行（計數與內容都排除）
+      expect(data.recentOutputs.outputs.every((o: { content: string }) => !o.content.startsWith('[DISPATCH]'))).toBe(true);
+      expect(data.recentOutputs.total).toBe(1);
+      // 序列化順序：lastDispatch 在 recentOutputs 之前（截斷時尾端先被切）
+      expect(text.indexOf('"lastDispatch"')).toBeGreaterThan(-1);
+      expect(text.indexOf('"lastDispatch"')).toBeLessThan(text.indexOf('"recentOutputs"'));
+    });
+
+    it('壞 JSON 的 [DISPATCH] 行不會讓 resume_task 炸掉——落到 raw fallback', async () => {
+      seed(testDb);
+      testDb.prepare(`
+        INSERT INTO agents (id, project_id, role, status, model) VALUES ('mcp-task-1', 'proj-1', 'quick', 'running', 'external')
+      `).run();
+      testDb.prepare(`
+        INSERT INTO agent_outputs (agent_id, task_id, stream_type, content)
+        VALUES ('mcp-task-1', 'task-1', 'system', '[DISPATCH] {壞掉的 json')
+      `).run();
+
+      const result = await callTool(server, 'resume_task', { taskId: 'task-1' });
+      expect(result.isError).toBeUndefined();
+      const data = JSON.parse(result.content[0].text);
+      expect(data.lastDispatch.raw).toBe('{壞掉的 json');
+      expect(data.lastDispatch.savedAt).toBeTruthy();
+    });
+  });
+
   describe('project notes', () => {
     it('save_project_note inserts and notifies project.noteSaved', async () => {
       seed(testDb);

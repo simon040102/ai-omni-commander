@@ -16,7 +16,7 @@
 		"dev:web": "npm run dev -w web",
 		"test": "npx vitest run --config server/vitest.config.ts",
 		"test:watch": "npx vitest --config server/vitest.config.ts",
-		"verify": "npx vitest run --config server/vitest.config.ts && tsc --build && cd web && npx vite build",
+		"verify": "npx vitest run --config server/vitest.config.ts && tsc --build && cd web && npx vitest run && npx vite build",
 		"typecheck": "tsc --build",
 		"clean": "rm -rf shared/dist server/dist web/dist node_modules/.cache"
 	},

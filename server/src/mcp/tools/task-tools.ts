@@ -16,6 +16,7 @@ import { parseJson, getAsanaPat, ASANA_API_BASE, ASANA_FETCH_TIMEOUT_MS } from '
 import { detectLabel, detectTaskType } from '../../utils/taskClassification.js';
 import { runSpecChangeCheck, type SpecChangeTarget } from '../spec-change.js';
 import { parseTestCommands, getRequiredUnitTestItems, findLatestUnitTestVerification, UNRELATED_TEST_FAILURE_RULE } from './verification-tools.js';
+import { getStalledHours, DEFAULT_STALE_THRESHOLD_HOURS } from '../stale-tasks.js';
 
 interface TaskRow {
   id: string;
@@ -154,9 +155,10 @@ export function registerTaskTools(server: McpServer): void {
       statuses: z.array(z.string()).optional().describe('Override status filter (default: ["pending","queued","assigned"])'),
       limit: z.number().int().positive().optional().describe('Max tasks to return (default: 100)'),
       offset: z.number().int().min(0).optional().describe('Number of tasks to skip for pagination (default: 0)'),
+      staleThresholdHours: z.number().int().positive().optional().describe(`Threshold (hours) for flagging an in_progress task as stalled (default: ${DEFAULT_STALE_THRESHOLD_HOURS}). Each in_progress task in the response carries stalledHours + stalled.`),
     },
     { title: 'List Pending Tasks', readOnlyHint: true, openWorldHint: false },
-    async ({ projectId, taskType, label, keyword, section, tag, statuses, limit, offset }) => {
+    async ({ projectId, taskType, label, keyword, section, tag, statuses, limit, offset, staleThresholdHours }) => {
       const db = getMcpDb();
       const statusList = statuses && statuses.length > 0 ? statuses : ['pending', 'queued', 'assigned'];
       const placeholders = statusList.map(() => '?').join(',');
@@ -201,12 +203,23 @@ export function registerTaskTools(server: McpServer): void {
         LIMIT ? OFFSET ?
       `).all(...params, effLimit, effOffset) as Array<Record<string, unknown>>;
 
-      // Parse JSON dimensions for output; back-compat: old tasks → [] / {} / null
-      const tasks = rows.map(r => ({
-        ...r,
-        tags: parseJson<string[]>(r['tags'], []),
-        custom_fields: parseJson<Record<string, string>>(r['custom_fields'], {}),
-      }));
+      // Parse JSON dimensions for output; back-compat: old tasks → [] / {} / null.
+      // in_progress tasks additionally carry stalledHours + stalled (卡死偵測): a
+      // task with no report_output that nobody marked completed/failed shows a
+      // growing stalledHours so orchestrators can resume_task or mark it failed.
+      const threshold = staleThresholdHours ?? DEFAULT_STALE_THRESHOLD_HOURS;
+      const tasks = rows.map(r => {
+        const base = {
+          ...r,
+          tags: parseJson<string[]>(r['tags'], []),
+          custom_fields: parseJson<Record<string, string>>(r['custom_fields'], {}),
+        };
+        if (r['status'] === 'in_progress') {
+          const stalledHours = getStalledHours(db, r['id'] as string);
+          return { ...base, stalledHours, stalled: stalledHours >= threshold };
+        }
+        return base;
+      });
 
       return {
         content: [{
@@ -217,6 +230,7 @@ export function registerTaskTools(server: McpServer): void {
             count: tasks.length,
             offset: effOffset,
             hasMore: effOffset + tasks.length < total,
+            staleThresholdHours: threshold,
             tasks,
           }, null, 2),
         }],

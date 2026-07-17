@@ -50,6 +50,9 @@ import { logger } from './utils/logger.js';
 import type { WsMessage } from '@omni/shared';
 import { EventTypes, CURRENT_MODELS, LEGACY_MODELS } from '@omni/shared';
 
+/** 定期資料庫備份間隔（24h）。啟動時備份一次，之後每隔此間隔再備份一次。 */
+const BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
 process.on('uncaughtException', (err) => {
   logger.error({ err }, 'Uncaught exception — server continues running, investigate ASAP');
 });
@@ -95,6 +98,15 @@ async function main() {
 
   // 1b. Auto-backup DB on startup (best-effort — failure never blocks startup)
   await backupDatabase(db, path.dirname(config.dbPath));
+
+  // 1c. Periodic DB backup (every BACKUP_INTERVAL_MS). backupDatabase is
+  // best-effort (never throws) and reuses pruneBackups to keep only the newest
+  // MAX_BACKUPS copies. unref() so the timer never keeps the process alive on
+  // its own; cleared explicitly in graceful shutdown.
+  const backupTimer = setInterval(() => {
+    void backupDatabase(db, path.dirname(config.dbPath));
+  }, BACKUP_INTERVAL_MS);
+  backupTimer.unref();
 
   // Migrate existing project paths to recent_paths (one-time on startup)
   migrateProjectPathsToRecent();
@@ -1164,6 +1176,7 @@ async function main() {
   // Graceful shutdown
   const shutdown = async () => {
     logger.info('Shutting down...');
+    clearInterval(backupTimer);
     asanaSyncService.stopAll();
     // Kill agent processes without touching DB status here — on next startup,
     // recoverRunningAgents() kills any leftover PIDs and marks these agents as

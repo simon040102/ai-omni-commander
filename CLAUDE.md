@@ -232,11 +232,11 @@ MCP Server（stdio，由 Claude Code 經 .mcp.json spawn）與 Web Server（Expr
   ```
 - 新增程式碼時**嚴禁**在 MCP process 內用 `process.cwd()` 解析路徑，一律走 `getDataDir()` / `resolveFromRepoRoot()`
 
-### MCP Tools (53 total)
+### MCP Tools (54 total)
 
 完整用法見各工具 description 與 server instructions（連線時自動注入）。分組一覽：
 
-- **任務 / 執行計畫**：`get_task`, `list_pending_tasks`, `get_execution_plan`, `update_task_status`, `update_task`, `next_task`, `get_task_outputs`, `resume_task`, `add_task_dependency`, `remove_task_dependency`, `create_task`
+- **任務 / 執行計畫**：`get_task`, `list_pending_tasks`（in_progress 任務附 `stalledHours`/`stalled` 卡死偵測）, `get_execution_plan`, `update_task_status`, `update_task`, `next_task`（附 `stalledTasks` 疑似停滯清單）, `get_task_outputs`, `resume_task`（附最近 `lastDispatch` 派工快照）, `save_task_dispatch`（派工快照，中斷復原）, `add_task_dependency`, `remove_task_dependency`, `create_task`
 - **文件 / 規格**：`get_documents`, `read_document`, `search_documents`, `find_axure_snapshot`, `fetch_svn_specs`, `fetch_task_attachments`
 - **專案 / 設定**：`list_projects`, `get_project`, `create_project`, `update_project`, `set_extra_prompt`, `set_global_config`
 - **規格缺口**：`report_spec_gap`, `list_spec_gaps`, `resolve_spec_gap`, `check_spec_changes`, `check_spec_consistency`

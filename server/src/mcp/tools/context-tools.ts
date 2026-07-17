@@ -15,8 +15,8 @@ import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
 import { getMcpDb } from '../db.js';
 import { notifyWebServer } from '../notify.js';
-import { truncateResponse } from '../helpers.js';
-import { getFlowState, getCompletionBlockers, type FlowGateState, type RoleFlowState, type FlowRole } from '../flow-gate.js';
+import { truncateResponse, parseJson } from '../helpers.js';
+import { getFlowState, getCompletionBlockers, logTaskOutput, type FlowGateState, type RoleFlowState, type FlowRole } from '../flow-gate.js';
 import { runSpecChangeCheck, type SpecChangeTarget } from '../spec-change.js';
 
 interface TaskRow {
@@ -41,6 +41,9 @@ interface NoteRow {
   created_at: string;
   updated_at: string;
 }
+
+/** 派工快照稽核前綴（與 [SKIP]/[TRACK] 同機制，存進 agent_outputs stream_type='system'）。 */
+const DISPATCH_PREFIX = '[DISPATCH]';
 
 export function registerContextTools(server: McpServer): void {
 
@@ -102,10 +105,14 @@ export function registerContextTools(server: McpServer): void {
       // ── recent outputs (last N, chronological) ──
       const agentId = `mcp-${taskId}`;
       const limit = Math.min(outputLimit ?? 20, 100);
-      const outputsTotal = (db.prepare('SELECT COUNT(*) as count FROM agent_outputs WHERE agent_id = ?').get(agentId) as { count: number }).count;
+      // [DISPATCH] 快照是機器用的完整派工 prompt（可能很大），不是進度敘事——排除在
+      // recentOutputs 之外，避免同一份 prompt 在回應中出現兩次而把 lastDispatch 擠出截斷上限。
+      const outputsTotal = (db.prepare(
+        "SELECT COUNT(*) as count FROM agent_outputs WHERE agent_id = ? AND content NOT LIKE '[DISPATCH]%'"
+      ).get(agentId) as { count: number }).count;
       const recentOutputs = (db.prepare(`
         SELECT stream_type, content, timestamp FROM agent_outputs
-        WHERE agent_id = ? ORDER BY id DESC LIMIT ?
+        WHERE agent_id = ? AND content NOT LIKE '[DISPATCH]%' ORDER BY id DESC LIMIT ?
       `).all(agentId, limit) as Array<{ stream_type: string; content: string; timestamp: string }>)
         .reverse()
         .map(r => ({ type: r.stream_type, content: r.content, timestamp: r.timestamp }));
@@ -122,6 +129,22 @@ export function registerContextTools(server: McpServer): void {
         WHERE agent_id = ? AND content LIKE '[VERIFICATION]%'
         ORDER BY id DESC LIMIT 1
       `).get(agentId) as { content: string; timestamp: string } | undefined;
+
+      // ── last dispatch snapshot (save_task_dispatch 存的最近一筆 [DISPATCH]) ──
+      // 中斷復原：session 被砍後，接手者可拿回上次派給 subagent 的完整 prompt。
+      const lastDispatchRow = db.prepare(`
+        SELECT content, timestamp FROM agent_outputs
+        WHERE agent_id = ? AND content LIKE '[DISPATCH]%'
+        ORDER BY id DESC LIMIT 1
+      `).get(agentId) as { content: string; timestamp: string } | undefined;
+      let lastDispatch: Record<string, unknown> | null = null;
+      if (lastDispatchRow) {
+        const body = lastDispatchRow.content.replace(/^\[DISPATCH\]\s*/, '');
+        const parsed = parseJson<{ at?: string; meta?: unknown; prompt?: string } | null>(body, null);
+        lastDispatch = parsed && typeof parsed === 'object'
+          ? { dispatchedAt: parsed.at ?? lastDispatchRow.timestamp, meta: parsed.meta ?? null, prompt: parsed.prompt ?? '', savedAt: lastDispatchRow.timestamp }
+          : { raw: body, savedAt: lastDispatchRow.timestamp };
+      }
 
       // ── dependencies (此任務依賴哪些任務 + 目前狀態) ──
       const dependencies = db.prepare(`
@@ -188,6 +211,9 @@ export function registerContextTools(server: McpServer): void {
           backendPath: project.backend_path,
         } : null,
         flowGate,
+        // lastDispatch 放在 recentOutputs 之前：回應超過截斷上限時被切掉的是尾端，
+        // 派工快照（中斷復原的關鍵資料）必須排在歷史敘事前面才不會被截掉。
+        ...(lastDispatch ? { lastDispatch } : {}),
         recentOutputs: { total: outputsTotal, showing: recentOutputs.length, outputs: recentOutputs },
         openSpecGaps: openGaps.map(g => ({ id: g.id, category: g.category, description: g.description, createdAt: g.created_at })),
         lastVerification: lastVerification ? { content: lastVerification.content, timestamp: lastVerification.timestamp } : null,
@@ -202,6 +228,32 @@ export function registerContextTools(server: McpServer): void {
           text: truncateResponse(JSON.stringify(result, null, 2), '歷史回報過多——用 get_task_outputs(taskId, limit, offset) 分頁取得其餘紀錄。'),
         }],
       };
+    },
+  );
+
+  // ── save_task_dispatch ────────────────────────────────────
+  server.tool(
+    'save_task_dispatch',
+    '存派工快照（中斷復原用）：把「最近一次派給 subagent 的完整 prompt」+ 時間存進任務稽核軌跡。session 被重啟/砍掉後，接手者用 resume_task(taskId) 就能拿回這份 prompt 續派，不用人工重建。非強制——orchestrator 派工前存一次即可。與 [SKIP]/[TRACK] 同機制（agent_outputs，stream_type=system，前綴 [DISPATCH]），不動 schema。',
+    {
+      taskId: z.string().describe('任務 ID'),
+      prompt: z.string().min(1).describe('派給 subagent 的完整 prompt（原封不動存，供中斷後續派）'),
+      meta: z.record(z.string(), z.unknown()).optional().describe('選填：派工相關的額外資訊（如 role、model、workspace 路徑），會原樣存回並由 resume_task 帶回'),
+    },
+    { title: 'Save Task Dispatch', readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    async ({ taskId, prompt, meta }) => {
+      const db = getMcpDb();
+      const task = db.prepare('SELECT id, project_id FROM tasks WHERE id = ?').get(taskId) as { id: string; project_id: string } | undefined;
+      if (!task) {
+        return { content: [{ type: 'text' as const, text: `Error: Task "${taskId}" not found` }], isError: true };
+      }
+
+      const snapshot = { at: new Date().toISOString(), meta: meta ?? null, prompt };
+      // 刻意不 notifyWebServer：快照是機器資料（完整派工 prompt），Web UI 的輸出流
+      // 不顯示它（resume_task 的 recentOutputs 也排除 [DISPATCH]），即時通知沒有意義。
+      logTaskOutput(db, taskId, task.project_id, `${DISPATCH_PREFIX} ${JSON.stringify(snapshot)}`);
+
+      return { content: [{ type: 'text' as const, text: `派工快照已儲存（taskId=${taskId}，prompt ${prompt.length} 字）。中斷後用 resume_task(taskId="${taskId}") 取回。` }] };
     },
   );
 

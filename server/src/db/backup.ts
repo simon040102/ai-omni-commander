@@ -81,7 +81,7 @@ export async function backupDatabase(db: Database.Database, dataDir: string): Pr
     await db.backup(dest);
     const prunedCount = pruneBackups(backupsDir);
 
-    logger.info({ backupPath: dest, prunedCount }, 'Database backed up on startup');
+    logger.info({ backupPath: dest, prunedCount }, 'Database backed up');
     return { ok: true, backupPath: dest, prunedCount };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

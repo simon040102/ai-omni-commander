@@ -102,6 +102,33 @@ describe('insight-tools', () => {
       const result = await callTool(server, 'next_task', { projectId: 'nope' });
       expect(result.isError).toBe(true);
     });
+
+    it('surfaces stalled in_progress tasks alongside the recommendation, most stalled first', async () => {
+      seedProject(testDb);
+      seedTask(testDb, 'pick-me', { taskType: 'bug' });
+      seedTask(testDb, 'stuck-30h', { status: 'in_progress' });
+      seedTask(testDb, 'stuck-50h', { status: 'in_progress' });
+      seedTask(testDb, 'active', { status: 'in_progress' });
+      testDb.prepare(`UPDATE tasks SET updated_at = datetime('now','-30 hours') WHERE id = 'stuck-30h'`).run();
+      testDb.prepare(`UPDATE tasks SET updated_at = datetime('now','-50 hours') WHERE id = 'stuck-50h'`).run();
+      testDb.prepare(`UPDATE tasks SET updated_at = datetime('now','-2 hours') WHERE id = 'active'`).run();
+
+      const data = JSON.parse((await callTool(server, 'next_task', { projectId: 'proj-1' })).content[0].text);
+      expect(data.recommended.id).toBe('pick-me'); // recommendation logic unchanged
+      expect(data.staleThresholdHours).toBe(24);
+      expect(data.stalledTasks.map((s: any) => s.taskId)).toEqual(['stuck-50h', 'stuck-30h']);
+      expect(data.staleHint).toContain('疑似卡死');
+    });
+
+    it('reports stalled tasks even when there are no pending tasks, honoring a custom threshold', async () => {
+      seedProject(testDb);
+      seedTask(testDb, 'stuck', { status: 'in_progress' });
+      testDb.prepare(`UPDATE tasks SET updated_at = datetime('now','-10 hours') WHERE id = 'stuck'`).run();
+
+      const data = JSON.parse((await callTool(server, 'next_task', { projectId: 'proj-1', staleThresholdHours: 5 })).content[0].text);
+      expect(data.recommended).toBeNull();
+      expect(data.stalledTasks.map((s: any) => s.taskId)).toEqual(['stuck']);
+    });
   });
 
   describe('get_task_outputs', () => {

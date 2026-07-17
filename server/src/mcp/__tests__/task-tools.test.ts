@@ -130,6 +130,40 @@ describe('task-tools', () => {
       expect(page2.count).toBe(1);
       expect(page2.hasMore).toBe(false);
     });
+
+    it('attaches stalledHours + stalled to in_progress tasks (卡死偵測), not to other statuses', async () => {
+      seedProject(testDb);
+      testDb.prepare(`INSERT INTO tasks (id, project_id, title, label, task_type, status) VALUES ('ip-stale', 'proj-1', 'Stuck', 'backend', 'feature', 'in_progress')`).run();
+      testDb.prepare(`INSERT INTO tasks (id, project_id, title, label, task_type, status) VALUES ('ip-fresh', 'proj-1', 'Active', 'backend', 'feature', 'in_progress')`).run();
+      testDb.prepare(`UPDATE tasks SET updated_at = datetime('now','-30 hours') WHERE id = 'ip-stale'`).run();
+      testDb.prepare(`UPDATE tasks SET updated_at = datetime('now','-1 hours') WHERE id = 'ip-fresh'`).run();
+      seedTask(testDb, 'pending-1'); // status default pending
+
+      const data = JSON.parse((await callTool(server, 'list_pending_tasks', {
+        projectId: 'proj-1', statuses: ['pending', 'in_progress'],
+      })).content[0].text);
+      expect(data.staleThresholdHours).toBe(24);
+
+      const byId = Object.fromEntries(data.tasks.map((t: any) => [t.id, t]));
+      expect(byId['ip-stale'].stalledHours).toBeGreaterThanOrEqual(29);
+      expect(byId['ip-stale'].stalled).toBe(true);
+      expect(byId['ip-fresh'].stalled).toBe(false);
+      // pending task carries neither field
+      expect(byId['pending-1'].stalledHours).toBeUndefined();
+      expect(byId['pending-1'].stalled).toBeUndefined();
+    });
+
+    it('honors a custom staleThresholdHours', async () => {
+      seedProject(testDb);
+      testDb.prepare(`INSERT INTO tasks (id, project_id, title, label, task_type, status) VALUES ('ip', 'proj-1', 'Stuck', 'backend', 'feature', 'in_progress')`).run();
+      testDb.prepare(`UPDATE tasks SET updated_at = datetime('now','-10 hours') WHERE id = 'ip'`).run();
+
+      const data = JSON.parse((await callTool(server, 'list_pending_tasks', {
+        projectId: 'proj-1', statuses: ['in_progress'], staleThresholdHours: 5,
+      })).content[0].text);
+      expect(data.tasks[0].stalled).toBe(true);
+      expect(data.staleThresholdHours).toBe(5);
+    });
   });
 
   describe('get_execution_plan', () => {

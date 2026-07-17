@@ -85,6 +85,20 @@ describe('backupDatabase', () => {
     expect(fs.existsSync(path.join(backupsDir, 'keep-me.txt'))).toBe(true);
   });
 
+  it('is idempotent across repeated runs — each call produces its own non-colliding backup (periodic timer safety)', async () => {
+    // The 24h periodic timer calls backupDatabase repeatedly against the same
+    // dataDir; back-to-back calls (even within the same second) must never
+    // overwrite each other or throw.
+    const r1 = await backupDatabase(db, dataDir);
+    const r2 = await backupDatabase(db, dataDir);
+    const r3 = await backupDatabase(db, dataDir);
+
+    expect(r1.ok && r2.ok && r3.ok).toBe(true);
+    const paths = [r1.backupPath!, r2.backupPath!, r3.backupPath!];
+    expect(new Set(paths).size).toBe(3); // all distinct
+    for (const p of paths) expect(fs.existsSync(p)).toBe(true);
+  });
+
   it('never throws when the source DB is unusable (closed) — returns ok:false', async () => {
     db.close();
     const result = await backupDatabase(db, dataDir);
