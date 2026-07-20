@@ -2,6 +2,12 @@ import { useState, useEffect, useCallback } from 'react';
 import { useWsStore } from '../../stores/wsStore';
 import { useToastStore } from '../../stores/toastStore';
 import { IconAsana } from '../ui/Icons';
+import {
+  isDesktopNotifyEnabled,
+  setDesktopNotifyEnabled,
+  getNotifyPermission,
+  requestNotifyPermission,
+} from '../../lib/notify';
 
 export function GlobalSettings() {
   const client = useWsStore(s => s.client);
@@ -12,6 +18,8 @@ export function GlobalSettings() {
   const [asanaPat, setAsanaPat] = useState('');
   const [asanaPatSource, setAsanaPatSource] = useState<'none' | 'env' | 'db'>('none');
   const [playwrightEnabled, setPlaywrightEnabled] = useState(false);
+  const [desktopNotify, setDesktopNotify] = useState(() => isDesktopNotifyEnabled());
+  const [notifyPermission, setNotifyPermission] = useState(() => getNotifyPermission());
   const [loaded, setLoaded] = useState(false);
 
   // Test states
@@ -94,6 +102,30 @@ export function GlobalSettings() {
       payload: {},
     });
   }, [client]);
+
+  const handleToggleDesktopNotify = useCallback(async () => {
+    const next = !desktopNotify;
+    if (next) {
+      const permission = await requestNotifyPermission();
+      setNotifyPermission(permission);
+      if (permission !== 'granted') {
+        setDesktopNotifyEnabled(false);
+        setDesktopNotify(false);
+        addToast({
+          type: 'error',
+          title: '桌面通知未啟用',
+          message: permission === 'unsupported'
+            ? '此瀏覽器不支援桌面通知'
+            : '瀏覽器已封鎖通知權限，請在瀏覽器的網站設定中允許通知後再開啟',
+          duration: 8000,
+        });
+        return;
+      }
+    }
+    setDesktopNotifyEnabled(next);
+    setDesktopNotify(next);
+    addToast({ type: 'success', title: `桌面通知已${next ? '開啟' : '關閉'}` });
+  }, [desktopNotify, addToast]);
 
   const handleTestAsana = useCallback(() => {
     if (!client) return;
@@ -243,6 +275,42 @@ export function GlobalSettings() {
             >
               <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${
                 playwrightEnabled ? 'translate-x-6' : 'translate-x-1'
+              }`} />
+            </button>
+          </div>
+        </div>
+
+        {/* Desktop Notifications */}
+        <div className="border border-border rounded-lg p-4 space-y-3">
+          <div className="flex items-center gap-2">
+            <svg className="w-4 h-4 text-amber-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
+            </svg>
+            <h4 className="text-sm font-medium">桌面通知</h4>
+            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground">This browser</span>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            任務完成／失敗時發送瀏覽器通知（只在分頁不在前景時發送，點通知會切回本分頁）。設定存於此瀏覽器的 localStorage。
+          </p>
+          <div className="flex items-center justify-between py-2 px-3 rounded-md border border-border/60 bg-muted/20">
+            <div>
+              <div className="text-sm font-medium">啟用桌面通知</div>
+              <div className="text-[11px] text-muted-foreground">
+                {notifyPermission === 'unsupported' && '此瀏覽器不支援桌面通知'}
+                {notifyPermission === 'denied' && '通知權限已被封鎖 — 請在瀏覽器的網站設定中允許通知'}
+                {notifyPermission === 'granted' && '通知權限已授予'}
+                {notifyPermission === 'default' && '開啟時會請求瀏覽器通知權限'}
+              </div>
+            </div>
+            <button
+              onClick={handleToggleDesktopNotify}
+              disabled={notifyPermission === 'unsupported'}
+              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                desktopNotify ? 'bg-amber-500' : 'bg-muted-foreground/30'
+              }`}
+            >
+              <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${
+                desktopNotify ? 'translate-x-6' : 'translate-x-1'
               }`} />
             </button>
           </div>

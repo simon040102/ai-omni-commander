@@ -123,8 +123,18 @@ export interface PrepareFolderResult {
 
 /** 資料夾是否為 git repo（.git 目錄或檔案 — worktree/submodule 也算）。 */
 export function isGitRepo(folderPath: string): boolean {
+  // 往上找 .git（目錄或 worktree 的 .git 檔案皆可）：規格資料夾常指向 git repo 的
+  // 「子資料夾」（如 hn_doc/FEDI_ADM）——git 指令以子資料夾為 cwd 一樣正常運作
+  // （pull 更新整個 repo、status 看整個 working tree），偵測不該只看自己這層。
   try {
-    return fs.existsSync(path.join(folderPath, '.git'));
+    let dir = path.resolve(folderPath);
+    for (let depth = 0; depth < 30; depth++) {
+      if (fs.existsSync(path.join(dir, '.git'))) return true;
+      const parent = path.dirname(dir);
+      if (parent === dir) return false; // 到磁碟根了
+      dir = parent;
+    }
+    return false;
   } catch {
     return false;
   }

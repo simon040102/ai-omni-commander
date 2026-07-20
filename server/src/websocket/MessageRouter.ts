@@ -35,6 +35,7 @@ import { getPlan, getPlansByProject, updatePlanStatus } from '../db/queries/plan
 import { getAgent } from '../db/queries/agents.js';
 import { upsertWorkspaceSkills } from '../db/queries/workspaceSkills.js';
 import { genId } from '../utils/uuid.js';
+import { notifyTaskStatusToast } from '../utils/toastEvents.js';
 import { createChildLogger } from '../utils/logger.js';
 import { loadSuperpowersPrompt } from '../skills/superpowers/index.js';
 import type { SuperpowersFeature } from '@omni/shared';
@@ -621,8 +622,9 @@ export function registerHandlers(
     // 不擋，但比照 MCP 的 [SKIP] 機制留一筆稽核行進 agent_outputs。
     // 目前 UI 沒有直接標 completed 的入口（TaskList 只送 pending reset）——
     // 此稽核是對第三方 WS client / 未來 UI 的防禦。
+    const prevStatus = payload.status ? getTask(payload.taskId)?.status : undefined;
     const wasNotCompleted = payload.status === 'completed'
-      && (() => { const prev = getTask(payload.taskId); return !!prev && prev.status !== 'completed'; })();
+      && prevStatus !== undefined && prevStatus !== 'completed';
 
     updateTaskFields(payload.taskId, {
       title: payload.title,
@@ -647,6 +649,12 @@ export function registerHandlers(
       }
     }
     logger.info({ taskId: payload.taskId, projectId: payload.projectId }, 'Task updated');
+
+    // Windows toast on direct status change to completed/failed — same helper
+    // as the MCP task.statusChange path (fire-and-forget, never throws).
+    if ((payload.status === 'completed' || payload.status === 'failed') && prevStatus !== payload.status) {
+      notifyTaskStatusToast(payload.taskId, payload.status);
+    }
 
     const tasks = getTasksByProject(payload.projectId);
     wsServer.broadcast({

@@ -121,6 +121,22 @@ describe('prepareFolder', () => {
     expect(pullCall).toContain('--ff-only');
   });
 
+  it('git repo 的「子資料夾」也偵測為 git（規格資料夾常指向 repo 子層）→ 照樣 pull', async () => {
+    const root = mkdir('git-parent');
+    fs.mkdirSync(path.join(root, '.git'), { recursive: true });
+    const sub = path.join(root, 'FEDI_ADM', 'SA');
+    fs.mkdirSync(sub, { recursive: true });
+
+    expect(isGitRepo(sub)).toBe(true);
+
+    const { calls, runner } = recordingRunner({ 'rev-parse': { stdout: 'def456\n' } });
+    const result = await prepareFolder({ path: sub, gitPull: true }, runner);
+    expect(result.ok).toBe(true);
+    expect(result.isGitRepo).toBe(true);
+    expect(result.version).toBe('def456');
+    expect(calls.map(c => c[0])).toEqual(['status', 'pull', 'rev-parse']);
+  });
+
   it('git repo + gitPull + dirty tree → pull skipped with warning', async () => {
     const dir = mkdir('git-dirty');
     fs.mkdirSync(path.join(dir, '.git'), { recursive: true });

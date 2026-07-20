@@ -1,5 +1,6 @@
 import { useProjectStore } from '../../stores/projectStore';
 import { useToastStore } from '../../stores/toastStore';
+import { showDesktopNotification } from '../../lib/notify';
 import type { Task, ReviewResult } from '../../stores/projectStore';
 import type { HandlerMap } from './types';
 
@@ -10,17 +11,22 @@ export const taskHandlers: HandlerMap = {
   'task.statusChange': (payload) => {
     const taskStatus = payload['newStatus'] as string;
     const changedTaskId = payload['taskId'] as string;
-    const prevStatus = useProjectStore.getState().tasks.find(t => t.id === changedTaskId)?.status;
+    const changedTask = useProjectStore.getState().tasks.find(t => t.id === changedTaskId);
+    const prevStatus = changedTask?.status;
     useProjectStore.getState().updateTaskStatus(
       changedTaskId,
       taskStatus,
       payload['assignedAgentId'] as string | undefined,
     );
     if (taskStatus !== prevStatus) {
+      const taskTitle = changedTask?.title || changedTaskId;
       if (taskStatus === 'failed') {
         useToastStore.getState().addToast({ type: 'error', title: '任務失敗', message: `任務 ${changedTaskId}`, duration: 8000 });
+        // Desktop notification — only fires when the tab is hidden (see lib/notify.ts)
+        showDesktopNotification('❌ 任務失敗', taskTitle);
       } else if (taskStatus === 'completed') {
         useToastStore.getState().addToast({ type: 'success', title: '任務完成' });
+        showDesktopNotification('✅ 任務完成', taskTitle);
       }
     }
   },

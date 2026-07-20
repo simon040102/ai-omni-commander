@@ -38,6 +38,7 @@ import { getAllProjectNotes, createProjectNote, archiveProjectNote } from './db/
 import { genId } from './utils/uuid.js';
 import { isSafePathParam } from './utils/pathSafety.js';
 import { ensureNotifyToken, verifyNotifyToken } from './utils/notifyToken.js';
+import { handleMcpEventToast } from './utils/toastEvents.js';
 // maskProjectConfig is a pure function (no MCP process/state dependency) — safe
 // to reuse from the Web server so both surfaces mask credentials identically.
 import { maskProjectConfig, maskConnectionString } from './mcp/helpers.js';
@@ -1025,6 +1026,10 @@ async function main() {
 
       // Broadcast as WS message — wrap data in payload to match frontend expectations
       wsServer.broadcast({ type: event, id: data.agentId || data.taskId || '', timestamp: new Date().toISOString(), payload: data } as any);
+
+      // Windows toast (fire-and-forget — never affects the notify response):
+      // task completed/failed, [NEEDS_HUMAN] agent output, new spec gaps.
+      handleMcpEventToast(event, data && typeof data === 'object' ? data : {});
 
       res.json({ ok: true });
     } catch (err) {
