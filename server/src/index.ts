@@ -22,13 +22,32 @@ import { AsanaMcpClient } from './asana/AsanaMcpClient.js';
 import { AsanaSyncService } from './asana/AsanaSyncService.js';
 import { TaskClassifier } from './orchestrator/TaskClassifier.js';
 import { RetryHandler } from './review/RetryHandler.js';
-import { SvnSpecService, extractFunctionCode } from './svn/SvnSpecService.js';
+import { SvnSpecService, extractFunctionCode, extractFunctionCodeFromSpecFilenames } from './svn/SvnSpecService.js';
 
-/** 任務功能代碼：parent_name 優先（Asana 母任務常帶 DF08_… 代碼），退回 title。 */
-function taskFunctionCode(parentName: unknown, title: unknown): string | null {
+/**
+ * 任務功能代碼：parent_name 優先（Asana 母任務常帶 DF08_… 代碼）→ 退回 title →
+ * 都抽不到（純中文任務名，如 HN_FEDI 的「系統參數」）→ 從綁定規格文件檔名抽
+ * （`[SA] SM002_系統參數.md`），以任務名精確吻合檔名中文名者優先。
+ * 全部落空才是真正的「共用」（無代碼）。
+ */
+function taskFunctionCode(db: ReturnType<typeof getDb>, taskId: unknown, parentName: unknown, title: unknown): string | null {
   const p = typeof parentName === 'string' ? extractFunctionCode(parentName) : null;
   if (p) return p;
-  return typeof title === 'string' ? extractFunctionCode(title) : null;
+  const t = typeof title === 'string' ? extractFunctionCode(title) : null;
+  if (t) return t;
+  // fallback：綁定規格檔名（任務名為純中文時代碼只存在於檔名）
+  if (typeof taskId === 'string' && taskId) {
+    try {
+      const docs = db.prepare(`
+        SELECT d.filename FROM task_documents td JOIN documents d ON d.id = td.document_id
+        WHERE td.task_id = ?
+      `).all(taskId) as Array<{ filename: string }>;
+      const preferName = typeof parentName === 'string' && parentName ? parentName
+        : (typeof title === 'string' ? title : null);
+      return extractFunctionCodeFromSpecFilenames(docs.map(d => d.filename), preferName);
+    } catch { /* fall through to null */ }
+  }
+  return null;
 }
 import { SaFlowAnalyzer } from './documents/SaFlowAnalyzer.js';
 import { listProjects } from './db/queries/projects.js';
@@ -774,7 +793,7 @@ async function main() {
           id: r['id'],
           taskId: r['task_id'],
           taskTitle: r['task_title'],
-          functionCode: taskFunctionCode(r['task_parent_name'], r['task_title']),
+          functionCode: taskFunctionCode(db, r['task_id'], r['task_parent_name'], r['task_title']),
           category: r['category'],
           description: r['description'],
           status: r['status'],
@@ -843,7 +862,7 @@ async function main() {
           return {
             taskId: r.task_id,
             taskTitle: r.task_title,
-            functionCode: taskFunctionCode(r.task_parent_name, r.task_title),
+            functionCode: taskFunctionCode(db, r.task_id, r.task_parent_name, r.task_title),
             taskStatus: r.task_status,
             itemCount: r.item_count,
             waivedCount: r.waived_count,

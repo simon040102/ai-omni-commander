@@ -917,6 +917,38 @@ export function extractFunctionCode(text: string): string | null {
   return null;
 }
 
+/**
+ * 從綁定規格文件的檔名抽功能代碼——任務名為純中文（如 HN_FEDI 的「系統參數」）
+ * 時的 fallback：代碼只存在於檔名（`[SA] SM002_系統參數.md`），不在任務標題。
+ *
+ * 檔名格式慣例：`[SA] {CODE}_{中文名}.{ext}`（前綴標記可有可無）。
+ * 一個任務常綁多份規格（模糊比對過度綁定，如「系統參數」同時綁到 SM002_系統參數
+ * 與 SM009_系統參數放行）——用 `preferName`（任務的 parent_name/title）比對檔名裡的
+ * 中文名，**精確吻合者優先**，讓「系統參數」得 SM002、「系統參數放行」得 SM09；
+ * 無精確吻合才退回字典序最小（穩定、偏好主功能）。
+ */
+export function extractFunctionCodeFromSpecFilenames(
+  filenames: string[],
+  preferName?: string | null,
+): string | null {
+  const parsed: Array<{ code: string; name: string }> = [];
+  for (const raw of filenames) {
+    const base = raw.replace(/^\[[^\]]*\]\s*/, '').replace(/\.[^.]+$/, ''); // 去 [SA] 前綴與副檔名
+    const code = extractFunctionCode(base);
+    if (!code) continue;
+    // 代碼後的中文名（第一個底線之後）
+    const underscore = base.indexOf('_');
+    const name = underscore >= 0 ? base.slice(underscore + 1).trim() : '';
+    parsed.push({ code, name });
+  }
+  if (parsed.length === 0) return null;
+  if (preferName) {
+    const exact = parsed.find(p => p.name === preferName);
+    if (exact) return exact.code;
+  }
+  return parsed.map(p => p.code).sort()[0]!;
+}
+
 function hasSpecExtension(filename: string): boolean {
   const ext = path.extname(filename).toLowerCase();
   return SPEC_EXTENSIONS.has(ext);
