@@ -61,6 +61,7 @@ export function runMigrations(db: Database.Database): void {
       source            TEXT NOT NULL DEFAULT 'manual' CHECK(source IN (${sqlIn(TASK_SOURCES)})),
       source_ref        TEXT,
       branch_name       TEXT,
+      due_date          TEXT,
       created_at        TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
     );
@@ -763,5 +764,18 @@ export function runMigrations(db: Database.Database): void {
         db.exec('PRAGMA foreign_keys = ON');
       }
     }
+  }
+
+  // =============================================
+  // v18 Migration: tasks.due_date — Asana 截止日期（due_on 原樣 YYYY-MM-DD，無則 NULL）。
+  // 兩條同步路徑（MCP sync_asana_tasks / Web AsanaSyncService）落地，
+  // next_task 排序與 list_pending_tasks overdue 標示使用。
+  // MUST stay after the fullstack table-rebuild above (its INSERT SELECT has a
+  // hard-coded column list and would silently drop this column). Fresh DBs get
+  // the column from the initial CREATE TABLE and skip the ALTER.
+  // =============================================
+  {
+    const tcols = db.prepare("PRAGMA table_info(tasks)").all() as Array<{ name: string }>;
+    if (!tcols.some(c => c.name === 'due_date')) db.exec("ALTER TABLE tasks ADD COLUMN due_date TEXT");
   }
 }

@@ -34,6 +34,8 @@ export interface Task {
   specUrl: string | null;
   preferredModel: string | null;
   parentName: string | null;
+  /** Asana due date (due_on, YYYY-MM-DD) — null if not set */
+  dueDate?: string | null;
   createdAt: string;
   updatedAt: string;
 }

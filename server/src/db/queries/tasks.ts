@@ -20,12 +20,13 @@ export function createTask(data: {
   customFields?: Record<string, string>;
   assignee?: string | null;
   assigneeGid?: string | null;
+  dueDate?: string | null;
 }): Task {
   const db = getDb();
   const id = genId();
   db.prepare(`
-    INSERT INTO tasks (id, project_id, title, description, label, prompt, priority, task_type, source, source_ref, spec_url, preferred_model, parent_name, section, tags, custom_fields, assignee, assignee_gid)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO tasks (id, project_id, title, description, label, prompt, priority, task_type, source, source_ref, spec_url, preferred_model, parent_name, section, tags, custom_fields, assignee, assignee_gid, due_date)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(id, data.projectId, data.title, data.description || null,
     data.label, data.prompt || null, data.priority || 0,
     data.taskType || 'other', data.source || 'manual', data.sourceRef || null,
@@ -33,7 +34,7 @@ export function createTask(data: {
     data.section ?? null,
     data.tags !== undefined ? JSON.stringify(data.tags) : null,
     data.customFields !== undefined ? JSON.stringify(data.customFields) : null,
-    data.assignee ?? null, data.assigneeGid ?? null);
+    data.assignee ?? null, data.assigneeGid ?? null, data.dueDate ?? null);
   return getTask(id)!;
 }
 
@@ -135,6 +136,7 @@ export function updateTaskFields(id: string, data: Partial<{
   customFields: Record<string, string>;
   assignee: string | null;
   assigneeGid: string | null;
+  dueDate: string | null;
 }>): void {
   const db = getDb();
   const sets: string[] = [];
@@ -153,6 +155,7 @@ export function updateTaskFields(id: string, data: Partial<{
   if (data.customFields !== undefined) { sets.push('custom_fields = ?'); values.push(JSON.stringify(data.customFields)); }
   if (data.assignee !== undefined) { sets.push('assignee = ?'); values.push(data.assignee); }
   if (data.assigneeGid !== undefined) { sets.push('assignee_gid = ?'); values.push(data.assigneeGid); }
+  if (data.dueDate !== undefined) { sets.push('due_date = ?'); values.push(data.dueDate); }
 
   if (sets.length === 0) return;
   sets.push("updated_at = datetime('now')");
@@ -212,6 +215,7 @@ function mapTask(row: Record<string, unknown>): Task {
     customFields: parseJsonColumn<Record<string, string>>(row['custom_fields'], {}),
     assignee: (row['assignee'] as string | null) ?? null,
     assigneeGid: (row['assignee_gid'] as string | null) ?? null,
+    dueDate: (row['due_date'] as string | null) ?? null,
     createdAt: row['created_at'] as string,
     updatedAt: row['updated_at'] as string,
   };

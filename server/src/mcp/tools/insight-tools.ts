@@ -9,6 +9,7 @@ import { getMcpDb } from '../db.js';
 import { notifyWebServer } from '../notify.js';
 import { getAsanaPat, ASANA_API_BASE, truncateResponse, getDbPath } from '../helpers.js';
 import { listStalledTasks, DEFAULT_STALE_THRESHOLD_HOURS } from '../stale-tasks.js';
+import { localTodayYmd, describeDueDate } from '../../utils/dueDate.js';
 import { TASK_LABELS, TASK_TYPES } from '@omni/shared';
 
 const PENDING_STATUSES = ['pending', 'queued', 'assigned'] as const;
@@ -19,6 +20,7 @@ interface CandidateRow {
   label: string;
   task_type: string;
   source_ref: string | null;
+  due_date: string | null;
   created_at: string;
 }
 
@@ -27,7 +29,7 @@ export function registerInsightTools(server: McpServer): void {
   // ── next_task ─────────────────────────────────────────────
   server.tool(
     'next_task',
-    '推薦下一個可執行的任務。排除前置任務（task_dependencies）未完成的；bug 類型優先，其餘按建立時間。回傳推薦任務 + 最多 4 個備選，各附推薦理由。額外附一段 stalledTasks（疑似卡死的 in_progress 任務，停滯時數 ≥ 門檻），建議 resume_task 或標 failed——不影響推薦邏輯本身。',
+    '推薦下一個可執行的任務。排除前置任務（task_dependencies）未完成的；bug 類型優先，同優先級內逾期/近到期（due_date 越早）優先、無 due date 排最後，其餘按建立時間。回傳推薦任務 + 最多 4 個備選，各附推薦理由（含到期資訊，如「已逾期 2 天」「3 天後到期」）。額外附一段 stalledTasks（疑似卡死的 in_progress 任務，停滯時數 ≥ 門檻），建議 resume_task 或標 failed——不影響推薦邏輯本身。',
     {
       projectId: z.string().describe('專案 ID'),
       staleThresholdHours: z.number().int().positive().optional().describe(`疑似停滯任務的停滯時數門檻（小時，預設 ${DEFAULT_STALE_THRESHOLD_HOURS}）`),
@@ -63,9 +65,11 @@ export function registerInsightTools(server: McpServer): void {
         return { content: [{ type: 'text' as const, text: JSON.stringify({ recommended: null, alternatives: [], reason, ...staleSection }, null, 2) }] };
       }
 
-      // Unblocked pending tasks: no incomplete dependency
+      // Unblocked pending tasks: no incomplete dependency.
+      // 排序：bug 優先（既有語意不變）→ 同優先級內逾期/近到期優先
+      // （due_date 越早越前，NULL 排最後）→ 建立時間。
       const candidates = db.prepare(`
-        SELECT t.id, t.title, t.label, t.task_type, t.source_ref, t.created_at
+        SELECT t.id, t.title, t.label, t.task_type, t.source_ref, t.due_date, t.created_at
         FROM tasks t
         WHERE t.project_id = ? AND t.status IN (${statusPlaceholders})
           AND NOT EXISTS (
@@ -73,7 +77,7 @@ export function registerInsightTools(server: McpServer): void {
             JOIN tasks dep ON dep.id = td.depends_on_id
             WHERE td.task_id = t.id AND dep.status != 'completed'
           )
-        ORDER BY (t.task_type = 'bug') DESC, t.created_at ASC
+        ORDER BY (t.task_type = 'bug') DESC, (t.due_date IS NULL) ASC, t.due_date ASC, t.created_at ASC
         LIMIT 5
       `).all(projectId, ...PENDING_STATUSES) as CandidateRow[];
 
@@ -91,16 +95,25 @@ export function registerInsightTools(server: McpServer): void {
         };
       }
 
-      const describe = (t: CandidateRow, isTop: boolean): Record<string, unknown> => ({
-        id: t.id,
-        title: t.title,
-        label: t.label,
-        taskType: t.task_type,
-        sourceRef: t.source_ref,
-        reason: t.task_type === 'bug'
+      const today = localTodayYmd();
+      const describe = (t: CandidateRow, isTop: boolean): Record<string, unknown> => {
+        const dueInfo = describeDueDate(t.due_date, today); // 「已逾期 N 天」/「今天到期」/「N 天後到期」/ null
+        const dueSuffix = dueInfo ? `（${dueInfo}）` : '';
+        const baseReason = t.task_type === 'bug'
           ? (isTop ? 'bug 修復優先，且無未完成前置任務' : 'bug 修復優先')
-          : `無未完成前置任務，建立時間較早（${t.created_at}）`,
-      });
+          : (t.due_date
+            ? `無未完成前置任務，截止日期較近 ${t.due_date}`
+            : `無未完成前置任務，建立時間較早（${t.created_at}）`);
+        return {
+          id: t.id,
+          title: t.title,
+          label: t.label,
+          taskType: t.task_type,
+          sourceRef: t.source_ref,
+          dueDate: t.due_date ?? null,
+          reason: baseReason + dueSuffix,
+        };
+      };
 
       const [top, ...rest] = candidates;
       return {
@@ -228,6 +241,7 @@ export function registerInsightTools(server: McpServer): void {
             specUrl: row['spec_url'] ?? null,
             preferredModel: row['preferred_model'] ?? null,
             parentName: row['parent_name'] ?? null,
+            dueDate: row['due_date'] ?? null,
             createdAt: row['created_at'],
             updatedAt: row['updated_at'],
           },

@@ -9,6 +9,7 @@ import { createTask, getTasksByProject, updateTaskFields, deleteTask } from '../
 import { getDb } from '../db/connection.js';
 import { getGlobalConfig, setGlobalConfig } from '../db/queries/globalConfig.js';
 import { genId } from '../utils/uuid.js';
+import { normalizeDueDate } from '../utils/dueDate.js';
 import { createChildLogger } from '../utils/logger.js';
 import type { Task, WsMessage } from '@omni/shared';
 
@@ -127,7 +128,9 @@ export class AsanaSyncService {
     const existingByGid = new Map(existingAsanaTasks.map(t => [t.sourceRef!, t]));
 
     // Fetch tasks assigned to me from the bound Asana project
-    const asanaTasks = await this.asanaClient.getMyTasksForProject(project.asanaProjectGid);
+    // （含 subtask 遞迴抓取：深度 ≤3、只抓未完成、gid 去重——見 utils/asanaSubtasks.ts）
+    const fetched = await this.asanaClient.getMyTasksForProjectDetailed(project.asanaProjectGid);
+    const asanaTasks = fetched.tasks;
     const remoteGids = new Set(asanaTasks.map(t => t.gid));
 
     // Parse project config for auto-execute rules
@@ -171,6 +174,8 @@ export class AsanaSyncService {
       const newCustomFields = asanaTask.customFields ?? {};
       const newAssignee = asanaTask.assignee?.name ?? null;
       const newAssigneeGid = asanaTask.assignee?.gid ?? null;
+      // 截止日期（due_on 原樣 YYYY-MM-DD；非字串一律 null）
+      const newDueDate = normalizeDueDate(asanaTask.dueOn);
 
       if (existing) {
         // Update if title or description changed
@@ -182,11 +187,13 @@ export class AsanaSyncService {
         const tagsChanged = JSON.stringify(existing.tags ?? []) !== JSON.stringify(newTags);
         const cfChanged = JSON.stringify(existing.customFields ?? {}) !== JSON.stringify(newCustomFields);
         const assigneeChanged = (existing.assignee ?? null) !== newAssignee || (existing.assigneeGid ?? null) !== newAssigneeGid;
+        // due date 變更也要觸發 UPDATE（否則 Asana 改期不會反映到本地）
+        const dueChanged = (existing.dueDate ?? null) !== newDueDate;
 
         // Always apply explicit Chinese role markers (前端/後端) regardless of whether title changed
           const forcedLabel = this.classifier.detectLabelFromTitle(asanaTask.name);
 
-      if (titleChanged || descChanged || parentChanged || (forcedLabel && forcedLabel !== existing.label) || sectionChanged || tagsChanged || cfChanged || assigneeChanged) {
+      if (titleChanged || descChanged || parentChanged || (forcedLabel && forcedLabel !== existing.label) || sectionChanged || tagsChanged || cfChanged || assigneeChanged || dueChanged) {
           // Re-classify label if title changed (catches keyword changes like 前端/後端)
           let newLabel = forcedLabel ?? existing.label;
           if (titleChanged && !forcedLabel) {
@@ -212,6 +219,7 @@ export class AsanaSyncService {
               customFields: newCustomFields,
               assignee: newAssignee,
               assigneeGid: newAssigneeGid,
+              dueDate: newDueDate,
             },
           });
         }
@@ -239,20 +247,30 @@ export class AsanaSyncService {
           customFields: newCustomFields,
           assignee: newAssignee,
           assigneeGid: newAssigneeGid,
+          dueDate: newDueDate,
         });
       }
     }
 
     // --- 2. Determine removals (tasks no longer assigned to me) ---
+    // Subtask 抓取被截斷/部分失敗時，remoteGids 不完整——「不在遠端清單」可能只是
+    // 沒抓到，不能當作「已不指派給我」而刪除本地任務 → 本輪跳過刪除（下輪補）。
     const pendingRemovals: Task[] = [];
-    for (const [gid, localTask] of existingByGid) {
-      if (!remoteGids.has(gid)) {
-        // Skip running tasks — don't kill in-progress work
-        if (localTask.status === 'in_progress' || localTask.status === 'assigned') {
-          logger.info({ taskId: localTask.id, asanaGid: gid }, 'Skipped removing running Asana task');
-          continue;
+    if (fetched.subtaskFetchIncomplete) {
+      logger.warn(
+        { projectId, warnings: fetched.subtaskWarnings },
+        'Subtask fetch incomplete — skipping task removals this round to avoid false deletions',
+      );
+    } else {
+      for (const [gid, localTask] of existingByGid) {
+        if (!remoteGids.has(gid)) {
+          // Skip running tasks — don't kill in-progress work
+          if (localTask.status === 'in_progress' || localTask.status === 'assigned') {
+            logger.info({ taskId: localTask.id, asanaGid: gid }, 'Skipped removing running Asana task');
+            continue;
+          }
+          pendingRemovals.push(localTask);
         }
-        pendingRemovals.push(localTask);
       }
     }
 

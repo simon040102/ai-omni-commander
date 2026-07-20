@@ -65,6 +65,12 @@ function svnToWebViewUrl(svnUrl: string): string {
   return `${origin}/!/#${encodeURIComponent(repo)}/view/head/${encoded}`;
 }
 
+/** 本地時區今天（YYYY-MM-DD）——due date 是無時區日期，用本地日判斷逾期 */
+function localTodayYmd(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+}
+
 function getSpecTypeBadge(url: string): { label: string; className: string } {
   if (/^https?:\/\//i.test(url)) return { label: 'HTTP', className: 'bg-blue-500/15 text-blue-400' };
   if (/^svn(\+ssh)?:\/\//i.test(url)) return { label: 'SVN', className: 'bg-orange-500/15 text-orange-400' };
@@ -86,6 +92,14 @@ export function TaskList({ selectedModel, onViewChange }: TaskListProps) {
   const [showAddForm, setShowAddForm] = useState(false);
   const [showImportDrawer, setShowImportDrawer] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
+  // 排序：預設（同步順序）⇄ 依截止日（近的在前、無日期最後）——記在 localStorage
+  const [sortByDue, setSortByDue] = useState(() => localStorage.getItem('omni.taskSortByDue') === '1');
+  const toggleSortByDue = () => {
+    setSortByDue(prev => {
+      localStorage.setItem('omni.taskSortByDue', prev ? '0' : '1');
+      return !prev;
+    });
+  };
   const [newTitle, setNewTitle] = useState('');
   const [newDescription, setNewDescription] = useState('');
   const [newTaskType, setNewTaskType] = useState<TaskType>('feature');
@@ -369,6 +383,17 @@ export function TaskList({ selectedModel, onViewChange }: TaskListProps) {
                 Import from Asana
               </button>
             )}
+            {!collapsed && (
+              <button
+                onClick={toggleSortByDue}
+                title={sortByDue ? '目前：依截止日排序（點擊切回預設順序）' : '目前：預設順序（點擊改依截止日排序）'}
+                className={`inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-medium transition-colors ${
+                  sortByDue ? 'bg-primary/15 text-primary' : 'bg-muted text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                📅 {sortByDue ? '依截止日' : '預設排序'}
+              </button>
+            )}
             {!showAddForm && !collapsed && (
               <button
                 onClick={() => setShowAddForm(true)}
@@ -391,8 +416,14 @@ export function TaskList({ selectedModel, onViewChange }: TaskListProps) {
             )}
 
             {projectTasks.length > 0 && (() => {
-              const asanaTasks = projectTasks.filter(t => t.source === 'asana');
-              const manualTasks = projectTasks.filter(t => t.source !== 'asana');
+              // 依截止日排序：近的在前，無日期排最後；同日期維持原順序（stable sort）
+              const byDue = (list: typeof projectTasks) => !sortByDue ? list : [...list].sort((a, b) => {
+                const da = a.dueDate || '9999-99-99';
+                const db = b.dueDate || '9999-99-99';
+                return da < db ? -1 : da > db ? 1 : 0;
+              });
+              const asanaTasks = byDue(projectTasks.filter(t => t.source === 'asana'));
+              const manualTasks = byDue(projectTasks.filter(t => t.source !== 'asana'));
               const renderTaskRows = (tasks: typeof projectTasks) => tasks.map(task => (
                 <TaskRow
                   key={task.id}
@@ -1003,6 +1034,21 @@ function TaskRow({ task, expandedTaskId, onExecute, onDelete, onToggleExpand, on
           )}
           {task.title || <span className="italic text-muted-foreground">Untitled</span>}
         </span>
+
+        {/* Due date (Asana due_on) — only when set; red when overdue */}
+        {task.dueDate && (() => {
+          const overdue = task.dueDate < localTodayYmd() && task.status !== 'completed';
+          return (
+            <span
+              className={`text-[10px] px-1.5 py-0.5 rounded flex-shrink-0 ${
+                overdue ? 'bg-red-500/15 text-red-400 font-semibold' : 'text-muted-foreground bg-muted/60'
+              }`}
+              title={overdue ? `已逾期（到期日 ${task.dueDate}）` : `到期日 ${task.dueDate}`}
+            >
+              {task.dueDate}
+            </span>
+          );
+        })()}
 
         {/* Status — fixed width for alignment; click to reset if stuck */}
         <span

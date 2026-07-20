@@ -262,8 +262,10 @@ MCP Server（stdio，由 Claude Code 經 .mcp.json spawn）與 Web Server（Expr
 
 特殊行為註記（行為規則）：
 - **`update_task_status` 完成閘門（六道）**：`completed` 受以下閘門管制——(1) **完工閘（實作邏輯對齊，原閘門 B）**（flow-gated 任務）；(2) **檢查表存在**（有軌道的任務必須有規格檢查表）；(3) **AI 規格回對**（最新 ai_review run missing=0，含 staleness 防護）；(4) **單元測試**（專案有設 `frontendTestCommand`/`backendTestCommand` 時，對應 side 的「單元測試全數通過」驗收項最新一筆回報必須 passed=true；既有測試不是全綠先用 `get_test_baseline_plan` 修基線）；(5) **執行計畫/派工記錄**（frontend/backend/fullstack 任務必須有 `get_execution_plan` 的 track、`[TRACK]` 稽核行或 `save_task_dispatch` 的 `[DISPATCH]` 快照其一）；(6) **驗收 FAIL 擋結案**（任何驗收項最新一筆 `report_verification_result` 為 FAIL 即拒絕，從未回報的項目不擋）。`skipFlowGate=true` + `skipReason` 可覆寫全部閘門，**限使用者明確同意**，會記 `[SKIP]` 供稽核。開工閘（規格理解確認，原閘門 A）在寫 code 前由 `report_flow_check(gate="A")` 把關
+- **`sync_asana_tasks` subtask 遞迴抓取**：專案任務清單抓不到未 multi-home 進專案的 subtask（工作項目常在第二層），同步時自動對 `num_subtasks>0` 的未完成任務遞迴抓 subtask（深度上限 3、只抓未完成、gid 去重、每次同步 subtask API 上限 300 支超過截斷+警告）；assignee 過濾以任務本身判（先抓全樹再過濾）、parent_name=直接母任務、section 繼承根任務；`includeSubtasks=false` 可退回舊行為。共用邏輯：`server/src/utils/asanaSubtasks.ts`（Web 端 `AsanaSyncService.syncOnce` 同一份；Web 端截斷/部分失敗時本輪跳過任務刪除防誤刪）
 - **`fetch_svn_specs` 雙來源**：從 SVN **加上**專案設定的本地 `specFolders` 合併撈取；git 資料夾先安全 `git pull --ff-only`（dirty → 跳過 pull + 警告）
 - **`get_execution_plan` 自動判軌**：full / light 軌（見「選擇任務後」的任務軌道說明），並自動注入規格閱讀／規格遵循／後端效能／後端安全四項規範
+- **Asana due date 同步**：兩條同步路徑（MCP `sync_asana_tasks`、Web `AsanaSyncService`）都把 due_on 落地到 `tasks.due_date`（原樣 YYYY-MM-DD，非字串→null，改期會觸發 UPDATE）；`get_task`/`list_pending_tasks`（另附 `overdue`）/`resume_task` 回傳 `dueDate`；`next_task` 在既有排序（bug 優先）之下同優先級內逾期/近到期優先（null 排最後），推薦理由帶到期資訊（如「已逾期 2 天」）；Web TaskList 任務列顯示到期日（逾期紅字）。共用純函式見 `server/src/utils/dueDate.ts`
 
 MCP Prompt：`start_task` — 標準任務工作流（get_execution_plan → in_progress → 執行 → 回報 → 驗收 → completed/failed；`taskId` 可省略，會用 list_pending_tasks/next_task 定位）。
 

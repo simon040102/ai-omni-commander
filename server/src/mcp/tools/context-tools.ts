@@ -30,6 +30,7 @@ interface TaskRow {
   parent_name: string | null;
   result_summary: string | null;
   flow_required: number | null;
+  due_date: string | null;
 }
 
 interface NoteRow {
@@ -60,7 +61,7 @@ export function registerContextTools(server: McpServer): void {
       const db = getMcpDb();
 
       const task = db.prepare(`
-        SELECT id, project_id, title, status, label, task_type, source_ref, parent_name, result_summary, flow_required
+        SELECT id, project_id, title, status, label, task_type, source_ref, parent_name, result_summary, flow_required, due_date
         FROM tasks WHERE id = ?
       `).get(taskId) as TaskRow | undefined;
       if (!task) {
@@ -200,6 +201,7 @@ export function registerContextTools(server: McpServer): void {
           sourceRef: task.source_ref,
           parentName: task.parent_name,
           resultSummary: task.result_summary,
+          dueDate: task.due_date ?? null,
         },
         track,
         trackReason,

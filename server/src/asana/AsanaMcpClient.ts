@@ -1,6 +1,8 @@
 import type { Config } from '../config.js';
 import type { AsanaTask, AsanaConnectionStatus, AsanaFetchTasksOptions } from '@omni/shared';
 import { createChildLogger } from '../utils/logger.js';
+import { fetchAsanaSubtasksTree } from '../utils/asanaSubtasks.js';
+import { normalizeDueDate } from '../utils/dueDate.js';
 
 const logger = createChildLogger('AsanaMcpClient');
 
@@ -265,8 +267,20 @@ export class AsanaMcpClient {
     }
   }
 
-  /** Fetch tasks assigned to the current user in a specific Asana project */
-  async getMyTasksForProject(projectGid: string, options?: { limit?: number; includeCompleted?: boolean }): Promise<AsanaTask[]> {
+  /** Fetch tasks assigned to the current user in a specific Asana project (subtasks included) */
+  async getMyTasksForProject(projectGid: string, options?: { limit?: number; includeCompleted?: boolean; includeSubtasks?: boolean }): Promise<AsanaTask[]> {
+    return (await this.getMyTasksForProjectDetailed(projectGid, options)).tasks;
+  }
+
+  /**
+   * Same as getMyTasksForProject but also returns subtask-fetch metadata,
+   * so callers (AsanaSyncService) can tell whether the remote task set is
+   * complete — 截斷/部分失敗時不可拿結果去判斷「任務已不存在」而刪除本地任務。
+   */
+  async getMyTasksForProjectDetailed(
+    projectGid: string,
+    options?: { limit?: number; includeCompleted?: boolean; includeSubtasks?: boolean },
+  ): Promise<{ tasks: AsanaTask[]; subtaskCount: number; subtaskFetchIncomplete: boolean; subtaskWarnings: string[] }> {
     if (!this.config.asanaPat) {
       throw new Error('ASANA_PAT not configured');
     }
@@ -287,7 +301,8 @@ export class AsanaMcpClient {
       const completedSince = options?.includeCompleted ? '' : '&completed_since=now';
       const limit = options?.limit || 100;
       // section 在 memberships[].section.name（配 memberships.project.gid 挑出本專案）；custom_fields 用 display_value 落地
-      const optFields = 'name,notes,due_on,completed,permalink_url,projects.name,projects.gid,tags.name,parent.gid,parent.name,parent.notes,assignee.gid,assignee.name,memberships.section.name,memberships.project.gid,custom_fields.name,custom_fields.display_value';
+      // num_subtasks → subtask 遞迴抓取的種子判斷
+      const optFields = 'name,notes,due_on,completed,num_subtasks,permalink_url,projects.name,projects.gid,tags.name,parent.gid,parent.name,parent.notes,assignee.gid,assignee.name,memberships.section.name,memberships.project.gid,custom_fields.name,custom_fields.display_value';
 
       // Fetch all project tasks with pagination (to avoid missing tasks beyond first page)
       let allTasks: Record<string, unknown>[] = [];
@@ -306,14 +321,52 @@ export class AsanaMcpClient {
         nextPageUrl = data.next_page?.uri || null;
       }
 
+      // --- Subtask 遞迴抓取（先抓全樹、後過濾 assignee）---
+      // 專案任務清單抓不到未 multi-home 進專案的 subtask；共用邏輯見
+      // utils/asanaSubtasks.ts（深度 ≤3、只抓未完成、gid 去重、≤300 支/次）。
+      // apiFetch 已含 429 退避，注入後模組內的單次退避只是保險。
+      let subtaskCount = 0;
+      let subtaskFetchIncomplete = false;
+      let subtaskWarnings: string[] = [];
+      // subtask 沒有 memberships → section 繼承根任務（下游依 section 分組才有意義）
+      const inheritedSection = new Map<string, string | null>();
+      if (options?.includeSubtasks !== false) {
+        const tree = await fetchAsanaSubtasksTree(allTasks, {
+          fetchFn: (url: string) => this.apiFetch(url),
+          optFields,
+        });
+        const rootSections = new Map(allTasks.map(t => {
+          const memberships = t['memberships'] as Array<{ project?: { gid?: string }; section?: { name?: string } }> | undefined;
+          const match = (memberships && (memberships.find(m => m.project?.gid === projectGid) || memberships[0])) || undefined;
+          return [String(t['gid'] || ''), match?.section?.name || null] as const;
+        }));
+        for (const entry of tree.entries) {
+          const gid = String(entry.task['gid'] || '');
+          if (!gid) continue;
+          inheritedSection.set(gid, rootSections.get(entry.rootGid) ?? null);
+          allTasks.push(entry.task);
+        }
+        subtaskCount = tree.entries.length;
+        subtaskFetchIncomplete = tree.truncated || tree.warnings.length > 0;
+        subtaskWarnings = tree.warnings;
+        if (tree.warnings.length > 0) {
+          logger.warn({ projectGid, warnings: tree.warnings, requestCount: tree.requestCount }, 'Asana subtask fetch warnings');
+        }
+      }
+
+      // Assignee 過濾以「任務本身的 assignee」判：工作項目 subtask 指派給我、
+      // 其母任務指派別人 → 仍要收（樹已先抓全再過濾）
       const filtered = userGid
         ? allTasks.filter(t => (t['assignee'] as Record<string, unknown> | null)?.['gid'] === userGid)
         : allTasks;
       const tasks = filtered.map(task => this.mapToAsanaTask(task, projectGid));
+      for (const t of tasks) {
+        if (inheritedSection.has(t.gid)) t.section = inheritedSection.get(t.gid) ?? null;
+      }
 
-      logger.info({ projectGid, count: tasks.length }, 'Fetched my tasks for Asana project');
+      logger.info({ projectGid, count: tasks.length, subtaskCount }, 'Fetched my tasks for Asana project');
       this._connected = true;
-      return tasks;
+      return { tasks, subtaskCount, subtaskFetchIncomplete, subtaskWarnings };
     } catch (error) {
       logger.error({ error, projectGid }, 'Failed to fetch my tasks for Asana project');
       throw error;
@@ -410,7 +463,7 @@ export class AsanaMcpClient {
       notes: String(raw['notes'] || ''),
       projectName,
       projectGid,
-      dueOn: raw['due_on'] as string | null,
+      dueOn: normalizeDueDate(raw['due_on']),
       completed: Boolean(raw['completed']),
       permalink_url: String(raw['permalink_url'] || ''),
       tags,

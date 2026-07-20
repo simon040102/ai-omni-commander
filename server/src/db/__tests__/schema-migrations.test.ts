@@ -164,6 +164,43 @@ describe('schema migrations (v10–v17)', () => {
     expect(indexes.map(i => i.name)).toEqual(expect.arrayContaining(['idx_agent_outputs_agent', 'idx_agent_outputs_task']));
   });
 
+  it('v18: adds tasks.due_date on old DBs (ALTER), keeps data, and is idempotent', () => {
+    const db = new Database(':memory:');
+    db.pragma('foreign_keys = ON');
+    runMigrations(db);
+
+    // Simulate a pre-v18 DB: drop the column that the new base CREATE provides
+    db.exec('ALTER TABLE tasks DROP COLUMN due_date');
+    expect((db.prepare('PRAGMA table_info(tasks)').all() as any[]).some(c => c.name === 'due_date')).toBe(false);
+
+    db.prepare("INSERT INTO projects (id, name, working_dir) VALUES ('p1','P','/tmp')").run();
+    db.prepare("INSERT INTO tasks (id, project_id, title, label, task_type) VALUES ('t1','p1','T','frontend','other')").run();
+
+    runMigrations(db); // v18 ALTER TABLE ADD COLUMN
+
+    const cols = db.prepare('PRAGMA table_info(tasks)').all() as any[];
+    expect(cols.some(c => c.name === 'due_date')).toBe(true);
+    // Existing rows survive with NULL due_date
+    const row = db.prepare("SELECT title, due_date FROM tasks WHERE id='t1'").get() as any;
+    expect(row.title).toBe('T');
+    expect(row.due_date).toBeNull();
+
+    // Column accepts YYYY-MM-DD values
+    db.prepare("UPDATE tasks SET due_date = '2026-07-25' WHERE id='t1'").run();
+    expect((db.prepare("SELECT due_date FROM tasks WHERE id='t1'").get() as any).due_date).toBe('2026-07-25');
+
+    // Idempotent: another run keeps the column and the data
+    runMigrations(db);
+    expect((db.prepare("SELECT due_date FROM tasks WHERE id='t1'").get() as any).due_date).toBe('2026-07-25');
+  });
+
+  it('fresh DBs get tasks.due_date from the base CREATE TABLE', () => {
+    const db = new Database(':memory:');
+    runMigrations(db);
+    const cols = db.prepare('PRAGMA table_info(tasks)').all() as any[];
+    expect(cols.filter(c => c.name === 'due_date')).toHaveLength(1);
+  });
+
   it('creates project_notes and task_spec_versions tables', () => {
     const db = new Database(':memory:');
     db.pragma('foreign_keys = ON');

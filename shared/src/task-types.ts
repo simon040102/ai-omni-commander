@@ -40,6 +40,8 @@ export interface Task {
   assignee: string | null;
   /** Asana assignee GID */
   assigneeGid: string | null;
+  /** Asana due date (due_on, YYYY-MM-DD) — null if not set / not from Asana */
+  dueDate: string | null;
   createdAt: string;
   updatedAt: string;
 }

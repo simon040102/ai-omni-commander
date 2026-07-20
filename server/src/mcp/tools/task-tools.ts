@@ -14,6 +14,8 @@ import {
 } from '../flow-gate.js';
 import { parseJson, getAsanaPat, ASANA_API_BASE, ASANA_FETCH_TIMEOUT_MS } from '../helpers.js';
 import { detectLabel, detectTaskType } from '../../utils/taskClassification.js';
+import { normalizeDueDate, localTodayYmd, isOverdue } from '../../utils/dueDate.js';
+import { fetchAsanaSubtasksTree } from '../../utils/asanaSubtasks.js';
 import { runSpecChangeCheck, type SpecChangeTarget } from '../spec-change.js';
 import { parseTestCommands, getRequiredUnitTestItems, findLatestUnitTestVerification, listVerificationEntries, UNRELATED_TEST_FAILURE_RULE } from './verification-tools.js';
 import { getStalledHours, DEFAULT_STALE_THRESHOLD_HOURS } from '../stale-tasks.js';
@@ -41,6 +43,7 @@ interface TaskRow {
   custom_fields: string | null;
   assignee: string | null;
   assignee_gid: string | null;
+  due_date: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -106,6 +109,7 @@ export function registerTaskTools(server: McpServer): void {
           customFields: parseJson<Record<string, string>>(task.custom_fields, {}),
           assignee: task.assignee ?? null,
           assigneeGid: task.assignee_gid ?? null,
+          dueDate: task.due_date ?? null,
           createdAt: task.created_at,
         },
         project: project ? {
@@ -144,7 +148,7 @@ export function registerTaskTools(server: McpServer): void {
   // ── list_pending_tasks ────────────────────────────────────
   server.tool(
     'list_pending_tasks',
-    'List tasks for a project. Defaults to pending/queued/assigned. Supports filtering by taskType, label, keyword, section (exact Asana Section name, e.g. "UT"), tag (matches any one of the task\'s Asana tags), and custom status list. Returns sourceRef (Asana GID), plus section/tags/customFields dimensions.',
+    'List tasks for a project. Defaults to pending/queued/assigned. Supports filtering by taskType, label, keyword, section (exact Asana Section name, e.g. "UT"), tag (matches any one of the task\'s Asana tags), and custom status list. Returns sourceRef (Asana GID), section/tags/customFields dimensions, plus dueDate (Asana due_on, YYYY-MM-DD) and overdue (dueDate earlier than today).',
     {
       projectId: z.string().describe('The project ID'),
       taskType: z.string().optional().describe('Filter by task_type (bug/feature/refactor/other)'),
@@ -196,7 +200,7 @@ export function registerTaskTools(server: McpServer): void {
       const effOffset = offset ?? 0;
       const rows = db.prepare(`
         SELECT id, title, description, label, status, priority, task_type, preferred_model, parent_name, source_ref,
-               section, tags, custom_fields, assignee, assignee_gid
+               section, tags, custom_fields, assignee, assignee_gid, due_date
         FROM tasks
         ${where}
         ORDER BY priority DESC, created_at ASC
@@ -208,11 +212,16 @@ export function registerTaskTools(server: McpServer): void {
       // task with no report_output that nobody marked completed/failed shows a
       // growing stalledHours so orchestrators can resume_task or mark it failed.
       const threshold = staleThresholdHours ?? DEFAULT_STALE_THRESHOLD_HOURS;
+      const today = localTodayYmd();
       const tasks = rows.map(r => {
+        const { due_date, ...rest } = r as { due_date?: string | null } & Record<string, unknown>;
+        const dueDate = (due_date as string | null) ?? null;
         const base = {
-          ...r,
+          ...rest,
           tags: parseJson<string[]>(r['tags'], []),
           custom_fields: parseJson<Record<string, string>>(r['custom_fields'], {}),
+          dueDate,
+          overdue: isOverdue(dueDate, today),
         };
         if (r['status'] === 'in_progress') {
           const stalledHours = getStalledHours(db, r['id'] as string);
@@ -845,13 +854,14 @@ ${failedItems.map(i => `- ${i}`).join('\n')}
 
   server.tool(
     'sync_asana_tasks',
-    'Sync Asana tasks for a project. Fetches tasks from Asana and upserts into local DB. Checks last sync time — if synced within 5 minutes, returns cached. Use force=true to override.',
+    'Sync Asana tasks for a project. Fetches tasks from Asana (including subtasks not homed in the project, recursively up to depth 3) and upserts into local DB. Checks last sync time — if synced within 5 minutes, returns cached. Use force=true to override.',
     {
       projectId: z.string().describe('The project ID'),
       force: z.boolean().optional().describe('Force sync even if recently synced (default: false)'),
+      includeSubtasks: z.boolean().optional().describe('Recursively fetch subtasks not homed in the project (depth ≤3, incomplete only, ≤300 API calls per sync). Default: true. Set false for legacy project-list-only behavior.'),
     },
     { title: 'Sync Asana Tasks', readOnlyHint: false, destructiveHint: false, openWorldHint: true },
-    async ({ projectId, force }) => {
+    async ({ projectId, force, includeSubtasks }) => {
       const db = getMcpDb();
 
       try {
@@ -884,10 +894,20 @@ ${failedItems.map(i => `- ${i}`).join('\n')}
         const userData = await userRes.json() as { data?: { gid?: string } };
         const userGid = userData.data?.gid;
 
+        // --- Asana 分類維度抽取 ---
+        // Section：一張 task 在不同 project 會有多筆 membership，挑出本專案 (asana_project_gid) 對應的那筆
+        const extractSection = (task: Record<string, unknown>): string | null => {
+          const memberships = task['memberships'] as Array<{ project?: { gid?: string }; section?: { name?: string } }> | undefined;
+          if (!memberships || memberships.length === 0) return null;
+          const match = memberships.find(m => m.project?.gid === project.asana_project_gid) || memberships[0];
+          return match?.section?.name || null;
+        };
+
         // Fetch all project tasks with pagination.
         // memberships.section.name → 分區(Section)；memberships.project.gid 用來挑出本專案對應的 membership
         // tags.name → 標籤；custom_fields.* → 自訂欄位（用 display_value 落地最穩，enum 另取 enum_value.name 備援）
-        const optFields = 'name,notes,due_on,completed,permalink_url,memberships.section.name,memberships.project.gid,tags.name,assignee.name,assignee.gid,custom_fields.name,custom_fields.display_value,custom_fields.enum_value.name,parent.gid,parent.name,parent.notes';
+        // num_subtasks → subtask 遞迴抓取的種子判斷
+        const optFields = 'name,notes,due_on,completed,num_subtasks,permalink_url,memberships.section.name,memberships.project.gid,tags.name,assignee.name,assignee.gid,custom_fields.name,custom_fields.display_value,custom_fields.enum_value.name,parent.gid,parent.name,parent.notes';
         const allTasks: Array<Record<string, unknown>> = [];
         let nextUrl: string | null = `${ASANA_API_BASE}/tasks?project=${project.asana_project_gid}&limit=100&completed_since=now&opt_fields=${optFields}`;
 
@@ -902,26 +922,45 @@ ${failedItems.map(i => `- ${i}`).join('\n')}
           nextUrl = data.next_page?.uri || null;
         }
 
-        // Filter to tasks assigned to me
+        // --- Subtask 遞迴抓取（先抓全樹、後過濾 assignee）---
+        // 專案任務清單抓不到未 multi-home 進專案的 subtask；真正要派工的
+        // 工作項目（前端/串接/後端/UT）常在第二層 subtask。共用邏輯見
+        // utils/asanaSubtasks.ts（深度 ≤3、只抓未完成、gid 去重、≤300 支/次）。
+        // subtask 沒有 memberships → section 繼承根任務（下游依 section 分組時
+        // 才不會全部掉進「無分區」）。
+        const subtaskSections = new Map<string, string | null>();
+        let subtaskStats: { fetched: number; requests: number; truncated: boolean; warnings: string[] } | null = null;
+        if (includeSubtasks !== false) {
+          const tree = await fetchAsanaSubtasksTree(allTasks, {
+            fetchFn: (url: string) => fetch(url, {
+              headers: { 'Authorization': `Bearer ${asanaPat}`, 'Accept': 'application/json' },
+              signal: AbortSignal.timeout(ASANA_FETCH_TIMEOUT_MS),
+            }),
+            optFields,
+          });
+          const rootSections = new Map(allTasks.map(t => [String(t['gid'] || ''), extractSection(t)] as const));
+          for (const entry of tree.entries) {
+            const gid = String(entry.task['gid'] || '');
+            if (!gid) continue;
+            subtaskSections.set(gid, rootSections.get(entry.rootGid) ?? null);
+            allTasks.push(entry.task);
+          }
+          subtaskStats = { fetched: tree.entries.length, requests: tree.requestCount, truncated: tree.truncated, warnings: tree.warnings };
+        }
+
+        // Filter to tasks assigned to me — 以「任務本身的 assignee」判：
+        // 工作項目 subtask 指派給我、其母任務指派別人 → 仍要收（樹已先抓全）
         const myTasks = userGid ? allTasks.filter(t => (t['assignee'] as Record<string, unknown> | null)?.['gid'] === userGid) : allTasks;
 
         // Get existing Asana tasks in local DB
-        const existingTasks = db.prepare('SELECT id, title, description, label, status, source_ref, parent_name, section, tags, custom_fields FROM tasks WHERE project_id = ? AND source = ?').all(projectId, 'asana') as Array<{
+        const existingTasks = db.prepare('SELECT id, title, description, label, status, source_ref, parent_name, section, tags, custom_fields, due_date FROM tasks WHERE project_id = ? AND source = ?').all(projectId, 'asana') as Array<{
           id: string; title: string; description: string | null; label: string; status: string; source_ref: string | null; parent_name: string | null;
-          section: string | null; tags: string | null; custom_fields: string | null;
+          section: string | null; tags: string | null; custom_fields: string | null; due_date: string | null;
         }>;
         const existingByGid = new Map(existingTasks.filter(t => t.source_ref).map(t => [t.source_ref!, t]));
 
         let newCount = 0, updatedCount = 0;
 
-        // --- Asana 分類維度抽取 ---
-        // Section：一張 task 在不同 project 會有多筆 membership，挑出本專案 (asana_project_gid) 對應的那筆
-        const extractSection = (task: Record<string, unknown>): string | null => {
-          const memberships = task['memberships'] as Array<{ project?: { gid?: string }; section?: { name?: string } }> | undefined;
-          if (!memberships || memberships.length === 0) return null;
-          const match = memberships.find(m => m.project?.gid === project.asana_project_gid) || memberships[0];
-          return match?.section?.name || null;
-        };
         // Tags：字串陣列
         const extractTags = (task: Record<string, unknown>): string[] => {
           const tags = task['tags'] as Array<{ name?: string }> | undefined;
@@ -954,13 +993,15 @@ ${failedItems.map(i => `- ${i}`).join('\n')}
             const parentRaw = asanaTask['parent'] as { name?: string } | null | undefined;
             const parentName = parentRaw?.name || null;
 
-            // Asana 分類維度
-            const section = extractSection(asanaTask);
+            // Asana 分類維度（subtask 無 memberships → 繼承根任務 section）
+            const section = subtaskSections.has(gid) ? (subtaskSections.get(gid) ?? null) : extractSection(asanaTask);
             const tagsJson = JSON.stringify(extractTags(asanaTask));
             const customFieldsJson = JSON.stringify(extractCustomFields(asanaTask));
             const assigneeRaw = asanaTask['assignee'] as { name?: string; gid?: string } | null | undefined;
             const assigneeName = assigneeRaw?.name || null;
             const assigneeGid = assigneeRaw?.gid || null;
+            // 截止日期（due_on 原樣 YYYY-MM-DD；非字串一律 null）
+            const dueDate = normalizeDueDate(asanaTask['due_on']);
 
             const existing = existingByGid.get(gid);
 
@@ -971,17 +1012,18 @@ ${failedItems.map(i => `- ${i}`).join('\n')}
               const sectionChanged = (existing.section || null) !== (section || null);
               const tagsChanged = (existing.tags || '[]') !== tagsJson;
               const cfChanged = (existing.custom_fields || '{}') !== customFieldsJson;
+              const dueChanged = (existing.due_date ?? null) !== dueDate;
 
-              if (titleChanged || descChanged || parentChanged || sectionChanged || tagsChanged || cfChanged) {
-                db.prepare("UPDATE tasks SET title = ?, description = ?, parent_name = ?, section = ?, tags = ?, custom_fields = ?, assignee = ?, assignee_gid = ?, updated_at = datetime('now') WHERE id = ?")
-                  .run(name, description || null, parentName, section, tagsJson, customFieldsJson, assigneeName, assigneeGid, existing.id);
+              if (titleChanged || descChanged || parentChanged || sectionChanged || tagsChanged || cfChanged || dueChanged) {
+                db.prepare("UPDATE tasks SET title = ?, description = ?, parent_name = ?, section = ?, tags = ?, custom_fields = ?, assignee = ?, assignee_gid = ?, due_date = ?, updated_at = datetime('now') WHERE id = ?")
+                  .run(name, description || null, parentName, section, tagsJson, customFieldsJson, assigneeName, assigneeGid, dueDate, existing.id);
                 updatedCount++;
               }
             } else {
               const taskId = crypto.randomUUID();
-              db.prepare(`INSERT INTO tasks (id, project_id, title, description, label, status, priority, task_type, source, source_ref, parent_name, section, tags, custom_fields, assignee, assignee_gid, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, 'asana', ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`)
-                .run(taskId, projectId, name, description || null, detectLabel(name), detectTaskType(name, notes), gid, parentName, section, tagsJson, customFieldsJson, assigneeName, assigneeGid);
+              db.prepare(`INSERT INTO tasks (id, project_id, title, description, label, status, priority, task_type, source, source_ref, parent_name, section, tags, custom_fields, assignee, assignee_gid, due_date, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, 'asana', ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`)
+                .run(taskId, projectId, name, description || null, detectLabel(name), detectTaskType(name, notes), gid, parentName, section, tagsJson, customFieldsJson, assigneeName, assigneeGid, dueDate);
               newCount++;
             }
           }
@@ -1025,14 +1067,19 @@ ${failedItems.map(i => `- ${i}`).join('\n')}
           }
         }
 
+        const subtaskNote = subtaskStats
+          ? `（含 subtask ${subtaskStats.fetched} 筆${subtaskStats.truncated ? '，已截斷' : ''}）`
+          : '（includeSubtasks=false，未抓 subtask）';
+
         return {
           content: [{
             type: 'text' as const,
             text: JSON.stringify({
-              message: `Asana sync completed: +${newCount} new, ~${updatedCount} updated. Total fetched: ${myTasks.length}. Last sync: ${syncTime}`,
+              message: `Asana sync completed: +${newCount} new, ~${updatedCount} updated. Total fetched: ${myTasks.length}${subtaskNote}. Last sync: ${syncTime}`,
               newTasks: newCount,
               updatedTasks: updatedCount,
               totalFetched: myTasks.length,
+              subtasks: subtaskStats ?? { skipped: 'includeSubtasks=false' },
               lastSyncAt: syncTime,
               specChangeCheck,
             }, null, 2),

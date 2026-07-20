@@ -28,11 +28,11 @@ function seedProject(db: Database.Database) {
   db.prepare(`INSERT INTO projects (id, name, working_dir) VALUES (?, ?, ?)`).run('proj-1', 'Test', '/tmp');
 }
 
-function seedTask(db: Database.Database, id: string, opts: { taskType?: string; status?: string; createdAt?: string; label?: string } = {}) {
+function seedTask(db: Database.Database, id: string, opts: { taskType?: string; status?: string; createdAt?: string; label?: string; dueDate?: string | null } = {}) {
   db.prepare(`
-    INSERT INTO tasks (id, project_id, title, label, task_type, status, created_at, updated_at)
-    VALUES (?, 'proj-1', ?, ?, ?, ?, ?, datetime('now'))
-  `).run(id, `Task ${id}`, opts.label || 'backend', opts.taskType || 'feature', opts.status || 'pending', opts.createdAt || '2026-01-01 00:00:00');
+    INSERT INTO tasks (id, project_id, title, label, task_type, status, created_at, updated_at, due_date)
+    VALUES (?, 'proj-1', ?, ?, ?, ?, ?, datetime('now'), ?)
+  `).run(id, `Task ${id}`, opts.label || 'backend', opts.taskType || 'feature', opts.status || 'pending', opts.createdAt || '2026-01-01 00:00:00', opts.dueDate ?? null);
 }
 
 describe('insight-tools', () => {
@@ -101,6 +101,51 @@ describe('insight-tools', () => {
     it('returns error for unknown project', async () => {
       const result = await callTool(server, 'next_task', { projectId: 'nope' });
       expect(result.isError).toBe(true);
+    });
+
+    it('within the same priority tier, earlier due_date wins and null due_date sorts last', async () => {
+      seedProject(testDb);
+      // 同為 feature：due 越早越前，無 due 排最後（即使建立時間最早）
+      seedTask(testDb, 'no-due-oldest', { createdAt: '2025-01-01 00:00:00' });
+      seedTask(testDb, 'due-later', { dueDate: '2999-12-31', createdAt: '2026-03-01 00:00:00' });
+      seedTask(testDb, 'due-sooner', { dueDate: '2000-01-01', createdAt: '2026-06-01 00:00:00' });
+
+      const data = JSON.parse((await callTool(server, 'next_task', { projectId: 'proj-1' })).content[0].text);
+      expect(data.recommended.id).toBe('due-sooner');
+      expect(data.alternatives.map((a: any) => a.id)).toEqual(['due-later', 'no-due-oldest']);
+      expect(data.recommended.dueDate).toBe('2000-01-01');
+    });
+
+    it('bug priority is not broken by an overdue feature; due_date orders bugs among themselves', async () => {
+      seedProject(testDb);
+      seedTask(testDb, 'overdue-feature', { dueDate: '2000-01-01' });
+      seedTask(testDb, 'bug-no-due', { taskType: 'bug', createdAt: '2026-01-01 00:00:00' });
+      seedTask(testDb, 'bug-due', { taskType: 'bug', dueDate: '2999-01-01', createdAt: '2026-02-01 00:00:00' });
+
+      const data = JSON.parse((await callTool(server, 'next_task', { projectId: 'proj-1' })).content[0].text);
+      // bug 仍然壓過逾期 feature；同為 bug 時有 due 的排前（null 最後）
+      expect(data.recommended.id).toBe('bug-due');
+      expect(data.alternatives.map((a: any) => a.id)).toEqual(['bug-no-due', 'overdue-feature']);
+    });
+
+    it('recommendation reason carries due info（已逾期/N 天後到期）', async () => {
+      seedProject(testDb);
+      seedTask(testDb, 'overdue-bug', { taskType: 'bug', dueDate: '2000-01-01' });
+      seedTask(testDb, 'future-feature', { dueDate: '2999-12-31' });
+      seedTask(testDb, 'plain-feature', {});
+
+      const data = JSON.parse((await callTool(server, 'next_task', { projectId: 'proj-1' })).content[0].text);
+      expect(data.recommended.id).toBe('overdue-bug');
+      expect(data.recommended.reason).toContain('bug 修復優先');
+      expect(data.recommended.reason).toMatch(/已逾期 \d+ 天/);
+
+      const future = data.alternatives.find((a: any) => a.id === 'future-feature');
+      expect(future.reason).toMatch(/\d+ 天後到期/);
+      expect(future.dueDate).toBe('2999-12-31');
+
+      const plain = data.alternatives.find((a: any) => a.id === 'plain-feature');
+      expect(plain.reason).toContain('建立時間較早');
+      expect(plain.dueDate).toBeNull();
     });
 
     it('surfaces stalled in_progress tasks alongside the recommendation, most stalled first', async () => {
