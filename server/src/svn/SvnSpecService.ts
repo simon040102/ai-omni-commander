@@ -6,7 +6,7 @@ import iconv from 'iconv-lite';
 import mammoth from 'mammoth';
 import type { SvnConfig, SvnCredentials, DocType, SpecFolderConfig } from '@omni/shared';
 import type { DocumentParser } from '../documents/DocumentParser.js';
-import { prepareFolder, findSpecFiles, getFileVersion } from '../documents/FolderSpecSource.js';
+import { prepareFolder, findSpecFiles, getFileVersion, specDocLabel } from '../documents/FolderSpecSource.js';
 import { extractChineseNames, decideDedupe, classifyPrepareResult, type ExistingDocInfo } from '../documents/SpecFetchPolicy.js';
 import { bindDocumentToTask, getDocumentsForTask } from '../db/queries/taskDocuments.js';
 import { recordTaskSpecVersion } from '../db/queries/taskSpecVersions.js';
@@ -357,7 +357,7 @@ export class SvnSpecService {
             continue;
           }
 
-          const labeledFilename = `[${file.docType}] ${filename}`;
+          const labeledFilename = `[${specDocLabel(filename, file.docType)}] ${filename}`;
           const doc = await this.documentParser.saveFromBuffer(
             projectId, labeledFilename, buffer, file.docType,
             { source: 'folder', sourceUrl: sourceRef, svnLastModified: version, parsedText: parsedText || undefined, subFolder },
@@ -548,6 +548,11 @@ export class SvnSpecService {
 
     if (ext === '.pdf') {
       return `[PDF file - use Read tool to view: ${filePath}]`;
+    }
+
+    if (ext === '.html' || ext === '.htm') {
+      // Axure 原型：原樣存路徑指標（不 inline，檔案可能很大），agent 用 Read tool 讀
+      return `[HTML file - use Read tool to view: ${filePath}]`;
     }
 
     if (ext === '.doc') {

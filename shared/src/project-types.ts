@@ -107,7 +107,9 @@ export interface AgentPlan {
   approvedAt?: string;
 }
 
-export type DocType = 'SA' | 'SD';
+// 'other' 已是 documents.doc_type CHECK 的合法值（DEFAULT 'other'）與 get_documents 列舉值；
+// HTML 原型（Axure）一律歸 'other'，不新增 doc_type、零 schema migration。
+export type DocType = 'SA' | 'SD' | 'other';
 
 export interface Document {
   id: string;

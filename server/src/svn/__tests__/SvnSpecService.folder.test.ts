@@ -122,6 +122,41 @@ describe('SvnSpecService.fetchFolderSpecsForTask (folder source, Web side)', () 
     expect(count.cnt).toBe(1);
   });
 
+  it('.html Axure 原型 → 綁為 doc_type=other、[HTML] 標記、原樣存不轉檔', async () => {
+    const specDir = path.join(tmpBase, 'html-specs');
+    fs.mkdirSync(specDir, { recursive: true });
+    const htmlPath = path.join(specDir, 'SM009_系統參數放行.html');
+    const htmlBody = '<html><body>系統參數放行原型</body></html>';
+    fs.writeFileSync(htmlPath, htmlBody, 'utf-8');
+    // 同資料夾另放真 SA 規格，驗證 HTML 不會取代 SA
+    fs.writeFileSync(path.join(specDir, 'SM009_SA_需求規格.md'), '# SM009 SA', 'utf-8');
+
+    seed(testDb, 'proj-w5', 'task-w5', 'SM009', 'SM009 系統參數放行_前端');
+
+    const r = await svc.fetchFolderSpecsForTask(
+      'proj-w5', 'task-w5', 'SM009', [{ path: specDir, gitPull: false }], 'frontend',
+    );
+    expect(r.errors).toEqual([]);
+    expect(r.docIds).toHaveLength(2);
+
+    const html = testDb.prepare(
+      "SELECT * FROM documents WHERE project_id = 'proj-w5' AND filename LIKE '%.html'",
+    ).get() as any;
+    expect(html).toBeTruthy();
+    expect(html.doc_type).toBe('other');           // HTML 歸 other，不充當 SA/SD
+    expect(html.filename).toBe('[HTML] SM009_系統參數放行.html');
+    expect(html.parsed_text).toContain('[HTML file - use Read tool to view:');
+    // 原樣存：磁碟檔案內容與原始 HTML 完全一致（未轉 md）
+    expect(fs.readFileSync(html.file_path, 'utf-8')).toBe(htmlBody);
+    expect(fs.existsSync(html.file_path.replace(/\.html$/, '.md'))).toBe(false);
+
+    // 真 SA 規格仍以 SA 綁定（前端規格齊全檢查靠這個，HTML 不充數）
+    const sa = testDb.prepare(
+      "SELECT doc_type FROM documents WHERE project_id = 'proj-w5' AND filename LIKE '%.md'",
+    ).get() as any;
+    expect(sa.doc_type).toBe('SA');
+  });
+
   it('unusable folder (missing path) → classified as error, not warning', async () => {
     seed(testDb, 'proj-w4', 'task-w4', 'WA05', 'WA05 查詢作業_前端');
 

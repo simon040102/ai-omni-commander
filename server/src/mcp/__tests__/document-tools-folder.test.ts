@@ -130,6 +130,41 @@ describe('fetch_svn_specs — folder source', () => {
     expect(doc.doc_type).toBe('SA');
   });
 
+  it('.html Axure 原型 → 綁為 doc_type=other、[HTML] 標記、原樣存不轉檔', async () => {
+    const htmlDir = path.join(tmpBase, 'html-specs');
+    fs.mkdirSync(htmlDir, { recursive: true });
+    const htmlBody = '<html><body>系統參數放行原型</body></html>';
+    fs.writeFileSync(path.join(htmlDir, 'SM009_系統參數放行.html'), htmlBody, 'utf-8');
+    fs.writeFileSync(path.join(htmlDir, 'SM009_SA_需求規格.md'), '# SM009 SA', 'utf-8');
+
+    seedProjectWithFolders(testDb, 'proj-fh', [{ path: htmlDir, gitPull: false }]);
+    testDb.prepare(`INSERT INTO tasks (id, project_id, title, label, task_type, parent_name) VALUES (?, ?, ?, ?, ?, ?)`).run(
+      'task-fh', 'proj-fh', 'SM009 系統參數放行_前端', 'frontend', 'feature', 'SM009',
+    );
+
+    const result = await callTool(server, 'fetch_svn_specs', { projectId: 'proj-fh', taskId: 'task-fh' });
+    expect(result.isError).toBeUndefined();
+    const text = result.content[0].text as string;
+    expect(text).toContain('[HTML] SM009_系統參數放行.html');
+    expect(text).toContain('(folder)');
+
+    const html = testDb.prepare(
+      "SELECT * FROM documents WHERE project_id = 'proj-fh' AND source_url LIKE '%.html'",
+    ).get() as any;
+    expect(html).toBeTruthy();
+    expect(html.doc_type).toBe('other');            // HTML 歸 other，不充當 SA/SD
+    expect(html.filename).toBe('[HTML] SM009_系統參數放行.html');
+    expect(html.parsed_text).toContain('[HTML file - use Read tool to view:');
+    // 原樣存不轉檔
+    expect(fs.readFileSync(html.file_path, 'utf-8')).toBe(htmlBody);
+
+    // 真 SA 規格仍以 SA 綁定（HTML 不充數）
+    const sa = testDb.prepare(
+      "SELECT doc_type FROM documents WHERE project_id = 'proj-fh' AND source_url LIKE '%.md'",
+    ).get() as any;
+    expect(sa.doc_type).toBe('SA');
+  });
+
   it('no spec sources configured at all → explicit error', async () => {
     testDb.prepare(`INSERT INTO projects (id, name, working_dir) VALUES ('proj-f4', 'None', '/tmp')`).run();
     seedTask(testDb, 'task-f4', 'proj-f4', 'WA05');

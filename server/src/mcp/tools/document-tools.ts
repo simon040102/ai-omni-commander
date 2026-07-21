@@ -14,7 +14,7 @@ import iconv from 'iconv-lite';
 import { getMcpDb } from '../db.js';
 import { getDataDir, getAsanaPat, ASANA_API_BASE, ASANA_FETCH_TIMEOUT_MS, truncateResponse } from '../helpers.js';
 import {
-  prepareFolder, findSpecFiles, getFileVersion, readSpecFolders, filterSafeSpecFolders,
+  prepareFolder, findSpecFiles, getFileVersion, readSpecFolders, filterSafeSpecFolders, specDocLabel, isHtmlSpecFile,
   type FolderSpecFile, type SpecFolderConfig,
 } from '../../documents/FolderSpecSource.js';
 import {
@@ -626,7 +626,7 @@ export function registerDocumentTools(server: McpServer): void {
 
             // New document — copy into uploads/{projectId}/{subFolder}/
             const docId = randomUUID();
-            const labeledFilename = `[${docType}] ${filename}`;
+            const labeledFilename = `[${specDocLabel(filename, docType)}] ${filename}`;
             const filePath = path.join(targetDir, `${docId}-${labeledFilename}`);
             fs.writeFileSync(filePath, buffer);
             const parsed = await buildFolderParsedText(buffer, docId, targetDir, filename, filePath);
@@ -673,7 +673,8 @@ export function registerDocumentTools(server: McpServer): void {
 
       const lines = results.map(r => {
         const mdNote = r.mdPath ? ` → ${path.basename(r.mdPath)}` : '';
-        return `- [${r.docType}] ${r.filename}${mdNote} (${r.source})`;
+        // 顯示標記與綁定檔名一致：HTML 原型標 [HTML]，其餘用 docType
+        return `- [${specDocLabel(r.filename, r.docType)}] ${r.filename}${mdNote} (${r.source})`;
       });
 
       return {
@@ -703,6 +704,8 @@ async function buildFolderParsedText(
     }
   }
   if (lower.endsWith('.pdf')) return { parsedText: `[PDF file - use Read tool to view: ${savedPath}]` };
+  // Axure 原型：原樣存路徑指標（不 inline，檔案可能很大），agent 用 Read tool 讀
+  if (isHtmlSpecFile(filename)) return { parsedText: `[HTML file - use Read tool to view: ${savedPath}]` };
   if (lower.endsWith('.md') || lower.endsWith('.txt')) return { parsedText: buffer.toString('utf-8') };
   return { parsedText: `[Binary file saved at: ${savedPath}]` };
 }

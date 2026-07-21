@@ -220,11 +220,27 @@ export async function getFileVersion(
 
 // ── spec file matching（沿用 SVN 的 root code 比對邏輯）──────
 
-const SPEC_EXTENSIONS = new Set(['.docx', '.doc', '.pdf', '.md', '.txt']);
+// .html/.htm = Axure 原型（歸 docType 'other'，見 inferDocTypeFromFilename）；與其他規格
+// 檔同類：不轉檔、原樣存路徑指標，agent 用 Read tool 讀。
+const SPEC_EXTENSIONS = new Set(['.docx', '.doc', '.pdf', '.md', '.txt', '.html', '.htm']);
 const EXCLUDED_DIRS = new Set(['.git', '.svn', 'node_modules']);
 
 export function hasSpecExtension(filename: string): boolean {
   return SPEC_EXTENSIONS.has(path.extname(filename).toLowerCase());
+}
+
+/** 檔案是否為 HTML 原型（Axure）。 */
+export function isHtmlSpecFile(filename: string): boolean {
+  const ext = path.extname(filename).toLowerCase();
+  return ext === '.html' || ext === '.htm';
+}
+
+/**
+ * 綁定時的檔名標記前綴（比照 [SA]/[SD] 慣例）：
+ * .html/.htm → `HTML`（讓文件清單看得出這是 Axure 原型）；其餘用 docType（SA/SD/other）。
+ */
+export function specDocLabel(filename: string, docType: string): string {
+  return isHtmlSpecFile(filename) ? 'HTML' : docType;
 }
 
 /** 從功能代碼取字母前綴：OV0101 → OV。 */
@@ -246,10 +262,13 @@ function escapeRegex(str: string): string {
 
 /**
  * 檔名 SA/SD 慣例推斷：
- * 檔名（或路徑段）含獨立的 SA/SD token、或中文「系統分析/需求規格 vs 系統設計」字樣。
- * 判斷不到時預設 SD（與 DocumentParser 預設一致）。
+ * - .html/.htm（Axure 原型）→ 一律 'other'（**優先於 SA/SD token 判斷**，避免路徑段裡的
+ *   「SA(前端)」把原型誤判成 SA；HTML 絕不可充當 SA/SD 規格）
+ * - 檔名（或路徑段）含獨立的 SA/SD token、或中文「系統分析/需求規格 vs 系統設計」字樣
+ * - 判斷不到時預設 SD（與 DocumentParser 預設一致）
  */
-export function inferDocTypeFromFilename(filename: string): 'SA' | 'SD' {
+export function inferDocTypeFromFilename(filename: string): 'SA' | 'SD' | 'other' {
+  if (isHtmlSpecFile(filename)) return 'other';
   const upper = filename.toUpperCase();
   if (/(?<![A-Z0-9])SD(?![A-Z0-9])/.test(upper)) return 'SD';
   if (/(?<![A-Z0-9])SA(?![A-Z0-9])/.test(upper)) return 'SA';
@@ -265,7 +284,7 @@ export interface FolderSpecFile {
   relPath: string;
   /** 檔案 mtime（ISO） */
   mtimeIso: string;
-  docType: 'SA' | 'SD';
+  docType: 'SA' | 'SD' | 'other';
 }
 
 /** 遞迴列出資料夾下所有規格副檔名檔案的相對路徑（排除 .git / node_modules / old）。 */

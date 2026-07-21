@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process';
 import {
   prepareFolder, findSpecFiles, getFileVersion, inferDocTypeFromFilename,
   isGitRepo, assertAllowedGitArgs, validateSpecFolders, readSpecFolders,
-  pathsOverlap, isPathUnder, filterSafeSpecFolders,
+  pathsOverlap, isPathUnder, filterSafeSpecFolders, specDocLabel, isHtmlSpecFile, hasSpecExtension,
   type GitRunner, type GitResult,
 } from '../FolderSpecSource.js';
 
@@ -286,6 +286,51 @@ describe('inferDocTypeFromFilename', () => {
   it('no token → defaults to SD, and SAMPLE-like words are not treated as SA', () => {
     expect(inferDocTypeFromFilename('SPEC_OV02_發票.docx')).toBe('SD');
     expect(inferDocTypeFromFilename('SAMPLE_OV02.docx')).toBe('SD');
+  });
+
+  it('HTML/HTM (Axure 原型) → other，且優先於 SA/SD token（路徑段的 SA(前端) 不誤判）', () => {
+    expect(inferDocTypeFromFilename('系統參數放行.html')).toBe('other');
+    expect(inferDocTypeFromFilename('SM009_原型.HTM')).toBe('other');
+    // 路徑含 "SA(前端)" token，但副檔名為 .html → 必須是 other，不是 SA
+    expect(inferDocTypeFromFilename('SA(前端)/SM/SM009/系統參數放行.html')).toBe('other');
+  });
+});
+
+// ── HTML 原型支援（.html/.htm）───────────────────────────────
+
+describe('HTML 原型副檔名', () => {
+  it('hasSpecExtension / isHtmlSpecFile 認得 .html 與 .htm', () => {
+    expect(hasSpecExtension('系統參數放行.html')).toBe(true);
+    expect(hasSpecExtension('系統參數放行.htm')).toBe(true);
+    expect(isHtmlSpecFile('系統參數放行.html')).toBe(true);
+    expect(isHtmlSpecFile('系統參數放行.HTM')).toBe(true);
+    expect(isHtmlSpecFile('SPEC_WA05.docx')).toBe(false);
+    expect(isHtmlSpecFile('spec.pdf')).toBe(false);
+  });
+
+  it('specDocLabel：html/htm 標 HTML，其餘沿用 docType 標記', () => {
+    expect(specDocLabel('系統參數放行.html', 'other')).toBe('HTML');
+    expect(specDocLabel('SM009_原型.HTM', 'other')).toBe('HTML');
+    expect(specDocLabel('SPEC_WA05.docx', 'SA')).toBe('SA');
+    expect(specDocLabel('SPEC_WA05.md', 'SD')).toBe('SD');
+  });
+
+  it('findSpecFiles 收 .html/.htm 原型，docType 判為 other', () => {
+    const htmlDir = mkdir('html-proto');
+    writeFile(htmlDir, 'SM009/系統參數放行.html', '<html>proto</html>');
+    writeFile(htmlDir, 'SM009_舊版.htm', '<html>proto</html>');
+    writeFile(htmlDir, 'SM009_需求規格.md', '# spec');
+
+    const files = findSpecFiles(htmlDir, 'SM009');
+    const byRel = new Map(files.map(f => [f.relPath, f.docType]));
+    expect([...byRel.keys()].sort()).toEqual([
+      'SM009/系統參數放行.html',
+      'SM009_舊版.htm',
+      'SM009_需求規格.md',
+    ]);
+    expect(byRel.get('SM009/系統參數放行.html')).toBe('other');
+    expect(byRel.get('SM009_舊版.htm')).toBe('other');
+    expect(byRel.get('SM009_需求規格.md')).toBe('SA'); // 真 SA 規格仍判 SA（HTML 不充數）
   });
 });
 
