@@ -62,6 +62,12 @@ export default function MermaidRenderer({ content, height = '60vh', filename = '
         mermaid.initialize({
           startOnLoad: false,
           theme: isDark ? 'dark' : 'default',
+          // 放寬 Mermaid 的防呆上限，讓大型 schema 的 ER 圖完整畫出（避免
+          // 「Maximum text size in diagram exceeded」粉紅框）。預設 maxTextSize
+          // 50000 / maxEdges 500 對數十張表的 schema 太小。上限拉高只是讓圖較大、
+          // 渲染稍慢，不影響正確性；使用者可用縮放/fit/匯出檢視。
+          maxTextSize: 1_000_000,
+          maxEdges: 2000,
           // 'antiscript': keeps HTML labels rendering but strips <script> — a
           // hard upgrade from the previous 'loose' (no sanitization at all).
           // NOT 'strict': 15/90 existing data/sa-flows/*.mmd use <br/> line
