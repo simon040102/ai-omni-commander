@@ -262,7 +262,7 @@ export function registerContextTools(server: McpServer): void {
   // ── save_project_note ─────────────────────────────────────
   server.tool(
     'save_project_note',
-    '記錄專案經驗筆記（前人踩坑教訓）。**開發中發現此專案特有的坑/慣例（規格沒寫但必須遵守的——如特殊 build 條件、DB 命名慣例、UI 元件限制），用此工具記下來讓之後的任務受益**：筆記會自動注入該專案後續任務的 execution plan。',
+    '記錄專案經驗筆記（前人踩坑教訓）。**開發中發現此專案特有的坑/慣例（規格沒寫但必須遵守的——如特殊 build 條件、DB 命名慣例、UI 元件限制），用此工具記下來讓之後的任務受益**：筆記會自動注入該專案後續任務的 execution plan。\n\n**寫入紀律（筆記會全量注入後續 plan，寫太肥/重複會稀釋重點、耗 token，務必遵守）：**\n1. **一則一個重點、精簡可操作**——一兩句講清坑與正確做法即可，不要長篇說明。\n2. **附出處**——元件檔+行號／規格章節／坑的觸發條件，讓後人能核對。**無出處的觀察不記**。\n3. **不要重複既有筆記**——寫之前先 list_project_notes 看有沒有涵蓋；同主題能補進既有筆記（視情況）就不要新增一則。\n4. **過時就 archive**——發現筆記描述的坑已不成立（元件／程式已改），用 archive_project_note 清掉，不要留著誤導。',
     {
       projectId: z.string().describe('專案 ID'),
       content: z.string().min(1).describe('筆記內容：具體描述坑/慣例與正確做法（一則筆記一個重點）'),

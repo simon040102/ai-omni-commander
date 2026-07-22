@@ -27,6 +27,8 @@ const DEFAULT_MAX_DEPTH = 3;
 const DEFAULT_MAX_REQUESTS = 300;
 const DEFAULT_CONCURRENCY = 4;
 const RETRY_AFTER_CAP_MS = 60_000;
+/** Asana 自訂欄位「功能代碼」的欄位名——subtask 沒填時往樹上繼承最近祖先的值。 */
+const DEFAULT_FUNCTION_CODE_FIELD = '功能代碼';
 
 /** Minimal structural type satisfied by both undici Response and test doubles. */
 export interface AsanaResponseLike {
@@ -64,6 +66,8 @@ export interface FetchSubtasksOptions {
   knownGids?: Iterable<string>;
   /** 可注入的 sleep（測 429 退避用）。 */
   sleep?: (ms: number) => Promise<void>;
+  /** 要往樹上繼承的功能代碼 custom field 名（預設「功能代碼」）。 */
+  functionCodeField?: string;
 }
 
 export interface FetchSubtasksResult {
@@ -83,6 +87,39 @@ interface FrontierItem {
   rootGid: string;
   /** 最近的有截止日祖先的 due_on（含自己）——subtask 沒填日期時往下繼承。 */
   inheritedDue: string | null;
+  /** 最近的有「功能代碼」祖先的值（含自己）——subtask 沒填時往下繼承。 */
+  inheritedFunctionCode: string | null;
+}
+
+/** 從 raw task 的 custom_fields 陣列讀「功能代碼」欄位值（display_value 優先、enum_value.name 備援）；非空才算有值。 */
+function ownFunctionCode(t: Record<string, unknown>, fieldName: string): string | null {
+  const cfs = t['custom_fields'] as Array<{ name?: string; display_value?: string | null; enum_value?: { name?: string } | null }> | undefined;
+  if (!Array.isArray(cfs)) return null;
+  for (const cf of cfs) {
+    if (!cf || cf.name !== fieldName) continue;
+    const v = cf.display_value ?? cf.enum_value?.name ?? null;
+    if (v !== null && v !== undefined && String(v).trim() !== '') return String(v);
+  }
+  return null;
+}
+
+/**
+ * 把繼承來的功能代碼寫回 subtask 的 custom_fields，讓兩條同步路徑（MCP/Web）
+ * 落地時自然抽到（兩者都讀 custom_fields[].display_value）。只在 subtask 自己
+ * 沒有此欄位值時呼叫，故直接設 display_value 不會蓋掉任何有效人工值。
+ */
+function setInheritedFunctionCode(sub: Record<string, unknown>, fieldName: string, value: string): void {
+  let cfs = sub['custom_fields'] as Array<{ name?: string; display_value?: string | null; enum_value?: { name?: string } | null }> | undefined;
+  if (!Array.isArray(cfs)) {
+    cfs = [];
+    sub['custom_fields'] = cfs;
+  }
+  const existing = cfs.find(cf => cf && cf.name === fieldName);
+  if (existing) {
+    existing.display_value = value;
+  } else {
+    cfs.push({ name: fieldName, display_value: value });
+  }
 }
 
 interface AsanaPage {
@@ -131,6 +168,7 @@ export async function fetchAsanaSubtasksTree(
   const maxRequests = options.maxRequests ?? DEFAULT_MAX_REQUESTS;
   const concurrency = options.concurrency ?? DEFAULT_CONCURRENCY;
   const sleep = options.sleep ?? defaultSleep;
+  const functionCodeField = options.functionCodeField ?? DEFAULT_FUNCTION_CODE_FIELD;
   const { fetchFn, optFields } = options;
 
   const seen = new Set<string>(options.knownGids ?? []);
@@ -188,6 +226,7 @@ export async function fetchAsanaSubtasksTree(
       name: String(t['name'] || ''),
       rootGid: String(t['gid'] || ''),
       inheritedDue: ownDue(t),
+      inheritedFunctionCode: ownFunctionCode(t, functionCodeField),
     }))
     .filter(t => !!t.gid);
 
@@ -218,10 +257,18 @@ export async function fetchAsanaSubtasksTree(
             sub['due_on'] = effectiveDue;
           }
 
+          // 功能代碼繼承：subtask 自己沒填 → 用「最近有功能代碼的祖先」的值
+          // （最近祖先優先於更上層粗碼）。寫回 custom_fields，兩條同步路徑自然落地。
+          const subOwnFC = ownFunctionCode(sub, functionCodeField);
+          const effectiveFC = subOwnFC ?? parent.inheritedFunctionCode;
+          if (!subOwnFC && effectiveFC) {
+            setInheritedFunctionCode(sub, functionCodeField, effectiveFC);
+          }
+
           entries.push({ task: sub, rootGid: parent.rootGid, depth });
 
           if (Number(sub['num_subtasks'] || 0) > 0) {
-            next.push({ gid, name: String(sub['name'] || ''), rootGid: parent.rootGid, inheritedDue: effectiveDue });
+            next.push({ gid, name: String(sub['name'] || ''), rootGid: parent.rootGid, inheritedDue: effectiveDue, inheritedFunctionCode: effectiveFC });
           }
         }
         url = page.next_page?.uri || null;

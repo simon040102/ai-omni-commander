@@ -482,6 +482,23 @@ describe('compliance-tools', () => {
       // P1：回寫閉環（save_compliance_review 之後記錄可重用元件級事實）
       expect(text).toContain('save_project_note(projectId="proj-1", category="component"');
       expect(text).toContain('無出處的觀察不記');
+      // 回寫紀律收緊：先對照已注入知識庫、只記新事實、過時 archive
+      expect(text).toContain('先對照上方已注入的「元件知識庫」區塊');
+      expect(text).toContain('只記「新的、現有筆記沒涵蓋」的事實');
+      expect(text).toContain('archive_project_note');
+      expect(text).toContain('既有筆記已過時');
+      // 合約反向對齊（step 4b，full 軌限定）：枚舉程式欄位 → report_spec_gap(field_undefined)
+      expect(text).toContain('合約反向對齊');
+      expect(text).toContain('枚舉程式欄位');
+      expect(text).toContain('report_spec_gap(taskId="task-1", category="field_undefined"');
+      expect(text).toContain('基礎設施雜訊');
+      expect(text).toContain('advisory，不進閘門');
+      expect(text).toContain('不影響本次 matched/missing 判定與結案');
+      expect(text).toContain('規格模糊就略過');
+      // 只做欄位維度，絕不 ui_text/logic 反向
+      expect(text).toContain('絕不對 ui_text / logic 做反向對齊');
+      // 與步驟 4「反向掃描規格原文」是兩個不同方向，都保留
+      expect(text).toContain('反向掃描規格原文');
       // full 軌（無 track 記錄）不得出現 light 內容
       expect(text).not.toContain('LIGHT 軌');
       expect(text).not.toContain('原始 BUG 內容');
@@ -521,6 +538,9 @@ describe('compliance-tools', () => {
       expect(text).toContain('反向掃描無遺漏');
       expect(text).toContain('每筆 evidence 會被程式驗證');
       expect(text).not.toContain('反向掃描規格原文');
+      // 合約反向對齊為 full 軌限定——light 軌無 SA/SD 規格文件，不做
+      expect(text).not.toContain('合約反向對齊');
+      expect(text).not.toContain('category="field_undefined"');
       // P2：補項同守 ui_text 抽取規範；P1：回寫閉環（兩軌共用 commonTail）
       expect(text).toContain('禁止存 ui_text——存 logic');
       expect(text).toContain('save_project_note(projectId="proj-1", category="component"');
@@ -531,6 +551,39 @@ describe('compliance-tools', () => {
       expect(text).toContain('絕不可由寫 code 的 implementer 自評');
       expect(text).toContain('必須自己用 Read/Grep 開檔案核對');
       expect(text).toContain(`save_compliance_review(taskId="task-1"`);
+    });
+
+    it('合約反向對齊（code→spec 欄位）：full 軌步驟含枚舉程式欄位/field_undefined/雜訊排除/advisory/規格模糊略過；與 spec→checklist 反向掃描措辭區隔', async () => {
+      seedProject(testDb);
+      seedTask(testDb);
+      await callTool(server, 'save_spec_checklist', {
+        taskId: 'task-1',
+        items: [{ itemType: 'api', content: 'POST /api/wa05/save', side: 'frontend' }],
+      });
+
+      const text = (await callTool(server, 'get_compliance_review_plan', { taskId: 'task-1' })).content[0].text;
+      // 步驟存在且方向明確（code→spec，開缺口）
+      expect(text).toContain('合約反向對齊（code→spec 欄位');
+      expect(text).toContain('枚舉程式欄位回頭開缺口（code→spec）');
+      // 產出走既有 report_spec_gap，category=field_undefined（既有欄位未定義類別，非新字串）
+      expect(text).toContain('report_spec_gap(taskId="task-1", category="field_undefined"');
+      expect(text).toContain('過度實作（該移除）還是規格待補');
+      // 只做欄位維度，絕不 ui_text/logic 反向
+      expect(text).toContain('只做欄位維度（param / response_field / db_field）');
+      expect(text).toContain('絕不對 ui_text / logic 做反向對齊');
+      // 基礎設施雜訊排除（含 MetaData 系統共用欄位）
+      expect(text).toContain('基礎設施雜訊一律排除');
+      expect(text).toContain('CREATE_DATE/MODIFY_DATE/DATA_REMARK');
+      expect(text).toContain('page/size/offset/limit');
+      // advisory 不進閘門
+      expect(text).toContain('advisory，不進閘門');
+      expect(text).toContain('不影響本次 matched/missing 判定與結案');
+      // 規格模糊略過（前提限制）
+      expect(text).toContain('規格模糊就略過');
+      expect(text).toContain('略過反向對齊');
+      // 與步驟 4「反向掃描規格原文」（spec→checklist）措辭區隔：兩個方向都在，不混淆
+      expect(text).toContain('這步方向與步驟 4 相反');
+      expect(text).toContain('反向掃描規格原文');
     });
 
     it('P1: injects active category=component notes only (no other categories, no archived); absent when none', async () => {

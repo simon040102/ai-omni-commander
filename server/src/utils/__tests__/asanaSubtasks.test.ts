@@ -231,6 +231,81 @@ describe('fetchAsanaSubtasksTree', () => {
     expect(byGid['workC']).toBe('2026-08-01');  // 繼承最近祖先 feat2，而非 root2 的 null
   });
 
+  // 功能代碼 custom field 繼承（比照截止日繼承）
+  /** 加上「功能代碼」custom field（display_value 形態，與同步查詢 opt_fields 一致）。 */
+  function withFc(t: Record<string, unknown>, code: string): Record<string, unknown> {
+    return { ...t, custom_fields: [{ name: '功能代碼', display_value: code }] };
+  }
+  /** 讀 raw task 的「功能代碼」display_value（落地時 MCP/Web 兩路徑都讀這個欄位）。 */
+  function readFc(t: Record<string, unknown>): string | null {
+    const cfs = t['custom_fields'] as Array<{ name?: string; display_value?: string | null }> | undefined;
+    const hit = cfs?.find(cf => cf.name === '功能代碼');
+    return hit?.display_value ?? null;
+  }
+
+  it('功能代碼繼承：工作項目繼承功能層代碼；自己有不覆蓋；最近祖先優先於更上層粗碼', async () => {
+    // mod(粗碼 LM) → feat(細碼 SM07) → work-fe(無)、work-own(自己 CM00)
+    const roots = [withFc(task('mod', '系統管理', { num_subtasks: 1 }), 'LM')];
+    const fetchFn = mapFetch({
+      mod: [withFc(task('feat', '權限控管', { num_subtasks: 2 }), 'SM07')],
+      feat: [task('work-fe', '前端'), withFc(task('work-own', '後端'), 'CM00')],
+    });
+
+    const result = await fetchAsanaSubtasksTree(roots, { fetchFn, optFields: OPT_FIELDS, concurrency: 1 });
+    const byGid = Object.fromEntries(result.entries.map(e => [e.task['gid'], readFc(e.task)]));
+
+    expect(byGid['feat']).toBe('SM07');     // 自己有 → 不變
+    expect(byGid['work-fe']).toBe('SM07');  // 繼承最近祖先 feat（SM07），非模組粗碼 LM
+    expect(byGid['work-own']).toBe('CM00'); // 自己有 → 不覆蓋
+  });
+
+  it('功能代碼繼承：功能層有碼、根模組無碼 → 工作項目沿鏈繼承功能層', async () => {
+    const roots = [task('root', '模組', { num_subtasks: 1 })]; // 根無 custom field
+    const fetchFn = mapFetch({
+      root: [withFc(task('feat', '功能', { num_subtasks: 1 }), 'SM07')],
+      feat: [task('work', '串接')],
+    });
+
+    const result = await fetchAsanaSubtasksTree(roots, { fetchFn, optFields: OPT_FIELDS, concurrency: 1 });
+    const work = result.entries.find(e => e.task['gid'] === 'work')!;
+
+    // 寫回的形態必須是 { name, display_value } —— 兩條同步路徑（MCP extractCustomFields /
+    // Web mapToAsanaTask）都讀 custom_fields[].display_value，故落地一致。
+    expect(work.task['custom_fields']).toEqual([{ name: '功能代碼', display_value: 'SM07' }]);
+  });
+
+  it('功能代碼繼承：整棵樹都無功能代碼 → 不寫入 custom_fields（不干擾既有行為）', async () => {
+    const roots = [task('root', '模組', { num_subtasks: 1 })];
+    const fetchFn = mapFetch({ root: [task('work', '前端')] });
+
+    const result = await fetchAsanaSubtasksTree(roots, { fetchFn, optFields: OPT_FIELDS });
+    const work = result.entries[0]!;
+
+    expect(work.task['custom_fields']).toBeUndefined();
+  });
+
+  it('功能代碼繼承：subtask 自帶功能代碼 custom field 陣列（含其他欄位）時，沿用不覆蓋', async () => {
+    const roots = [withFc(task('root', '模組', { num_subtasks: 1 }), 'LM')];
+    const fetchFn = mapFetch({
+      root: [{
+        ...task('work', '前端'),
+        custom_fields: [{ name: '狀態', display_value: '進行中' }, { name: '功能代碼', display_value: 'SM99' }],
+      }],
+    });
+
+    const result = await fetchAsanaSubtasksTree(roots, { fetchFn, optFields: OPT_FIELDS });
+    expect(readFc(result.entries[0]!.task)).toBe('SM99'); // 自己有 → 不被 LM 覆蓋
+  });
+
+  it('功能代碼繼承：自訂欄位名可覆寫（functionCodeField）', async () => {
+    const roots = [{ ...task('root', '模組', { num_subtasks: 1 }), custom_fields: [{ name: 'Feature Code', display_value: 'AB01' }] }];
+    const fetchFn = mapFetch({ root: [task('work', '前端')] });
+
+    const result = await fetchAsanaSubtasksTree(roots, { fetchFn, optFields: OPT_FIELDS, functionCodeField: 'Feature Code' });
+    const cfs = result.entries[0]!.task['custom_fields'] as Array<{ name?: string; display_value?: string | null }>;
+    expect(cfs.find(c => c.name === 'Feature Code')?.display_value).toBe('AB01');
+  });
+
   it('knownGids 額外去重', async () => {
     const root = task('r', '模組', { num_subtasks: 2 });
     const fetchFn = mapFetch({ r: [task('known', '已知'), task('fresh', '新的')] });

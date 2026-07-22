@@ -490,7 +490,7 @@ ${JSON.stringify(created, null, 2)}`, '（created 清單被截斷——用 get_s
   // ── get_compliance_review_plan ────────────────────────────
   server.tool(
     'get_compliance_review_plan',
-    '取得「AI 規格回對」的派工計畫（給 orchestrator）。回傳一份完整 prompt：由 orchestrator 派**獨立的 AI 審查 subagent**（絕不可由寫 code 的 implementer 自評）讀 SA/SD 規格原文 + get_spec_checklist 檢查表 + 實際程式碼，逐項判定 matched/missing（必附 file+line 證據），最後用 save_compliance_review 一次寫回。完成閘門只認此 AI 回對結果（最新 ai_review run 的 missing=0）。full 軌任務若有 SA 操作流程圖（sa-flows cache），計畫會加「流程回對」步驟：流程圖每個判斷分支/節點補為 logic 檢查項並在程式碼中找到對應路徑。light 軌任務（get_execution_plan 判軌）驗證對象改為原始 BUG 內容（任務描述 + Asana 留言 + 附件），標準不變。已有 AI 回對且最新一輪 missing>0 時，計畫自動加「增量重審」段：reviewer 只重判上輪 missing / 新增 / 有疑慮項，其餘上輪 matched 項由 save_compliance_review(carryForward=true) 程式重驗證據自動沿用——重審成本 O(改動)，閘門標準不變。',
+    '取得「AI 規格回對」的派工計畫（給 orchestrator）。回傳一份完整 prompt：由 orchestrator 派**獨立的 AI 審查 subagent**（絕不可由寫 code 的 implementer 自評）讀 SA/SD 規格原文 + get_spec_checklist 檢查表 + 實際程式碼，逐項判定 matched/missing（必附 file+line 證據），最後用 save_compliance_review 一次寫回。完成閘門只認此 AI 回對結果（最新 ai_review run 的 missing=0）。full 軌計畫另含「合約反向對齊」步驟（code→spec，advisory）：枚舉程式實際帶的 request/response/db 欄位，程式有而規格沒定義的業務欄位用 report_spec_gap(category="field_undefined") 開缺口交使用者裁決——只做欄位維度、排除基礎設施雜訊、規格模糊則略過，**不影響 missing 判定與完成閘門**（light 軌無 SA/SD 規格文件，不做）。full 軌任務若有 SA 操作流程圖（sa-flows cache），計畫會加「流程回對」步驟：流程圖每個判斷分支/節點補為 logic 檢查項並在程式碼中找到對應路徑。light 軌任務（get_execution_plan 判軌）驗證對象改為原始 BUG 內容（任務描述 + Asana 留言 + 附件），標準不變。已有 AI 回對且最新一輪 missing>0 時，計畫自動加「增量重審」段：reviewer 只重判上輪 missing / 新增 / 有疑慮項，其餘上輪 matched 項由 save_compliance_review(carryForward=true) 程式重驗證據自動沿用——重審成本 O(改動)，閘門標準不變。',
     {
       taskId: z.string().describe('任務 ID'),
     },
@@ -695,14 +695,33 @@ ${missingLines.join('\n')}${staleBlock}${deltaTruncated ? '\n（清單已達大�
         ? `4. **反向掃描 BUG 原文（完整性檢查）**：重讀 BUG 原文（任務描述、Asana 留言、附件截圖裡的預期行為），找出有明確預期但 checklist 沒有對應項目的行為。找到遺漏 → 呼叫 save_spec_checklist(taskId="${taskId}", items=[...]) 補上（**append，不可用 replace**；補項同守抽取規範：${UI_TEXT_EXTRACTION_RULE}），把補上的項目一併納入本次逐項驗證與 save_compliance_review（新項目通常判 missing，交由 implementer 補做），並在總結列出補了哪些；staleness 閘門會自動要求後續回對涵蓋它們。沒有遺漏也要明確說「反向掃描無遺漏」。`
         : `4. **反向掃描規格原文（完整性檢查）**：逐節掃 SA/SD 規格，找出規格有明確要求但 checklist 沒有對應項目的內容（欄位/文字/API/邏輯）。找到遺漏 → 呼叫 save_spec_checklist(taskId="${taskId}", items=[...]) 補上（**append，不可用 replace**；補項同守抽取規範：${UI_TEXT_EXTRACTION_RULE}），把補上的項目一併納入本次逐項驗證與 save_compliance_review（新項目通常判 missing，交由 implementer 補做），並在總結列出補了哪些；staleness 閘門會自動要求後續回對涵蓋它們。沒有遺漏也要明確說「反向掃描無遺漏」。`;
 
-      const commonSteps = `${reverseScanStep}
+      // 合約反向對齊（步驟 4b，**full 軌限定**）：與步驟 4 方向相反——
+      // 步驟 4 是「掃規格補檢查表」（spec→checklist，補漏做的項目）；
+      // 這一步是「掃程式開缺口」（code→spec，抓程式多帶、規格沒定義的欄位）。
+      // 只限欄位維度（param/response_field/db_field），絕不對 ui_text/logic 反向；
+      // 只產 report_spec_gap(advisory)，不影響 matched/missing 與完成閘門。
+      // light 軌無 SA/SD 規格文件，無「規格定義欄位」可比對 → 整步不出現。
+      const contractReverseStep = track === 'full'
+        ? `
+4b. **合約反向對齊（code→spec 欄位，advisory，不進閘門）**：這步方向與步驟 4 相反——步驟 4 掃規格原文回頭補檢查表（spec→checklist），這步**枚舉程式欄位回頭開缺口（code→spec）**，抓「程式實際有、規格卻沒定義」的多餘欄位交使用者裁決。作法：對檢查表中出現的**每個 api**，在程式碼裡枚舉該 API 實際的 request 參數（param）、response 欄位（response_field）、對應 db_field，與規格（SA/SD）對該 API 定義的欄位逐一比對——
+   - **程式有、規格沒有，且看起來是業務語意欄位** → 呼叫 report_spec_gap(taskId="${taskId}", category="field_undefined", description="合約反向對齊：程式實際帶了「{欄位名}」（{api}）但規格未定義——請確認是過度實作（該移除）還是規格待補") 記錄。**這是 advisory：不影響本次 matched/missing 判定與結案，不進完成閘門**，只開缺口供使用者裁決
+   - **只做欄位維度（param / response_field / db_field）**，**絕不對 ui_text / logic 做反向對齊**（畫面文字/邏輯反掃誤報過多）
+   - **基礎設施雜訊一律排除，不報**：分頁（page/size/offset/limit）、排序（sort/order）、認證（token/authorization）、時間戳（createdAt/updatedAt/timestamp），以及專案共用系統欄位（如 MetaData 的 CREATE_DATE/MODIFY_DATE/DATA_REMARK，及 backendExtraPrompt / 元件知識庫提到的系統欄位）——只報看起來是**業務語意**的多餘欄位
+   - **規格模糊就略過**：規格對某 API 的欄位定義不清楚/不完整時，不要硬 diff 逼報（否則全是 extra 誤報），該 API 直接略過反向對齊並在總結註明「{api}：規格欄位定義不足，略過反向對齊」
+   - 沒有發現多餘業務欄位也要明確說「合約反向對齊：無多餘欄位」`
+        : '';
+
+      const commonSteps = `${reverseScanStep}${contractReverseStep}
 5. **判定標準（寧嚴勿鬆）**：每項判 matched 或 missing——
    - matched **必須附 evidence**（file + line，workspace 相對路徑）與一句說明（note）
    - **每筆 evidence 會被程式驗證**（檔案存在、行號有效、該行 ±${RELEVANCE_WINDOW} 行內確實含該文字/路徑/識別字）——引用不精確會整批退回，請引用實際包含該文字/路徑/識別字的行（如文字在 i18n 檔就引 i18n 檔）
    - 找不到、不確定、規格與程式碼有出入 → 一律 missing，可用 note 說明疑點
 6. **一次寫回**：全部判完後呼叫 save_compliance_review(taskId="${taskId}", results=[{itemId, status, evidence: [{file, line}], note}, ...])，**必須涵蓋所有未豁免項目**。
 7. **嚴禁**只看 implementer 的回報、verification report、commit message 或任何摘要就下判定——**必須自己用 Read/Grep 開檔案核對**。
-8. **回寫元件知識庫（save_compliance_review 之後）**：把本次審查中新確認的**可重用元件級事實**（共用元件產生什麼文字/行為、慣例差異），用 save_project_note(projectId="${task.project_id}", category="component", content=...) 記錄，內容必須附元件檔路徑與關鍵識別（無出處的觀察不記）——下一個任務的 reviewer 會自動收到。`;
+8. **回寫元件知識庫（save_compliance_review 之後）**：把本次審查中新確認的**可重用元件級事實**（共用元件產生什麼文字/行為、慣例差異），用 save_project_note(projectId="${task.project_id}", category="component", content=...) 記錄，內容必須附元件檔路徑+行號與關鍵識別（無出處的觀察不記）——下一個任務的 reviewer 會自動收到。**寫入紀律（知識庫會全量注入下一輪 reviewer，寫肥/重複會稀釋重點）：**
+   - **先對照上方已注入的「元件知識庫」區塊**（若有）——只記「新的、現有筆記沒涵蓋」的事實；能對應到既有筆記的更新/延伸就不要新增重複則。
+   - **精簡**：一則一個重點、附元件檔+行號，不要長篇。
+   - **既有筆記已過時**（引用行對不上/元件已改）→ 用 archive_project_note(noteId=...) 標掉，不要留著誤導。`;
 
       const forbiddenSection = `## 絕對禁止
 - 不得修改任何程式碼或檔案（只讀；MCP 回寫僅限 save_project_note / save_spec_checklist / save_compliance_review 三個工具）

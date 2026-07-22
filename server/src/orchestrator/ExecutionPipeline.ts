@@ -922,7 +922,7 @@ export class ExecutionPipeline {
    * spec-document layers. One bullet per active note: `- [category] content`.
    */
   private buildProjectNotesSection(notes: ProjectNote[]): string {
-    const lines: string[] = ['## 專案經驗筆記（前人踩坑教訓，開發前必讀）'];
+    const lines: string[] = ['## 專案經驗筆記（前人踩坑教訓，開發前必讀）', '（每則為精簡重點+出處，詳情自行查規格/程式）'];
     for (const n of notes) {
       lines.push(n.category ? `- [${n.category}] ${n.content}` : `- ${n.content}`);
     }
