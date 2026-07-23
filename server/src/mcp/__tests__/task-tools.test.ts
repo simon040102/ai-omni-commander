@@ -455,6 +455,71 @@ describe('task-tools', () => {
     });
   });
 
+  describe('update_task_status open-gaps 結案提醒（E4——不擋、不是閘門）', () => {
+    it('completed 成功回應附上仍 open 的規格缺口清單', async () => {
+      seedProject(testDb);
+      seedTask(testDb);
+      seedDispatch(testDb);
+      testDb.prepare(`
+        INSERT INTO spec_gaps (id, task_id, project_id, category, description)
+        VALUES ('gap-1', 'task-1', 'proj-1', 'field_undefined', '狀態欄位下拉選項未定義')
+      `).run();
+      // resolved 的缺口不進提醒
+      testDb.prepare(`
+        INSERT INTO spec_gaps (id, task_id, project_id, category, description, status, resolution_note, resolved_at)
+        VALUES ('gap-2', 'task-1', 'proj-1', 'other', '已裁決的缺口甲乙丙', 'resolved', '選 B：刪除前 confirm 彈窗', '2026-01-01 00:00:00')
+      `).run();
+
+      await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'in_progress' });
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+
+      expect(result.isError).toBeUndefined();
+      const text = result.content[0].text;
+      expect(text).toContain('status updated to "completed"');
+      expect(text).toContain('尚有 1 筆規格缺口未裁決');
+      expect(text).toContain('不影響結案');
+      expect(text).toContain('[field_undefined] 狀態欄位下拉選項未定義');
+      expect(text).toContain('gapId=gap-1');
+      expect(text).toContain('resolve_spec_gap(gapId, resolutionNote=具體裁決)');
+      expect(text).not.toContain('已裁決的缺口甲乙丙');
+      // 提醒不擋：任務真的 completed 了
+      expect((testDb.prepare('SELECT status FROM tasks WHERE id = ?').get('task-1') as any).status).toBe('completed');
+    });
+
+    it('沒有 open 缺口時 completed 回應不出現提醒', async () => {
+      seedProject(testDb);
+      seedTask(testDb);
+      seedDispatch(testDb);
+
+      await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'in_progress' });
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).not.toContain('規格缺口未裁決');
+    });
+
+    it('failed 不附提醒；被閘門擋下的 completed 照舊回錯誤（提醒不改閘門判定）', async () => {
+      seedProject(testDb);
+      seedTask(testDb);
+      // 不 seedDispatch → 執行計畫閘門會擋 completed
+      testDb.prepare(`
+        INSERT INTO spec_gaps (id, task_id, project_id, category, description)
+        VALUES ('gap-1', 'task-1', 'proj-1', 'other', '未裁決缺口')
+      `).run();
+
+      await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'in_progress' });
+      const blocked = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      expect(blocked.isError).toBe(true);
+      expect(blocked.content[0].text).toContain('從未取得執行計畫或派工記錄');
+      expect(blocked.content[0].text).not.toContain('規格缺口未裁決');
+      expect((testDb.prepare('SELECT status FROM tasks WHERE id = ?').get('task-1') as any).status).toBe('in_progress');
+
+      const failed = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'failed', summary: 'x' });
+      expect(failed.isError).toBeUndefined();
+      expect(failed.content[0].text).not.toContain('規格缺口未裁決');
+    });
+  });
+
   describe('update_task_status spec compliance gate', () => {
     function seedChecklistItem(taskId: string, opts: { itemType?: string; content?: string; waived?: number } = {}) {
       testDb.prepare(`

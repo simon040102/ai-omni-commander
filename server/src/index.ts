@@ -24,6 +24,7 @@ import { TaskClassifier } from './orchestrator/TaskClassifier.js';
 import { RetryHandler } from './review/RetryHandler.js';
 import { SvnSpecService } from './svn/SvnSpecService.js';
 import { taskFunctionCode } from './utils/taskFunctionCode.js';
+import { validateResolutionNote } from './utils/specGapResolution.js';
 import { SaFlowAnalyzer } from './documents/SaFlowAnalyzer.js';
 import { listProjects } from './db/queries/projects.js';
 import { getTask } from './db/queries/tasks.js';
@@ -790,10 +791,17 @@ async function main() {
       const gap = db.prepare('SELECT id, task_id, project_id, category, description, status FROM spec_gaps WHERE id = ?').get(gapId) as
         { id: string; task_id: string; project_id: string; category: string; description: string; status: string } | undefined;
       if (!gap) { res.status(404).json({ error: 'Spec gap not found' }); return; }
-      const note = (req.body as { note?: string } | undefined)?.note;
+      const body = req.body as { note?: string; resolutionNote?: string } | undefined;
+      const note = body?.resolutionNote ?? body?.note;
       if (gap.status !== 'resolved') {
+        // E1：裁決備註必填 + 品質驗證（與 MCP resolve_spec_gap 同標準——共用 validateResolutionNote）
+        const validation = validateResolutionNote(note);
+        if (!validation.ok) {
+          res.status(400).json({ error: validation.error });
+          return;
+        }
         db.prepare("UPDATE spec_gaps SET status = 'resolved', resolution_note = ?, resolved_at = datetime('now') WHERE id = ?")
-          .run(note || null, gapId);
+          .run(validation.note, gapId);
         // Broadcast so open SpecGaps panels refetch
         wsServerRef?.broadcast({
           type: 'task.specGap',

@@ -18,6 +18,7 @@ import { notifyWebServer } from '../notify.js';
 import { truncateResponse, parseJson } from '../helpers.js';
 import { getFlowState, getCompletionBlockers, logTaskOutput, type FlowGateState, type RoleFlowState, type FlowRole } from '../flow-gate.js';
 import { runSpecChangeCheck, type SpecChangeTarget } from '../spec-change.js';
+import { listResolvedSpecGaps } from '../../utils/specGapResolution.js';
 
 interface TaskRow {
   id: string;
@@ -51,7 +52,7 @@ export function registerContextTools(server: McpServer): void {
   // ── resume_task ───────────────────────────────────────────
   server.tool(
     'resume_task',
-    '一鍵恢復任務脈絡。**新 session 接手先前開過的任務時，第一步先呼叫此工具**：回傳任務核心資訊、flow-gate 閘門進度、最近歷史回報、未解決規格缺口、最新驗收結果、任務依賴、專案經驗筆記，以及 nextSteps 下一步指引。',
+    '一鍵恢復任務脈絡。**新 session 接手先前開過的任務時，第一步先呼叫此工具**：回傳任務核心資訊、flow-gate 閘門進度、最近歷史回報、未解決規格缺口、已裁決規格缺口（resolvedGaps——使用者拍板的裁決，效力等同規格，必須遵守）、最新驗收結果、任務依賴、專案經驗筆記，以及 nextSteps 下一步指引。',
     {
       taskId: z.string().describe('任務 ID'),
       outputLimit: z.number().int().positive().max(100).optional().describe('回傳最近幾筆歷史回報（預設 20，最多 100）'),
@@ -124,6 +125,11 @@ export function registerContextTools(server: McpServer): void {
         WHERE task_id = ? AND status = 'open' ORDER BY created_at ASC
       `).all(taskId) as Array<{ id: string; category: string; description: string; created_at: string }>;
 
+      // ── resolved spec gaps（使用者裁決——效力等同規格）──
+      // 來源 SQL 與派工 prompt / AI 回對計畫共用（utils/specGapResolution），
+      // 讓接手 session 看到「已裁決了什麼」，不需依賴前一個 session 的對話。
+      const resolvedGaps = listResolvedSpecGaps(db, taskId);
+
       // ── latest verification result ──
       const lastVerification = db.prepare(`
         SELECT content, timestamp FROM agent_outputs
@@ -167,7 +173,10 @@ export function registerContextTools(server: McpServer): void {
         steps.push(`前置任務未完成：${incompleteDeps.map(d => `${d.title}（${d.status}）`).join('、')} → 先確認是否需等待前置任務`);
       }
       if (openGaps.length > 0) {
-        steps.push(`規格缺口 ${openGaps.length} 筆未解決 → 先與使用者確認補規格（補齊後 resolve_spec_gap），不要對缺口部分自行編造`);
+        steps.push(`規格缺口 ${openGaps.length} 筆未解決 → 先與使用者確認補規格（拍板後 resolve_spec_gap(gapId, resolutionNote=具體裁決) 落地），不要對缺口部分自行編造`);
+      }
+      if (resolvedGaps.length > 0) {
+        steps.push(`已有 ${resolvedGaps.length} 筆規格裁決（見 resolvedGaps）——使用者已拍板，效力等同規格，實作與 AI 回對必須遵守，不可用對話轉述替代`);
       }
       if (task.status === 'completed') {
         steps.push('任務已標記 completed——如需重做或修正，先與使用者確認再 update_task_status。');
@@ -218,6 +227,8 @@ export function registerContextTools(server: McpServer): void {
         ...(lastDispatch ? { lastDispatch } : {}),
         recentOutputs: { total: outputsTotal, showing: recentOutputs.length, outputs: recentOutputs },
         openSpecGaps: openGaps.map(g => ({ id: g.id, category: g.category, description: g.description, createdAt: g.created_at })),
+        // 使用者已拍板的規格裁決——效力等同規格條文，實作/驗證必須遵守（resolve_spec_gap 落地）
+        resolvedGaps: resolvedGaps.map(g => ({ id: g.id, category: g.category, description: g.description, resolutionNote: g.resolutionNote, resolvedAt: g.resolvedAt })),
         lastVerification: lastVerification ? { content: lastVerification.content, timestamp: lastVerification.timestamp } : null,
         dependencies: dependencies.map(d => ({ taskId: d.id, title: d.title, status: d.status })),
         projectNotes: notes.map(n => ({ id: n.id, category: n.category, content: n.content })),

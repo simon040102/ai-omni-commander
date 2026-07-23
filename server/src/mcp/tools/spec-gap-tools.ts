@@ -12,6 +12,7 @@ import { randomUUID } from 'node:crypto';
 import { getMcpDb } from '../db.js';
 import { notifyWebServer } from '../notify.js';
 import { ensureMcpAgent } from '../helpers.js';
+import { validateResolutionNote, RESOLUTION_NOTE_MIN_LENGTH } from '../../utils/specGapResolution.js';
 
 export const SPEC_GAP_CATEGORIES = ['sa_missing', 'sd_missing', 'field_undefined', 'api_undefined', 'logic_unclear', 'other', 'spec_changed', 'sa_sd_mismatch', 'ambiguous_spec'] as const;
 
@@ -32,7 +33,7 @@ export function registerSpecGapTools(server: McpServer): void {
   // ── report_spec_gap ───────────────────────────────────────
   server.tool(
     'report_spec_gap',
-    '回報規格缺口（SA/SD 沒定義的東西）。**遇到規格未定義、不清楚或矛盾的欄位/API/邏輯時，不要自行編造或猜測——呼叫此工具記錄，標記 [NEEDS_CLARIFICATION] 後繼續做其他部分。** 記錄會列入專案的「規格缺少/待補清單」，由使用者補規格。任務結束前應確保所有遇到的規格缺口都已回報。',
+    '回報規格缺口（SA/SD 沒定義的東西）。**遇到規格未定義、不清楚或矛盾的欄位/API/邏輯時，不要自行編造或猜測——呼叫此工具記錄，標記 [NEEDS_CLARIFICATION] 後繼續做其他部分。** 記錄會列入專案的「規格缺少/待補清單」，由使用者補規格。任務結束前應確保所有遇到的規格缺口都已回報。使用者拍板後必須用 resolve_spec_gap(gapId, resolutionNote=具體裁決) 落地——裁決只由工具從 DB 自動注入後續派工與 AI 回對，嚴禁只在對話帶過。',
     {
       taskId: z.string().describe('任務 ID'),
       category: z.enum(SPEC_GAP_CATEGORIES).describe('缺口分類：sa_missing=SA 文件缺失 / sd_missing=SD 文件缺失 / field_undefined=欄位未定義 / api_undefined=API 未定義 / logic_unclear=邏輯不明確或矛盾 / other=其他 / spec_changed=規格檔案已在 SVN 更新（通常由 check_spec_changes 自動建立）/ sa_sd_mismatch=SA 與 SD 規格互相矛盾（通常由 check_spec_consistency 的一致性檢查 agent 建立）/ ambiguous_spec=規格模糊或有多種合理解讀——implementer 會被迫用猜的決策點（通常由 check_spec_consistency 維度二「規格模糊點預檢」在派工前建立，開給使用者拍板；advisory，不擋工）'),
@@ -139,13 +140,13 @@ export function registerSpecGapTools(server: McpServer): void {
   // ── resolve_spec_gap ──────────────────────────────────────
   server.tool(
     'resolve_spec_gap',
-    '標記規格缺口為已解決（使用者已補規格或提供值後呼叫）。',
+    '標記規格缺口為已解決並**落地使用者的裁決**（使用者拍板後必須立刻呼叫——這是裁決唯一生效管道）。裁決效力等同規格：resolutionNote 會自動注入後續派工 prompt、resume_task 與 AI 回對計畫，寫得含糊等於規格含糊。**嚴禁只把答案手動寫進派工 prompt 或在對話帶過**——不落地 = implementer 與 reviewer 看不到。',
     {
       gapId: z.string().describe('缺口 ID（report_spec_gap 回傳的 id）'),
-      note: z.string().optional().describe('解決說明（例如使用者補了什麼規格/值）'),
+      resolutionNote: z.string().min(RESOLUTION_NOTE_MIN_LENGTH).describe('裁決內容（必填）：使用者拍板的具體決定，效力等同規格（例如「選 B：刪除前 confirm 彈窗」）。不可只寫「可以」「好」「照舊」等空泛詞。'),
     },
     { title: 'Resolve Spec Gap', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    async ({ gapId, note }) => {
+    async ({ gapId, resolutionNote }) => {
       const db = getMcpDb();
 
       const gap = db.prepare('SELECT * FROM spec_gaps WHERE id = ?').get(gapId) as SpecGapRow | undefined;
@@ -156,10 +157,16 @@ export function registerSpecGapTools(server: McpServer): void {
         return { content: [{ type: 'text' as const, text: `Spec gap ${gapId} is already resolved (at ${gap.resolved_at}).` }] };
       }
 
+      // E1：答案品質驗證（zod 已擋長度，這裡再防呆一次並擋空泛詞——涵蓋不經 zod 的呼叫路徑）
+      const validation = validateResolutionNote(resolutionNote);
+      if (!validation.ok) {
+        return { content: [{ type: 'text' as const, text: `Error: ${validation.error}` }], isError: true };
+      }
+
       db.prepare(`
         UPDATE spec_gaps SET status = 'resolved', resolution_note = ?, resolved_at = datetime('now')
         WHERE id = ?
-      `).run(note || null, gapId);
+      `).run(validation.note, gapId);
 
       const notifyOk = await notifyWebServer({
         event: 'task.specGap',
@@ -167,7 +174,7 @@ export function registerSpecGapTools(server: McpServer): void {
       });
 
       const warning = notifyOk ? '' : ' (warning: Web UI notification failed)';
-      return { content: [{ type: 'text' as const, text: `Spec gap ${gapId} marked as resolved${warning}` }] };
+      return { content: [{ type: 'text' as const, text: `Spec gap ${gapId} marked as resolved${warning}。裁決已落地 DB——後續派工 prompt / resume_task / AI 回對計畫會自動注入此裁決（效力等同規格），不需（也不可）手動轉述。` }] };
     },
   );
 }

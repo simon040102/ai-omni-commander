@@ -125,38 +125,80 @@ describe('spec-gap-tools', () => {
   });
 
   describe('resolve_spec_gap', () => {
-    it('marks a gap resolved with note and notifies', async () => {
+    async function seedGap(category = 'api_undefined', description = 'API 未定義'): Promise<string> {
       seed(testDb);
-      await callTool(server, 'report_spec_gap', { taskId: 'task-1', category: 'api_undefined', description: 'API 未定義' });
+      await callTool(server, 'report_spec_gap', { taskId: 'task-1', category, description });
       const gap = testDb.prepare('SELECT id FROM spec_gaps').get() as { id: string };
+      return gap.id;
+    }
 
-      const result = await callTool(server, 'resolve_spec_gap', { gapId: gap.id, note: '使用者補了 SD v2' });
+    it('marks a gap resolved with a concrete resolutionNote and notifies', async () => {
+      const gapId = await seedGap();
+
+      const result = await callTool(server, 'resolve_spec_gap', { gapId, resolutionNote: '使用者補了 SD v2：儲存改走 POST /api/wa05/save' });
       expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).toContain('裁決已落地');
 
-      const row = testDb.prepare('SELECT * FROM spec_gaps WHERE id = ?').get(gap.id) as any;
+      const row = testDb.prepare('SELECT * FROM spec_gaps WHERE id = ?').get(gapId) as any;
       expect(row.status).toBe('resolved');
-      expect(row.resolution_note).toBe('使用者補了 SD v2');
+      expect(row.resolution_note).toBe('使用者補了 SD v2：儲存改走 POST /api/wa05/save');
       expect(row.resolved_at).toBeTruthy();
 
       expect(notifyWebServer).toHaveBeenLastCalledWith({
         event: 'task.specGap',
-        data: expect.objectContaining({ gapId: gap.id, action: 'resolved' }),
+        data: expect.objectContaining({ gapId, action: 'resolved' }),
       });
     });
 
-    it('is idempotent for already-resolved gaps', async () => {
-      seed(testDb);
-      await callTool(server, 'report_spec_gap', { taskId: 'task-1', category: 'other', description: 'x' });
-      const gap = testDb.prepare('SELECT id FROM spec_gaps').get() as { id: string };
-      await callTool(server, 'resolve_spec_gap', { gapId: gap.id });
+    it('rejects a missing resolutionNote（必填）and keeps the gap open', async () => {
+      const gapId = await seedGap();
 
-      const again = await callTool(server, 'resolve_spec_gap', { gapId: gap.id });
+      const result = await callTool(server, 'resolve_spec_gap', { gapId });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('必填');
+      expect(result.content[0].text).toContain('選 B：刪除前 confirm 彈窗');
+
+      const row = testDb.prepare('SELECT status, resolution_note FROM spec_gaps WHERE id = ?').get(gapId) as any;
+      expect(row.status).toBe('open');
+      expect(row.resolution_note).toBeNull();
+    });
+
+    it('rejects a too-short resolutionNote with guidance', async () => {
+      const gapId = await seedGap();
+
+      const result = await callTool(server, 'resolve_spec_gap', { gapId, resolutionNote: '選B' });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('過短');
+      expect(result.content[0].text).toContain('具體的決定內容');
+
+      expect((testDb.prepare('SELECT status FROM spec_gaps WHERE id = ?').get(gapId) as any).status).toBe('open');
+    });
+
+    it('rejects vague blacklist notes（「可以」「照舊」「OK」等）', async () => {
+      const gapId = await seedGap();
+
+      for (const vague of ['可以', '照舊', 'OK', '沒問題。', 'no problem']) {
+        const result = await callTool(server, 'resolve_spec_gap', { gapId, resolutionNote: vague });
+        expect(result.isError, `should reject "${vague}"`).toBe(true);
+        expect(result.content[0].text).toContain('空泛');
+        expect(result.content[0].text).toContain('選 B：刪除前 confirm 彈窗');
+      }
+      expect((testDb.prepare('SELECT status FROM spec_gaps WHERE id = ?').get(gapId) as any).status).toBe('open');
+    });
+
+    it('is idempotent for already-resolved gaps（不重驗 note）', async () => {
+      const gapId = await seedGap('other', 'x');
+      await callTool(server, 'resolve_spec_gap', { gapId, resolutionNote: '選 A：直接刪除不確認' });
+
+      const again = await callTool(server, 'resolve_spec_gap', { gapId, resolutionNote: '好' });
       expect(again.isError).toBeUndefined();
       expect(again.content[0].text).toContain('already resolved');
+      // 原裁決不被空泛的第二次呼叫覆蓋
+      expect((testDb.prepare('SELECT resolution_note FROM spec_gaps WHERE id = ?').get(gapId) as any).resolution_note).toBe('選 A：直接刪除不確認');
     });
 
     it('returns error for unknown gapId', async () => {
-      const result = await callTool(server, 'resolve_spec_gap', { gapId: 'nope' });
+      const result = await callTool(server, 'resolve_spec_gap', { gapId: 'nope', resolutionNote: '選 B：刪除前 confirm 彈窗' });
       expect(result.isError).toBe(true);
     });
   });

@@ -16,6 +16,8 @@ import { getTask, updateTask } from '../db/queries/tasks.js';
 import { getConfig } from '../config.js';
 import { getDocumentsForTask } from '../db/queries/taskDocuments.js';
 import { getActiveProjectNotes, type ProjectNote } from '../db/queries/projectNotes.js';
+import { getResolvedSpecGapsForTask } from '../db/queries/specGaps.js';
+import { buildResolutionLines, type ResolvedSpecGap } from '../utils/specGapResolution.js';
 import { filterSafeSpecFolders } from '../documents/FolderSpecSource.js';
 import { loadSuperpowersPrompt } from '../skills/superpowers/index.js';
 import { createChildLogger } from '../utils/logger.js';
@@ -776,6 +778,16 @@ export class ExecutionPipeline {
       parts.push(this.buildProjectNotesSection(projectNotes));
     }
 
+    // Layer 2.75: Spec gap resolutions（使用者裁決）— read from DB only（結構性
+    // 強制：裁決唯一生效管道 = resolve_spec_gap 落地的 resolution_note，orchestrator
+    // 不可（也不需）手動轉述）。無 resolved+note 的 gaps 時整節不出現。
+    if (opts.taskId) {
+      const resolvedGaps = getResolvedSpecGapsForTask(opts.taskId);
+      if (resolvedGaps.length > 0) {
+        parts.push(this.buildSpecResolutionsSection(resolvedGaps));
+      }
+    }
+
     // Layer 2.7b: DB schema files (for backend agents to query when needed)
     if (opts.dbSchemaFiles && opts.dbSchemaFiles.length > 0) {
       parts.push(this.buildDbSchemaSection(opts.dbSchemaFiles));
@@ -927,6 +939,24 @@ export class ExecutionPipeline {
       lines.push(n.category ? `- [${n.category}] ${n.content}` : `- ${n.content}`);
     }
     return lines.join('\n');
+  }
+
+  /**
+   * Build the spec gap resolutions section（使用者裁決）— Layer 2.75.
+   * Source of truth is the spec_gaps table (resolve_spec_gap 落地的 resolution_note)；
+   * 效力等同規格條文，implementer 必須遵守。
+   */
+  private buildSpecResolutionsSection(gaps: ResolvedSpecGap[]): string {
+    const { lines } = buildResolutionLines(gaps);
+    return [
+      '## 規格裁決（使用者已拍板——效力等同規格，必須遵守）',
+      '',
+      '以下每一條是使用者對本任務規格缺口（spec_gap）的正式裁決，效力等同規格條文：規格沒寫但裁決有寫的，照裁決做；與你自己的推測衝突時，以裁決為準。',
+      '',
+      ...lines,
+      '',
+      '（裁決由 resolve_spec_gap 落地 DB 後自動注入。若發現裁決之間、或裁決與規格互相矛盾，用 report_spec_gap 記錄，不可自行取捨。）',
+    ].join('\n');
   }
 
   /**

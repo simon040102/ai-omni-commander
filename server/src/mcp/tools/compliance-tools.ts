@@ -27,6 +27,7 @@ import {
   type EngineItem, type ChecklistItemType, type ChecklistSide, type ItemResult, type WorkspaceRoots,
 } from '../compliance-engine.js';
 import { validateReviewEvidence, RELEVANCE_WINDOW, type EvidenceCheckInput } from '../evidence-validator.js';
+import { listResolvedSpecGaps, buildResolutionLines } from '../../utils/specGapResolution.js';
 
 export const CHECKLIST_ITEM_TYPES = ['ui_text', 'api', 'param', 'response_field', 'db_field', 'logic'] as const;
 export const CHECKLIST_SIDES = ['frontend', 'backend', 'both'] as const;
@@ -490,7 +491,7 @@ ${JSON.stringify(created, null, 2)}`, '（created 清單被截斷——用 get_s
   // ── get_compliance_review_plan ────────────────────────────
   server.tool(
     'get_compliance_review_plan',
-    '取得「AI 規格回對」的派工計畫（給 orchestrator）。回傳一份完整 prompt：由 orchestrator 派**獨立的 AI 審查 subagent**（絕不可由寫 code 的 implementer 自評）讀 SA/SD 規格原文 + get_spec_checklist 檢查表 + 實際程式碼，逐項判定 matched/missing（必附 file+line 證據），最後用 save_compliance_review 一次寫回。完成閘門只認此 AI 回對結果（最新 ai_review run 的 missing=0）。full 軌計畫另含「合約反向對齊」步驟（code→spec，advisory）：枚舉程式實際帶的 request/response/db 欄位，程式有而規格沒定義的業務欄位用 report_spec_gap(category="field_undefined") 開缺口交使用者裁決——只做欄位維度、排除基礎設施雜訊、規格模糊則略過，**不影響 missing 判定與完成閘門**（light 軌無 SA/SD 規格文件，不做）。full 軌任務若有 SA 操作流程圖（sa-flows cache），計畫會加「流程回對」步驟：流程圖每個判斷分支/節點補為 logic 檢查項並在程式碼中找到對應路徑。light 軌任務（get_execution_plan 判軌）驗證對象改為原始 BUG 內容（任務描述 + Asana 留言 + 附件），標準不變。已有 AI 回對且最新一輪 missing>0 時，計畫自動加「增量重審」段：reviewer 只重判上輪 missing / 新增 / 有疑慮項，其餘上輪 matched 項由 save_compliance_review(carryForward=true) 程式重驗證據自動沿用——重審成本 O(改動)，閘門標準不變。',
+    '取得「AI 規格回對」的派工計畫（給 orchestrator）。回傳一份完整 prompt：由 orchestrator 派**獨立的 AI 審查 subagent**（絕不可由寫 code 的 implementer 自評）讀 SA/SD 規格原文 + get_spec_checklist 檢查表 + 實際程式碼，逐項判定 matched/missing（必附 file+line 證據），最後用 save_compliance_review 一次寫回。完成閘門只認此 AI 回對結果（最新 ai_review run 的 missing=0）。full 軌計畫另含「合約反向對齊」步驟（code→spec，advisory）：枚舉程式實際帶的 request/response/db 欄位，程式有而規格沒定義的業務欄位用 report_spec_gap(category="field_undefined") 開缺口交使用者裁決——只做欄位維度、排除基礎設施雜訊、規格模糊則略過，**不影響 missing 判定與完成閘門**（light 軌無 SA/SD 規格文件，不做）。full 軌任務若有 SA 操作流程圖（sa-flows cache），計畫會加「流程回對」步驟：流程圖每個判斷分支/節點補為 logic 檢查項並在程式碼中找到對應路徑。light 軌任務（get_execution_plan 判軌）驗證對象改為原始 BUG 內容（任務描述 + Asana 留言 + 附件），標準不變。已有 AI 回對且最新一輪 missing>0 時，計畫自動加「增量重審」段：reviewer 只重判上輪 missing / 新增 / 有疑慮項，其餘上輪 matched 項由 save_compliance_review(carryForward=true) 程式重驗證據自動沿用——重審成本 O(改動)，閘門標準不變。任務有已裁決的規格缺口（resolve_spec_gap 落地）時，計畫自動注入「規格裁決」段——reviewer 驗證時裁決視同規格條文。',
     {
       taskId: z.string().describe('任務 ID'),
     },
@@ -592,6 +593,23 @@ ${noteLines.join('\n')}${notesTruncated ? '\n（筆記已達大小上限截斷�
 
 用法：這些事實告訴你**證據在哪個元件檔**——直接開該檔引用對應行號當證據，不需重讀整個元件追邏輯。
 **這不是免驗證通行證**：對應項目仍須附 file+line 證據、仍會被程式開檔驗證；若引用行驗證失敗代表元件已變更，重查並更新筆記。`;
+        }
+      }
+
+      // ── 規格裁決（resolve_spec_gap 落地的使用者拍板）——驗證依據之一 ──
+      // 只從 DB 讀（結構性強制：不落地的裁決 reviewer 看不到）。字元預算比照元件知識庫防肥。
+      const RESOLVED_GAPS_CHAR_BUDGET = 4000;
+      const resolvedGapsForReview = listResolvedSpecGaps(db, taskId);
+      let resolvedGapsSection = '';
+      if (resolvedGapsForReview.length > 0) {
+        const { lines: gapLines, truncated: gapsTruncated } = buildResolutionLines(resolvedGapsForReview, RESOLVED_GAPS_CHAR_BUDGET);
+        if (gapLines.length > 0) {
+          resolvedGapsSection = `
+
+## 規格裁決（驗證依據之一——使用者已拍板，效力等同規格條文）
+${gapLines.join('\n')}${gapsTruncated ? `\n（裁決清單已達大小上限截斷，其餘用 list_spec_gaps(taskId="${taskId}", status="resolved") 查看）` : ''}
+
+用法：驗證 logic／實作時，這些裁決**視同規格條文**——規格模糊或沒寫、但裁決有定的，以裁決為準（例如裁決「選 B：刪除前 confirm 彈窗」→ 程式必須是 confirm 彈窗才 matched）；實作與裁決矛盾一律判 missing，並在 note 註明違反哪條裁決。`;
         }
       }
 
@@ -775,7 +793,7 @@ ${orchestratorNote}
 
 ---
 
-你是獨立的規格審查員（reviewer）。本任務為 **light 軌**（無 SA/SD 規格文件）——驗證基準是**原始 BUG 內容**。你的任務：**逐項回對規格檢查表（從 BUG 原文抽出的「修復後預期行為」）與實際程式碼，判定每個預期行為是否已確實達成**。你不是來寫 code 的，只讀不改。${componentNotesSection}${engineSeedSection}${deltaSection}
+你是獨立的規格審查員（reviewer）。本任務為 **light 軌**（無 SA/SD 規格文件）——驗證基準是**原始 BUG 內容**。你的任務：**逐項回對規格檢查表（從 BUG 原文抽出的「修復後預期行為」）與實際程式碼，判定每個預期行為是否已確實達成**。你不是來寫 code 的，只讀不改。${resolvedGapsSection}${componentNotesSection}${engineSeedSection}${deltaSection}
 
 ## 審查流程（強制，依序執行）
 
@@ -799,7 +817,7 @@ ${orchestratorNote}
 
 ---
 
-你是獨立的規格審查員（reviewer）。你的任務：**逐項回對規格檢查表與實際程式碼，判定每一項是否已確實實作**。你不是來寫 code 的，只讀不改。${componentNotesSection}${engineSeedSection}${deltaSection}
+你是獨立的規格審查員（reviewer）。你的任務：**逐項回對規格檢查表與實際程式碼，判定每一項是否已確實實作**。你不是來寫 code 的，只讀不改。${resolvedGapsSection}${componentNotesSection}${engineSeedSection}${deltaSection}
 
 ## 審查流程（強制，依序執行）
 

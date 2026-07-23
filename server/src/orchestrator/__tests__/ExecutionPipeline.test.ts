@@ -110,6 +110,75 @@ describe('ExecutionPipeline', () => {
     });
   });
 
+  describe('assembleContext() — Layer 2.75 規格裁決注入（只從 DB 讀）', () => {
+    function seedTaskWithGaps() {
+      testDb.prepare(`INSERT INTO projects (id, name, working_dir) VALUES ('proj-1', 'Test', '/tmp')`).run();
+      testDb.prepare(`INSERT INTO tasks (id, project_id, title, label, task_type) VALUES ('task-1', 'proj-1', 'WA05', 'frontend', 'feature')`).run();
+    }
+
+    const baseOpts = {
+      superpowers: [] as any[],
+      projectId: 'proj-1',
+      taskId: 'task-1',
+      role: 'frontend',
+      taskTitle: 'WA05',
+      taskDescription: 'desc',
+      taskType: 'feature' as any,
+    };
+
+    it('injects resolved-with-note gaps as a 規格裁決 section（效力等同規格）', () => {
+      seedTaskWithGaps();
+      testDb.prepare(`
+        INSERT INTO spec_gaps (id, task_id, project_id, category, description, status, resolution_note, resolved_at)
+        VALUES ('gap-1', 'task-1', 'proj-1', 'logic_unclear', '刪除是否需要確認？', 'resolved', '選 B：刪除前 confirm 彈窗', '2026-01-01 00:00:00')
+      `).run();
+
+      const prompt = pipeline.assembleContext(baseOpts);
+      expect(prompt).toContain('## 規格裁決（使用者已拍板——效力等同規格，必須遵守）');
+      expect(prompt).toContain('- Q: 刪除是否需要確認？ → 裁決: 選 B：刪除前 confirm 彈窗');
+    });
+
+    it('omits the section when there are no resolved gaps / only empty-note or open gaps', () => {
+      seedTaskWithGaps();
+      // open gap
+      testDb.prepare(`
+        INSERT INTO spec_gaps (id, task_id, project_id, category, description) VALUES ('gap-o', 'task-1', 'proj-1', 'other', '未裁決')
+      `).run();
+      // resolved 但 note 為空（舊資料）
+      testDb.prepare(`
+        INSERT INTO spec_gaps (id, task_id, project_id, category, description, status, resolution_note, resolved_at)
+        VALUES ('gap-e', 'task-1', 'proj-1', 'other', '空 note 舊缺口', 'resolved', '', '2026-01-01 00:00:00')
+      `).run();
+
+      const prompt = pipeline.assembleContext(baseOpts);
+      expect(prompt).not.toContain('## 規格裁決');
+    });
+
+    it('omits the section when no taskId is given', () => {
+      seedTaskWithGaps();
+      const prompt = pipeline.assembleContext({ ...baseOpts, taskId: undefined });
+      expect(prompt).not.toContain('## 規格裁決');
+    });
+
+    it('lists multiple resolutions in resolved_at ASC order', () => {
+      seedTaskWithGaps();
+      testDb.prepare(`
+        INSERT INTO spec_gaps (id, task_id, project_id, category, description, status, resolution_note, resolved_at)
+        VALUES ('gap-2', 'task-1', 'proj-1', 'field_undefined', '狀態欄位選項？', 'resolved', '固定三值：草稿/送審/核准', '2026-01-02 00:00:00')
+      `).run();
+      testDb.prepare(`
+        INSERT INTO spec_gaps (id, task_id, project_id, category, description, status, resolution_note, resolved_at)
+        VALUES ('gap-1', 'task-1', 'proj-1', 'logic_unclear', '刪除是否需要確認？', 'resolved', '選 B：刪除前 confirm 彈窗', '2026-01-01 00:00:00')
+      `).run();
+
+      const prompt = pipeline.assembleContext(baseOpts);
+      const first = prompt.indexOf('選 B：刪除前 confirm 彈窗');
+      const second = prompt.indexOf('固定三值：草稿/送審/核准');
+      expect(first).toBeGreaterThan(-1);
+      expect(second).toBeGreaterThan(first);
+    });
+  });
+
   describe('resolveWorkingDir()', () => {
     const resolve = (project: any, label: string) => (pipeline as any).resolveWorkingDir(project, label);
 

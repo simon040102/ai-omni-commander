@@ -19,6 +19,7 @@ import { fetchAsanaSubtasksTree } from '../../utils/asanaSubtasks.js';
 import { runSpecChangeCheck, type SpecChangeTarget } from '../spec-change.js';
 import { parseTestCommands, getRequiredUnitTestItems, findLatestUnitTestVerification, listVerificationEntries, UNRELATED_TEST_FAILURE_RULE } from './verification-tools.js';
 import { getStalledHours, DEFAULT_STALE_THRESHOLD_HOURS } from '../stale-tasks.js';
+import { summarizeGapText } from '../../utils/specGapResolution.js';
 
 interface TaskRow {
   id: string;
@@ -722,7 +723,25 @@ ${failedItems.map(i => `- ${i}`).join('\n')}
         notifyWarning += ' (warning: task.statusChange notification to Web UI failed)';
       }
 
-      return { content: [{ type: 'text' as const, text: `Task ${taskId} status updated to "${status}"${notifyWarning}` }] };
+      // ── E4：結案提醒（不擋、不是閘門）——completed 成功後附註仍 open 的規格缺口 ──
+      // 只在成功路徑的回應文字加提醒，不改任何閘門判定。
+      let openGapsReminder = '';
+      if (status === 'completed') {
+        const openGaps = db.prepare(
+          "SELECT id, category, description FROM spec_gaps WHERE task_id = ? AND status = 'open' ORDER BY created_at ASC"
+        ).all(taskId) as Array<{ id: string; category: string; description: string }>;
+        if (openGaps.length > 0) {
+          const shown = openGaps.slice(0, 10).map(g => `- [${g.category}] ${summarizeGapText(g.description, 120)}（gapId=${g.id}）`);
+          const more = openGaps.length > 10 ? `\n（其餘 ${openGaps.length - 10} 筆用 list_spec_gaps(taskId="${taskId}", status="open") 查看）` : '';
+          openGapsReminder = `
+
+⚠ 此任務尚有 ${openGaps.length} 筆規格缺口未裁決（提醒，不影響結案）：
+${shown.join('\n')}${more}
+請將清單轉知使用者；使用者拍板後用 resolve_spec_gap(gapId, resolutionNote=具體裁決) 落地，裁決會自動注入後續派工與 AI 回對。`;
+        }
+      }
+
+      return { content: [{ type: 'text' as const, text: `Task ${taskId} status updated to "${status}"${notifyWarning}${openGapsReminder}` }] };
     },
   );
 

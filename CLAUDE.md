@@ -141,6 +141,8 @@ A dual-mode AI collaborative development system. Originally orchestrated multipl
 
 **⚠ 嚴禁在 prompt 中手動摘要規格內容。** prompt 只放規格文件的完整路徑，讓 subagent 自己用 Read tool 讀取原始文件。手動摘要容易打錯字或遺漏細節（如「儲存」寫成「存儲」），subagent 會照著錯的摘要實作而不會核對原始文件。
 
+**⚠ 規格裁決同理不可手寫。** 使用者對 spec_gap 的裁決一律先 `resolve_spec_gap(gapId, resolutionNote=具體裁決)` 落地 DB，由 `get_execution_plan`／派工 context 自動注入「## 規格裁決」區塊（AI 回對計畫也會自動帶）；不要手動把裁決文字塞進 prompt——打錯字或漏條 subagent 無從核對，且下一個 session 看不到。
+
 #### 3. 讀取 Workspace 規範
 subagent 的 prompt 必須包含：
 ```
@@ -174,6 +176,7 @@ if task.label == 'backend' and config.backendExtraPrompt:
 
 ### 執行時
 - 不確定做哪個任務時，可用 `next_task(projectId)` 取得推薦
+- **spec_gap 裁決落地（強制）**：使用者在對話中對規格缺口拍板後，orchestrator 必須**立刻** `resolve_spec_gap(gapId, resolutionNote=具體裁決)` 寫進 DB；**嚴禁只把答案手動寫進派工 prompt 或對話帶過**。裁決區塊只由工具從 DB 自動注入（派工 prompt Layer 2.75／resume_task 的 resolvedGaps／AI 回對計畫的「規格裁決」段）——不落地 = implementer 和 reviewer 看不到，這就是結構性強制。resolutionNote 必須是具體決定（如「選 B：刪除前 confirm 彈窗」），空泛詞（「可以」「照舊」）會被拒絕
 - **任務來源決定流程**：
   - **Asana 已存在的任務**（已有 taskId）→ 直接 `update_task_status(taskId, "in_progress")`
   - **使用者口述的新任務**（沒有 taskId）→ 先 `create_task(projectId, title, label, ...)`，用回傳的 taskId，再 `update_task_status(taskId, "in_progress")`

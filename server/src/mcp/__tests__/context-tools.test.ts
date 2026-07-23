@@ -112,6 +112,43 @@ describe('context-tools', () => {
       expect(data.nextSteps).toContain('開工閘（規格理解確認）未通過');
     });
 
+    it('returns resolvedGaps（resolved 且 note 非空）並在 nextSteps 註明效力', async () => {
+      seed(testDb);
+      // resolved + 具體裁決 → 進 resolvedGaps
+      testDb.prepare(`
+        INSERT INTO spec_gaps (id, task_id, project_id, category, description, status, resolution_note, resolved_at)
+        VALUES ('gap-r1', 'task-1', 'proj-1', 'logic_unclear', '刪除是否需要確認？', 'resolved', '選 B：刪除前 confirm 彈窗', '2026-01-01 00:00:00')
+      `).run();
+      // resolved 但 note 為空（舊資料）→ 不進 resolvedGaps
+      testDb.prepare(`
+        INSERT INTO spec_gaps (id, task_id, project_id, category, description, status, resolution_note, resolved_at)
+        VALUES ('gap-r2', 'task-1', 'proj-1', 'other', '舊缺口', 'resolved', '', '2026-01-02 00:00:00')
+      `).run();
+      // open → 不進 resolvedGaps
+      testDb.prepare(`
+        INSERT INTO spec_gaps (id, task_id, project_id, category, description) VALUES ('gap-o', 'task-1', 'proj-1', 'other', '未解決')
+      `).run();
+
+      const data = JSON.parse((await callTool(server, 'resume_task', { taskId: 'task-1' })).content[0].text);
+      expect(data.resolvedGaps).toEqual([{
+        id: 'gap-r1',
+        category: 'logic_unclear',
+        description: '刪除是否需要確認？',
+        resolutionNote: '選 B：刪除前 confirm 彈窗',
+        resolvedAt: '2026-01-01 00:00:00',
+      }]);
+      expect(data.openSpecGaps).toHaveLength(1);
+      expect(data.nextSteps).toContain('規格裁決');
+      expect(data.nextSteps).toContain('效力等同規格');
+    });
+
+    it('resolvedGaps is empty when the task has no resolved-with-note gaps', async () => {
+      seed(testDb);
+      const data = JSON.parse((await callTool(server, 'resume_task', { taskId: 'task-1' })).content[0].text);
+      expect(data.resolvedGaps).toEqual([]);
+      expect(data.nextSteps).not.toContain('規格裁決');
+    });
+
     it('respects outputLimit and returns the most recent entries', async () => {
       seed(testDb);
       addOutput(testDb, 'task-1', 'line 1');

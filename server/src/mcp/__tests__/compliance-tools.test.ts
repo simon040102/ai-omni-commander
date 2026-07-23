@@ -442,6 +442,81 @@ describe('compliance-tools', () => {
       expect(result.isError).toBe(true);
     });
 
+    it('injects the 規格裁決 section（resolved+note gaps，效力等同規格條文）into the plan', async () => {
+      seedProject(testDb);
+      seedTask(testDb);
+      await callTool(server, 'save_spec_checklist', { taskId: 'task-1', items: [UI_ITEM] });
+      testDb.prepare(`
+        INSERT INTO spec_gaps (id, task_id, project_id, category, description, status, resolution_note, resolved_at)
+        VALUES ('gap-1', 'task-1', 'proj-1', 'logic_unclear', '刪除是否需要確認？', 'resolved', '選 B：刪除前 confirm 彈窗', '2026-01-01 00:00:00')
+      `).run();
+      // resolved 但 note 為空（舊資料）→ 不注入
+      testDb.prepare(`
+        INSERT INTO spec_gaps (id, task_id, project_id, category, description, status, resolution_note, resolved_at)
+        VALUES ('gap-2', 'task-1', 'proj-1', 'other', '空 note 舊缺口甲乙丙', 'resolved', '  ', '2026-01-02 00:00:00')
+      `).run();
+      // open → 不注入
+      testDb.prepare(`
+        INSERT INTO spec_gaps (id, task_id, project_id, category, description) VALUES ('gap-3', 'task-1', 'proj-1', 'other', '尚未裁決的缺口丁戊己')
+      `).run();
+
+      const text = (await callTool(server, 'get_compliance_review_plan', { taskId: 'task-1' })).content[0].text;
+      expect(text).toContain('## 規格裁決（驗證依據之一');
+      expect(text).toContain('- Q: 刪除是否需要確認？ → 裁決: 選 B：刪除前 confirm 彈窗');
+      expect(text).toContain('視同規格條文');
+      expect(text).not.toContain('空 note 舊缺口甲乙丙');
+      expect(text).not.toContain('尚未裁決的缺口丁戊己');
+    });
+
+    it('omits the 規格裁決 section entirely when the task has no resolved-with-note gaps', async () => {
+      seedProject(testDb);
+      seedTask(testDb);
+      await callTool(server, 'save_spec_checklist', { taskId: 'task-1', items: [UI_ITEM] });
+
+      const text = (await callTool(server, 'get_compliance_review_plan', { taskId: 'task-1' })).content[0].text;
+      expect(text).not.toContain('## 規格裁決');
+    });
+
+    it('injects the 規格裁決 section on the light track too', async () => {
+      seedProject(testDb);
+      seedTask(testDb);
+      testDb.prepare(`UPDATE tasks SET flow_state = ? WHERE id = 'task-1'`).run(
+        JSON.stringify({ roles: {}, track: 'light', trackReason: 'bug 無 SA/SD' }),
+      );
+      await callTool(server, 'save_spec_checklist', { taskId: 'task-1', items: [{ itemType: 'logic', content: '刪除前需 confirm' }] });
+      testDb.prepare(`
+        INSERT INTO spec_gaps (id, task_id, project_id, category, description, status, resolution_note, resolved_at)
+        VALUES ('gap-1', 'task-1', 'proj-1', 'logic_unclear', '刪除是否需要確認？', 'resolved', '選 B：刪除前 confirm 彈窗', '2026-01-01 00:00:00')
+      `).run();
+
+      const text = (await callTool(server, 'get_compliance_review_plan', { taskId: 'task-1' })).content[0].text;
+      expect(text).toContain('LIGHT 軌');
+      expect(text).toContain('## 規格裁決（驗證依據之一');
+      expect(text).toContain('選 B：刪除前 confirm 彈窗');
+    });
+
+    it('truncates the 規格裁決 section at the char budget and points at list_spec_gaps', async () => {
+      seedProject(testDb);
+      seedTask(testDb);
+      await callTool(server, 'save_spec_checklist', { taskId: 'task-1', items: [UI_ITEM] });
+      // 20 筆長裁決（每行約 400+ 字元）→ 超過 4000 預算必截斷
+      const insert = testDb.prepare(`
+        INSERT INTO spec_gaps (id, task_id, project_id, category, description, status, resolution_note, resolved_at)
+        VALUES (?, 'task-1', 'proj-1', 'logic_unclear', ?, 'resolved', ?, ?)
+      `);
+      for (let i = 0; i < 20; i++) {
+        insert.run(`gap-${i}`, `問題 ${i}：${'甲'.repeat(120)}`, `裁決 ${i}：${'乙'.repeat(280)}`, `2026-01-01 00:00:${String(i).padStart(2, '0')}`);
+      }
+
+      const text = (await callTool(server, 'get_compliance_review_plan', { taskId: 'task-1' })).content[0].text;
+      expect(text).toContain('## 規格裁決（驗證依據之一');
+      expect(text).toContain('裁決清單已達大小上限截斷');
+      expect(text).toContain('list_spec_gaps(taskId="task-1", status="resolved")');
+      // 最早的裁決保留、最晚的被截掉（resolved_at ASC 進預算）
+      expect(text).toContain('裁決 0：');
+      expect(text).not.toContain('裁決 19：');
+    });
+
     it('returns a full dispatch plan: independent reviewer, per-item evidence, logic verification, spec doc paths', async () => {
       seedProject(testDb);
       seedTask(testDb);
