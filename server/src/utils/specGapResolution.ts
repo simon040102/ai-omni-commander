@@ -36,8 +36,9 @@ const NOTE_GUIDANCE =
   '裁決效力等同規格，會自動注入後續派工與 AI 回對——寫得含糊等於規格含糊。';
 
 function normalizeNote(note: string): string {
-  // 去頭尾空白 + 去尾常見標點（「可以。」「ok!」也要攔），再小寫比對
-  return note.trim().replace(/[\s。．.、，,!！?？~～]+$/u, '').toLowerCase();
+  // 去頭尾空白 + 反覆剝除尾端標點與語氣詞（「可以。」「ok!」「都可以喔」「照舊吧」也要攔），再小寫比對。
+  // 語氣詞只剝尾端、只影響黑名單比對，不影響實際落地的 note 內容。
+  return note.trim().replace(/[\s。．.、，,!！?？~～喔啊啦呀囉唷嘛欸呢哦吧耶捏]+$/u, '').toLowerCase();
 }
 
 export type ResolutionNoteValidation =

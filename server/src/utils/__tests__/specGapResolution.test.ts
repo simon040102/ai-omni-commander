@@ -34,7 +34,7 @@ describe('validateResolutionNote（E1 答案品質）', () => {
   });
 
   it('rejects vague blacklist words（含大小寫 / 尾標點變體）', () => {
-    for (const vague of ['可以', 'OK', 'ok', '照舊', '同意', '沒問題', '好', '可以。', 'no problem', 'LGTM', '都可以！']) {
+    for (const vague of ['可以', 'OK', 'ok', '照舊', '同意', '沒問題', '好', '可以。', 'no problem', 'LGTM', '都可以！', '都可以喔。', '照舊吧', '沒問題喔', '好啊啦']) {
       const r = validateResolutionNote(vague);
       expect(r.ok, `should reject "${vague}"`).toBe(false);
       if (!r.ok) {
