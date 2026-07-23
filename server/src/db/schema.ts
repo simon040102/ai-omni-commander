@@ -504,7 +504,7 @@ export function runMigrations(db: Database.Database): void {
         task_id         TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
         project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
         category        TEXT NOT NULL CHECK(category IN ('sa_missing', 'sd_missing', 'field_undefined',
-                                                          'api_undefined', 'logic_unclear', 'other', 'spec_changed', 'sa_sd_mismatch')),
+                                                          'api_undefined', 'logic_unclear', 'other', 'spec_changed', 'sa_sd_mismatch', 'ambiguous_spec')),
         description     TEXT NOT NULL,
         status          TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'resolved')),
         resolution_note TEXT,
@@ -777,5 +777,55 @@ export function runMigrations(db: Database.Database): void {
   {
     const tcols = db.prepare("PRAGMA table_info(tasks)").all() as Array<{ name: string }>;
     if (!tcols.some(c => c.name === 'due_date')) db.exec("ALTER TABLE tasks ADD COLUMN due_date TEXT");
+  }
+
+  // =============================================
+  // v19 Migration: spec_gaps category CHECK 擴充 'ambiguous_spec'
+  // (check_spec_consistency 維度二「規格模糊點預檢」的 reviewer agent 用
+  // report_spec_gap 寫入——規格找不到唯一答案的決策點，開給使用者拍板).
+  // Existing DBs have the 8-value CHECK — rebuild the table (v17 pattern:
+  // introspection guard → PRAGMA outside tx → BEGIN IMMEDIATE tx → CREATE new
+  // → INSERT SELECT explicit columns → DROP → RENAME → recreate indexes →
+  // commit; catch does best-effort ROLLBACK). Fresh DBs already get the
+  // 9-value CHECK from v9 above and skip this. Idempotent.
+  // =============================================
+  {
+    const specGapsInfo = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='spec_gaps'").get() as { sql: string } | undefined;
+    if (specGapsInfo?.sql && !specGapsInfo.sql.includes("'ambiguous_spec'")) {
+      try {
+        db.exec('PRAGMA foreign_keys = OFF');
+        db.exec(`
+          BEGIN IMMEDIATE;
+
+          CREATE TABLE IF NOT EXISTS spec_gaps_new (
+            id              TEXT PRIMARY KEY,
+            task_id         TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            category        TEXT NOT NULL CHECK(category IN ('sa_missing', 'sd_missing', 'field_undefined',
+                                                              'api_undefined', 'logic_unclear', 'other', 'spec_changed', 'sa_sd_mismatch', 'ambiguous_spec')),
+            description     TEXT NOT NULL,
+            status          TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'resolved')),
+            resolution_note TEXT,
+            created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+            resolved_at     TEXT
+          );
+          INSERT OR IGNORE INTO spec_gaps_new (id, task_id, project_id, category, description, status, resolution_note, created_at, resolved_at)
+            SELECT id, task_id, project_id, category, description, status, resolution_note, created_at, resolved_at
+            FROM spec_gaps;
+          DROP TABLE spec_gaps;
+          ALTER TABLE spec_gaps_new RENAME TO spec_gaps;
+          CREATE INDEX IF NOT EXISTS idx_spec_gaps_project ON spec_gaps(project_id);
+          CREATE INDEX IF NOT EXISTS idx_spec_gaps_task ON spec_gaps(task_id);
+          CREATE INDEX IF NOT EXISTS idx_spec_gaps_status ON spec_gaps(status);
+
+          COMMIT;
+        `);
+      } catch (err) {
+        process.stderr.write(`[schema] v19 spec_gaps ambiguous_spec migration failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        try { db.exec('ROLLBACK'); } catch { /* no open transaction */ }
+      } finally {
+        db.exec('PRAGMA foreign_keys = ON');
+      }
+    }
   }
 }

@@ -112,6 +112,45 @@ describe('consistency-tools (check_spec_consistency)', () => {
     expect(text).toContain('不得呼叫 update_task_status');
   });
 
+  it('includes dimension two (規格模糊點預檢) in the dispatch plan', async () => {
+    seed(testDb);
+    addDoc(testDb, 'd-sa', 'WA05-SA.md', 'SA');
+    addDoc(testDb, 'd-sd', 'WA05-SD.md', 'SD');
+
+    const result = await callTool(server, 'check_spec_consistency', { taskId: 'task-1' });
+    expect(result.isError).toBeUndefined();
+    const text = result.content[0].text as string;
+
+    // Two-dimension framing: SA↔SD comparison + ambiguity precheck via decision-tree walk
+    expect(text).toContain('維度一');
+    expect(text).toContain('規格模糊點預檢');
+    expect(text).toContain('決策樹');
+    expect(text).toContain('唯一答案');
+
+    // Gap description format: provenance + undecided decision + options for the user to pick
+    expect(text).toContain('規格出處');
+    expect(text).toContain('可能的選項');
+    expect(text).toContain('三要素');
+
+    // Check-before-report (anti-noise): all four self-check sources, with concrete calls
+    expect(text).toContain('先查再報');
+    expect(text).toContain('規格全文其他章節');
+    expect(text).toContain('Axure 原型');
+    expect(text).toContain('list_project_notes(projectId="proj-1")');
+    expect(text).toContain('list_spec_gaps(taskId="task-1")');
+
+    // Explicit exclusions (no nitpicking) + advisory (never blocks gates/dispatch)
+    expect(text).toContain('吹毛求疵');
+    expect(text).toContain('advisory');
+    expect(text).toContain('不影響任何完成閘門');
+
+    // ambiguous_spec gap call bound to this task
+    expect(text).toContain('report_spec_gap(taskId="task-1", category="ambiguous_spec"');
+
+    // Orchestrator guidance: suggest user decides first, but execution may proceed
+    expect(text).toContain('不強制');
+  });
+
   it('prefers task_documents bindings over project-level docs', async () => {
     seed(testDb);
     // Project level has both SA and SD…

@@ -78,6 +78,26 @@ describe('spec-gap-tools', () => {
       });
       expect(result.isError).toBe(true);
     });
+
+    it('accepts the ambiguous_spec category (規格模糊點預檢 產出)', async () => {
+      seed(testDb);
+
+      const result = await callTool(server, 'report_spec_gap', {
+        taskId: 'task-1',
+        category: 'ambiguous_spec',
+        description: '刪除是否需要二次確認——SA WA05.md §3.2 只寫「可刪除」，未寫確認流程（A: 直接刪除 / B: confirm 彈窗後刪除）',
+      });
+
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).toContain('Spec gap recorded');
+
+      const gap = testDb.prepare("SELECT * FROM spec_gaps WHERE category = 'ambiguous_spec'").get() as any;
+      expect(gap).toBeTruthy();
+      expect(gap.status).toBe('open');
+
+      const outputs = testDb.prepare('SELECT * FROM agent_outputs WHERE agent_id = ?').all('mcp-task-1') as any[];
+      expect(outputs[0].content).toContain('[SPEC_GAP][ambiguous_spec]');
+    });
   });
 
   describe('list_spec_gaps', () => {

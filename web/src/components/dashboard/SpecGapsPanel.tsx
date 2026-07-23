@@ -24,6 +24,7 @@ const CATEGORY_LABELS: Record<string, string> = {
   other: '其他',
   spec_changed: '規格已變更',
   sa_sd_mismatch: 'SA/SD 矛盾',
+  ambiguous_spec: '規格模糊',
 };
 
 interface SpecGapsPanelProps {

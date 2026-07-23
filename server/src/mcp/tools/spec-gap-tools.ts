@@ -13,7 +13,7 @@ import { getMcpDb } from '../db.js';
 import { notifyWebServer } from '../notify.js';
 import { ensureMcpAgent } from '../helpers.js';
 
-export const SPEC_GAP_CATEGORIES = ['sa_missing', 'sd_missing', 'field_undefined', 'api_undefined', 'logic_unclear', 'other', 'spec_changed', 'sa_sd_mismatch'] as const;
+export const SPEC_GAP_CATEGORIES = ['sa_missing', 'sd_missing', 'field_undefined', 'api_undefined', 'logic_unclear', 'other', 'spec_changed', 'sa_sd_mismatch', 'ambiguous_spec'] as const;
 
 interface SpecGapRow {
   id: string;
@@ -35,7 +35,7 @@ export function registerSpecGapTools(server: McpServer): void {
     '回報規格缺口（SA/SD 沒定義的東西）。**遇到規格未定義、不清楚或矛盾的欄位/API/邏輯時，不要自行編造或猜測——呼叫此工具記錄，標記 [NEEDS_CLARIFICATION] 後繼續做其他部分。** 記錄會列入專案的「規格缺少/待補清單」，由使用者補規格。任務結束前應確保所有遇到的規格缺口都已回報。',
     {
       taskId: z.string().describe('任務 ID'),
-      category: z.enum(SPEC_GAP_CATEGORIES).describe('缺口分類：sa_missing=SA 文件缺失 / sd_missing=SD 文件缺失 / field_undefined=欄位未定義 / api_undefined=API 未定義 / logic_unclear=邏輯不明確或矛盾 / other=其他 / spec_changed=規格檔案已在 SVN 更新（通常由 check_spec_changes 自動建立）/ sa_sd_mismatch=SA 與 SD 規格互相矛盾（通常由 check_spec_consistency 的一致性檢查 agent 建立）'),
+      category: z.enum(SPEC_GAP_CATEGORIES).describe('缺口分類：sa_missing=SA 文件缺失 / sd_missing=SD 文件缺失 / field_undefined=欄位未定義 / api_undefined=API 未定義 / logic_unclear=邏輯不明確或矛盾 / other=其他 / spec_changed=規格檔案已在 SVN 更新（通常由 check_spec_changes 自動建立）/ sa_sd_mismatch=SA 與 SD 規格互相矛盾（通常由 check_spec_consistency 的一致性檢查 agent 建立）/ ambiguous_spec=規格模糊或有多種合理解讀——implementer 會被迫用猜的決策點（通常由 check_spec_consistency 維度二「規格模糊點預檢」在派工前建立，開給使用者拍板；advisory，不擋工）'),
       description: z.string().min(1).describe('缺口描述：具體說明缺什麼（哪個欄位/API/流程）、在哪份規格找過、需要使用者補什麼'),
     },
     { title: 'Report Spec Gap', readOnlyHint: false, destructiveHint: false, openWorldHint: false },

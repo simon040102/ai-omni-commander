@@ -67,7 +67,13 @@ A dual-mode AI collaborative development system. Originally orchestrated multipl
      請提供 SA 文件路徑，或說「跳過」強制執行。
      ```
    - **跳過時必須用 `report_output` 記錄**：`[SKIP] 使用者跳過規格檢查：缺少 {缺少的文件類型} 文件`
-   - （可選）SA/SD 都齊時可先 `check_spec_consistency(taskId)` 檢查規格自身一致性——規格自相矛盾時實作永遠無法 100% 回對，矛盾先解決再開工
+   - （可選）SA/SD 都齊時可先 `check_spec_consistency(taskId)`——同一次派工做兩個維度：(1) **SA↔SD 矛盾比對**（規格自相矛盾時實作永遠無法 100% 回對，矛盾先解決再開工）；(2) **規格模糊點預檢**（以 implementer 視角走決策樹，把「規格找不到唯一答案」的決策點開成 `ambiguous_spec` 缺口讓使用者拍板；advisory，不影響任何閘門、不阻止派工）。**使用時機（任務有大小之分，不是每次都跑；判斷者是 orchestrator、決定權在使用者，絕不自動觸發）**：
+     1. light 軌／小 bug／小改 → 不跑也不提
+     2. full 軌小規格（單頁 CRUD、欄位少）→ 預設不跑——模糊留給 implementer 撞到再 `report_spec_gap` 的既有機制
+     3. full 軌大規格（多跳窗／多流程／長 SA）→ orchestrator 在此規格齊全檢查步驟「建議」使用者跑，使用者同意才跑
+     4. 使用者主動要求 → 隨時可跑
+
+     發現 ambiguous_spec 缺口 → 建議使用者先逐項拍板再執行（可照常執行，不強制）
    - 任務若已是 in_progress（接手舊任務）→ 先 `resume_task(taskId)` 恢復脈絡再判斷
 5. 告知使用者找到什麼，同時問：「有沒有額外文件？沒有的話說『執行』」
 6. 使用者說「執行」才派 subagent（前端 → cwd=frontendPath，後端 → cwd=backendPath，都做 → 派兩個 subagent）

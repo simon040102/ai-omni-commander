@@ -1300,7 +1300,7 @@ ${lightReportLine}
 3. 如果有 Axure HTML — 用 Read tool 讀取，對照 SA 確認 UI 結構
 ${reportLine}
 5. 開發過程中遇到任何文字、欄位名、API 路徑，回頭查規格確認，不要憑印象寫
-6. （建議）讀完後若發現 SA 與 SD 有疑似矛盾，通知 orchestrator 執行 ${consistencyCall} 做系統性比對——規格矛盾先解決再開工，否則規格回對無法 100%`;
+6. （證據驅動，非必跑）讀完後若發現 SA 與 SD 有疑似矛盾、或規格對關鍵決策模稜兩可，通知 orchestrator——由使用者決定是否執行 ${consistencyCall}（一致性比對 + 模糊點預檢）。規格矛盾先解決再開工，否則規格回對無法 100%`;
   }
 
   /**
