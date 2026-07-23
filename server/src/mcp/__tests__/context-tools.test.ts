@@ -241,6 +241,18 @@ describe('context-tools', () => {
       });
     });
 
+    it('save_project_note description 有必要性測試（只記可重用規則、流水帳不記）', () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const tool = (server as any)._registeredTools['save_project_note'];
+      // 必要性門檻：目的是防重犯錯、不是流水帳
+      expect(tool.description).toContain('必要性測試');
+      expect(tool.description).toContain('下一個_不同_任務');
+      // 明確反例：一次性事件/進度/commit 日期 = 垃圾不記
+      expect(tool.description).toContain('流水帳');
+      // 判準：去時間/任務名/commit 後還成立才記
+      expect(tool.description).toContain('把時間、任務名、commit 拿掉後還成立');
+    });
+
     it('save_project_note description 收緊寫入紀律（精簡/附出處/不重複/過時 archive）', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const tool = (server as any)._registeredTools['save_project_note'];
@@ -248,9 +260,9 @@ describe('context-tools', () => {
       expect(tool.description).toContain('一則一個重點、精簡可操作');
       // 2. 附出處，無出處不記
       expect(tool.description).toContain('附出處');
-      expect(tool.description).toContain('無出處的觀察不記');
+      expect(tool.description).toContain('無出處不記');
       // 3. 不要重複——先 list_project_notes 看有沒有涵蓋
-      expect(tool.description).toContain('不要重複既有筆記');
+      expect(tool.description).toContain('不要重複');
       expect(tool.description).toContain('list_project_notes');
       // 4. 過時就 archive
       expect(tool.description).toContain('過時就 archive');

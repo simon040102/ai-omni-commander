@@ -718,9 +718,9 @@ ${missingLines.join('\n')}${staleBlock}${deltaTruncated ? '\n（清單已達大�
    - 找不到、不確定、規格與程式碼有出入 → 一律 missing，可用 note 說明疑點
 6. **一次寫回**：全部判完後呼叫 save_compliance_review(taskId="${taskId}", results=[{itemId, status, evidence: [{file, line}], note}, ...])，**必須涵蓋所有未豁免項目**。
 7. **嚴禁**只看 implementer 的回報、verification report、commit message 或任何摘要就下判定——**必須自己用 Read/Grep 開檔案核對**。
-8. **回寫元件知識庫（save_compliance_review 之後）**：把本次審查中新確認的**可重用元件級事實**（共用元件產生什麼文字/行為、慣例差異），用 save_project_note(projectId="${task.project_id}", category="component", content=...) 記錄，內容必須附元件檔路徑+行號與關鍵識別（無出處的觀察不記）——下一個任務的 reviewer 會自動收到。**寫入紀律（知識庫會全量注入下一輪 reviewer，寫肥/重複會稀釋重點）：**
+8. **回寫元件知識庫（save_compliance_review 之後，非必要步驟——沒有值得記的就不要記）**：只在發現**可重用的元件級事實**（共用元件產生什麼文字/行為、慣例差異，下一個_不同_任務不知道就會做錯的）時，才用 save_project_note(projectId="${task.project_id}", category="component", content=...) 記錄。**先過必要性測試**：把時間/任務名/commit 拿掉後還成立的可重用規則才記；「這次審了什麼、發現這個任務哪裡 missing」是流水帳，**不要記**（那是 save_compliance_review 的 note 該放的）。**寫入紀律：**
    - **先對照上方已注入的「元件知識庫」區塊**（若有）——只記「新的、現有筆記沒涵蓋」的事實；能對應到既有筆記的更新/延伸就不要新增重複則。
-   - **精簡**：一則一個重點、附元件檔+行號，不要長篇。
+   - **精簡**：一則一個重點、附元件檔+行號、無出處不記，不要長篇。
    - **既有筆記已過時**（引用行對不上/元件已改）→ 用 archive_project_note(noteId=...) 標掉，不要留著誤導。`;
 
       const forbiddenSection = `## 絕對禁止

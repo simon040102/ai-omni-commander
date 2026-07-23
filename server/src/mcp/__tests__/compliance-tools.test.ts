@@ -481,7 +481,10 @@ describe('compliance-tools', () => {
       expect(text).toContain('禁止存 ui_text——存 logic');
       // P1：回寫閉環（save_compliance_review 之後記錄可重用元件級事實）
       expect(text).toContain('save_project_note(projectId="proj-1", category="component"');
-      expect(text).toContain('無出處的觀察不記');
+      expect(text).toContain('無出處不記');
+      // 必要性門檻：回寫非必要、流水帳不記、去時間/任務/commit 後還成立才記
+      expect(text).toContain('沒有值得記的就不要記');
+      expect(text).toContain('流水帳');
       // 回寫紀律收緊：先對照已注入知識庫、只記新事實、過時 archive
       expect(text).toContain('先對照上方已注入的「元件知識庫」區塊');
       expect(text).toContain('只記「新的、現有筆記沒涵蓋」的事實');
