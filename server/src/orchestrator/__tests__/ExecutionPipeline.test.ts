@@ -432,6 +432,19 @@ describe('ExecutionPipeline', () => {
       expect(plan.prompt).toContain('mcp__omni-commander__report_verification_evidence(taskId="t-fe", filePath=...)');
     });
 
+    it('可維護性規範注入所有 role（frontend + backend），含最小侵入與讓位條款', async () => {
+      createTask('p-mt-fe', 't-mt-fe', 'frontend', 'feature');
+      createTask('p-mt-be', 't-mt-be', 'backend', 'bug');
+
+      for (const taskId of ['t-mt-fe', 't-mt-be']) {
+        const plan = await pipeline.buildExecutionPlan(taskId);
+        expect(plan.prompt, taskId).toContain('## 可維護性規範（所有 role）');
+        expect(plan.prompt, taskId).toContain('最小侵入：只改任務範圍內的程式，不順手重構無關程式');
+        expect(plan.prompt, taskId).toContain('動手前先找現成的');
+        expect(plan.prompt, taskId).toContain('以專案自己的規範為準');
+      }
+    });
+
     it('backend plan 含效能分析 + 安全檢查 + 撈全表禁令（stack 中性） + 驗收工具接線', async () => {
       createTask('p-be', 't-be', 'backend', 'feature');
 

@@ -136,6 +136,7 @@ A dual-mode AI collaborative development system. Originally orchestrated multipl
 - **單元測試強制流程**（所有 role）：先列測試案例清單（report_output 留稽核軌跡）再寫測試；失敗案例的預期結果必須有規格出處，規格沒定義就 report_spec_gap 不可編造；測試指令來自專案設定 `frontendTestCommand`/`backendTestCommand`（light 軌案例來源改為 BUG 原文重現步驟）
 - **後端效能分析**（backend role）：寫 code 前分析資料表/過濾條件/N+1/資料流，禁「撈全表 + 記憶體過濾」
 - **後端安全檢查**（backend role）：SQL 參數綁定、權限驗證、參數驗證、response/log 不外洩
+- **可維護性規範**（所有 role）：先找現成的再造新、不複製貼上（第三次抽共用）、命名達意、註解只寫為什麼、最小侵入（不順手重構無關程式）、函式單一職責；與 workspace 規範衝突時以專案為準
 
 > 注入內容為 **stack 中性通用版**。專案特有的技術棧慣例（如富邦系的 NaNa 大表禁 findAll()、MetaData.java 的 CREATE_DATE/MODIFY_DATE/DATA_REMARK 欄位）放在各專案的 `backendExtraPrompt` / 專案筆記，會自動注入，不寫死在通用工具。
 
@@ -273,7 +274,7 @@ MCP Server（stdio，由 Claude Code 經 .mcp.json spawn）與 Web Server（Expr
 - **`update_task_status` 完成閘門（六道）**：`completed` 受以下閘門管制——(1) **完工閘（實作邏輯對齊，原閘門 B）**（flow-gated 任務）；(2) **檢查表存在**（有軌道的任務必須有規格檢查表）；(3) **AI 規格回對**（最新 ai_review run missing=0，含 staleness 防護）；(4) **單元測試**（專案有設 `frontendTestCommand`/`backendTestCommand` 時，對應 side 的「單元測試全數通過」驗收項最新一筆回報必須 passed=true；既有測試不是全綠先用 `get_test_baseline_plan` 修基線）；(5) **執行計畫/派工記錄**（frontend/backend/fullstack 任務必須有 `get_execution_plan` 的 track、`[TRACK]` 稽核行或 `save_task_dispatch` 的 `[DISPATCH]` 快照其一）；(6) **驗收 FAIL 擋結案**（任何驗收項最新一筆 `report_verification_result` 為 FAIL 即拒絕，從未回報的項目不擋）。`skipFlowGate=true` + `skipReason` 可覆寫全部閘門，**限使用者明確同意**，會記 `[SKIP]` 供稽核。開工閘（規格理解確認，原閘門 A）在寫 code 前由 `report_flow_check(gate="A")` 把關
 - **`sync_asana_tasks` subtask 遞迴抓取**：專案任務清單抓不到未 multi-home 進專案的 subtask（工作項目常在第二層），同步時自動對 `num_subtasks>0` 的未完成任務遞迴抓 subtask（深度上限 3、只抓未完成、gid 去重、每次同步 subtask API 上限 300 支超過截斷+警告）；assignee 過濾以任務本身判（先抓全樹再過濾）、parent_name=直接母任務、section 繼承根任務；`includeSubtasks=false` 可退回舊行為。共用邏輯：`server/src/utils/asanaSubtasks.ts`（Web 端 `AsanaSyncService.syncOnce` 同一份；Web 端截斷/部分失敗時本輪跳過任務刪除防誤刪）
 - **`fetch_svn_specs` 雙來源**：從 SVN **加上**專案設定的本地 `specFolders` 合併撈取；git 資料夾先安全 `git pull --ff-only`（dirty → 跳過 pull + 警告）
-- **`get_execution_plan` 自動判軌**：full / light 軌（見「選擇任務後」的任務軌道說明），並自動注入規格閱讀／規格遵循／後端效能／後端安全四項規範
+- **`get_execution_plan` 自動判軌**：full / light 軌（見「選擇任務後」的任務軌道說明），並自動注入規格閱讀／規格遵循／可維護性／後端效能／後端安全五項規範
 - **`get_compliance_review_plan` 合約反向對齊（code→spec 欄位，advisory）**：full 軌 reviewer plan 除既有單向逐項回對（spec→code）與「反向掃描規格原文」（spec→checklist 補檢查表）外，另含**合約反向對齊**步驟——枚舉程式對每個 api 實際帶的 request 參數／response 欄位／對應 db_field，與規格定義比對，**程式有、規格沒定義、且屬業務語意**的欄位用 `report_spec_gap(category="field_undefined")` 開缺口交使用者裁決（是過度實作該移除，還是規格待補）。**只做欄位維度**（param/response_field/db_field，**絕不對 ui_text/logic 反向**——誤報海嘯）；排除基礎設施雜訊（分頁 page/size/offset/limit、排序 sort/order、auth token、時間戳 createdAt/updatedAt、專案系統共用欄位如 MetaData 的 CREATE_DATE/MODIFY_DATE/DATA_REMARK）；規格對該 API 欄位定義不足則略過（不硬 diff）。**純 advisory：不影響 matched/missing 判定、不進完成閘門、不擋結案**，產出走既有 report_spec_gap 進 Web UI 待補規格面板。light 軌無 SA/SD 規格文件，不做此步驟
 - **Asana due date 同步**：兩條同步路徑（MCP `sync_asana_tasks`、Web `AsanaSyncService`）都把 due_on 落地到 `tasks.due_date`（原樣 YYYY-MM-DD，非字串→null，改期會觸發 UPDATE）；`get_task`/`list_pending_tasks`（另附 `overdue`）/`resume_task` 回傳 `dueDate`；`next_task` 在既有排序（bug 優先）之下同優先級內逾期/近到期優先（null 排最後），推薦理由帶到期資訊（如「已逾期 2 天」）；Web TaskList 任務列顯示到期日（逾期紅字）。共用純函式見 `server/src/utils/dueDate.ts`
 

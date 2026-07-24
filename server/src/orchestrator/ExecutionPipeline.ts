@@ -83,6 +83,21 @@ const BACKEND_DB_VERIFICATION_SECTION = `## 資料異動驗證（強制 — 專�
 - 欄位名以 describe_table 為準，嚴禁猜`;
 
 /**
+ * 可維護性規範（所有 role）— 通用版（stack 中性）。只放可檢查的具體行為，
+ * 不放「寫乾淨程式碼」類空話；與 workspace 自己的規範衝突時讓位。
+ */
+export const MAINTAINABILITY_SECTION = `## 可維護性規範（所有 role）
+
+- 動手前先找現成的：專案裡已有同類元件/工具函式/寫法慣例，優先重用與模仿，不自創新風格
+- 不複製貼上：相似邏輯出現第三次就抽共用（函式/元件/常數）
+- 命名達意：變數/函式名讀得出用途；魔術數字/字串抽具名常數
+- 註解只寫「為什麼」（規格依據、非直覺的限制），不寫「做什麼」；不留註解掉的死碼
+- 最小侵入：只改任務範圍內的程式，不順手重構無關程式（發現值得重構的地方用 report_output 記錄，另開任務）
+- 函式保持單一職責，避免一個函式塞完整流程
+
+（此為通用墊底規範——與 workspace CLAUDE.md / .claude/skills 的專案規範衝突時，以專案自己的規範為準。）`;
+
+/**
  * 安全弱點檢查（後端限定）— 通用版（stack 中性）。
  */
 const BACKEND_SECURITY_SECTION = `## 安全檢查（完成實作後逐項確認）
@@ -1256,6 +1271,8 @@ ${this.buildSpecReadingSection(taskId, track)}
 ${this.buildSpecChecklistSection(taskId, track, projectId)}
 
 ${this.buildUnitTestSection(taskId, track, role, testCommands)}
+
+${MAINTAINABILITY_SECTION}
 
 ${this.buildStrategy(taskType, taskId, projectId)}
 
