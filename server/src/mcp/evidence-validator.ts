@@ -21,6 +21,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   parseApiContent, buildApiPathRegex, makeIdentifierTester,
+  deriveIdentifierCandidates, apiPathSplits,
   type ChecklistItemType, type ChecklistSide, type WorkspaceRoots,
 } from './compliance-engine.js';
 
@@ -134,12 +135,16 @@ export function resolveEvidenceFile(file: string, rootList: string[]): Resolutio
   return { ok: false, reason: '檔案不存在（以 workspace 相對路徑解析）' };
 }
 
-/** ±RELEVANCE_WINDOW 行窗口內的內容相關性檢查。回傳 null=通過，否則失敗原因。 */
+/** ±RELEVANCE_WINDOW 行窗口內的內容相關性檢查。回傳 null=通過，否則失敗原因。
+ *  allLines（證據檔完整內容）供 API 拆分比對用：Spring 類別層 prefix 常在窗口外
+ *  （檔案頂端），完整 path 未在窗口命中時，允許「suffix 在窗口 + prefix 在同檔任一行」。
+ *  未提供 allLines 時只驗完整 path（向後相容）。 */
 export function checkRelevance(
   itemType: ChecklistItemType,
   content: string,
   detail: Record<string, unknown> | null,
   windowLines: string[],
+  allLines?: string[],
 ): string | null {
   switch (itemType) {
     case 'logic':
@@ -158,14 +163,25 @@ export function checkRelevance(
       if (!apiPath) return 'API path 無法解析（content 應為 "POST /api/xxx" 或 "/api/xxx"）';
       const re = buildApiPathRegex(apiPath);
       if (windowLines.some(l => re.test(l))) return null;
-      return `±${RELEVANCE_WINDOW} 行內找不到 API path「${shorten(apiPath)}」`;
+      // 拆分比對：suffix 在窗口內 + prefix 在同檔任一行（不可只憑尾段——prefix 必須同檔）
+      if (allLines) {
+        for (const sp of apiPathSplits(apiPath)) {
+          if (windowLines.some(l => buildApiPathRegex(sp.suffix).test(l))
+            && allLines.some(l => buildApiPathRegex(sp.prefix).test(l))) return null;
+        }
+      }
+      return `±${RELEVANCE_WINDOW} 行內找不到 API path「${shorten(apiPath)}」（含拆分比對：prefix 需在同檔）`;
     }
     case 'param':
     case 'response_field':
     case 'db_field': {
-      const hit = makeIdentifierTester(content);
-      if (windowLines.some(l => hit(l))) return null;
-      return `±${RELEVANCE_WINDOW} 行內找不到識別字「${shorten(content)}」（word-boundary）`;
+      // 候選識別字（完整字面優先；巢狀路徑取葉節點、結構寫法取 token）——
+      // 任一候選在窗口內 word-boundary 命中即通過，見 deriveIdentifierCandidates
+      for (const cand of deriveIdentifierCandidates(content)) {
+        const hit = makeIdentifierTester(cand);
+        if (windowLines.some(l => hit(l))) return null;
+      }
+      return `±${RELEVANCE_WINDOW} 行內找不到識別字「${shorten(content)}」（word-boundary，含葉節點/token 候選）`;
     }
   }
 }
@@ -210,7 +226,7 @@ export function validateReviewEvidence(inputs: EvidenceCheckInput[], roots: Work
       }
       const from = Math.max(0, ev.line - 1 - RELEVANCE_WINDOW);
       const to = Math.min(lines.length, ev.line + RELEVANCE_WINDOW); // slice end exclusive
-      const reason = checkRelevance(input.itemType, input.content, input.detail ?? null, lines.slice(from, to));
+      const reason = checkRelevance(input.itemType, input.content, input.detail ?? null, lines.slice(from, to), lines);
       if (reason) {
         failures.push({ itemId: input.itemId, file: ev.file, line: ev.line, reason });
       }

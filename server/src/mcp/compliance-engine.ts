@@ -154,11 +154,50 @@ function matchSubstring(files: ScannedFile[], text: string): Evidence[] {
 }
 
 /** 識別字比對器：有 \w 字元用 word-boundary，純 CJK（無 \w 字元、\b 永遠不成立）
- *  退回 substring 比對。與 matchIdentifier 同一套規則，export 供證據驗證重用。 */
+ *  退回 substring 比對。與 matchIdentifier 同一套規則，export 供證據驗證重用。
+ *  \b 只加在頭/尾為 word char 的一側——頭尾是符號（如 `[OPTION]` 的中括號）時，
+ *  該側加 \b 反而永遠不成立（\b 需要相鄰 word char），會造成系統性 missing。 */
 export function makeIdentifierTester(ident: string): (s: string) => boolean {
   const hasWordChars = /[A-Za-z0-9_]/.test(ident);
-  const re = hasWordChars ? new RegExp(`\\b${escapeRegex(ident)}\\b`) : null;
-  return (s: string): boolean => (re ? re.test(s) : s.includes(ident));
+  if (!hasWordChars) return (s: string): boolean => s.includes(ident);
+  const lead = /^[A-Za-z0-9_]/.test(ident) ? '\\b' : '';
+  const trail = /[A-Za-z0-9_]$/.test(ident) ? '\\b' : '';
+  const re = new RegExp(`${lead}${escapeRegex(ident)}${trail}`);
+  return (s: string): boolean => re.test(s);
+}
+
+/**
+ * 候選識別字推導——修正「檢查表寫法 vs 原始碼字面」的系統性落差。
+ *
+ * 檢查表 content 來自規格的閱讀寫法（`resultList[].oid`、`ADM_CUST_LOG.OID`、
+ * `items:[{uuid}]`），這些寫法永遠不會逐字出現在原始碼，造成假 missing。
+ * 由 content 推導一組候選（完整字面永遠排第一、優先命中），任一命中即通過：
+ * - 純識別字 → 只有完整字面（行為不變）
+ * - 巢狀路徑 a.b / a[].b / TABLE.COLUMN → 完整字面 + 葉節點（只取葉，不取中段——
+ *   表名/容器名單獨出現不能頂替欄位存在）
+ * - 其他結構寫法（[X]、items:[{uuid}]）→ 完整字面 + 識別字 token（≥2 字元）
+ * - 純 CJK → 只有完整字面（沿用 substring 退路）
+ *
+ * 弱化候選仍走 word-boundary（makeIdentifierTester），不退成 substring——
+ * 葉節點比對已經變弱，再放寬會把假 missing 換成更糟的假 matched。
+ */
+export function deriveIdentifierCandidates(content: string): string[] {
+  const full = content.trim();
+  const candidates: string[] = [full];
+  if (/^[A-Za-z0-9_$]+$/.test(full)) return candidates; // 已是純識別字
+  // 巢狀路徑（點分隔，容許 [] 陣列記號）→ 葉節點
+  if (/^[A-Za-z_$][\w$]*(?:\[\])?(?:\.[A-Za-z_$][\w$]*(?:\[\])?)+$/.test(full)) {
+    const segs = full.split('.');
+    const leaf = segs[segs.length - 1].replace(/\[\]$/, '');
+    if (leaf && leaf !== full) candidates.push(leaf);
+    return candidates;
+  }
+  // 其他結構寫法 → 抽識別字 token（保序、去重、≥2 字元）
+  const tokens = full.match(/[A-Za-z_$][A-Za-z0-9_$]*/g) ?? [];
+  for (const t of tokens) {
+    if (t.length >= 2 && !candidates.includes(t)) candidates.push(t);
+  }
+  return candidates;
 }
 
 /** word-boundary 識別字搜尋（識別字含底線，\b 對 _ 有效）。回傳所有命中（供 db_field 排序用）。
@@ -176,6 +215,27 @@ function matchIdentifier(files: ScannedFile[], ident: string, maxHits = 50): Evi
     }
   }
   return evidence;
+}
+
+/** 依候選順序比對（完整字面優先）；回傳首個有命中的候選與其證據。 */
+function matchIdentifierCandidates(
+  files: ScannedFile[],
+  content: string,
+  maxHits = 50,
+): { evidence: Evidence[]; usedCandidate: string | null } {
+  const full = content.trim();
+  for (const cand of deriveIdentifierCandidates(content)) {
+    const hits = matchIdentifier(files, cand, maxHits);
+    if (hits.length > 0) {
+      return { evidence: hits, usedCandidate: cand === full ? null : cand };
+    }
+  }
+  return { evidence: [], usedCandidate: null };
+}
+
+/** 弱化候選命中時的透明化註記（reviewer 可據此判斷是否可信）。 */
+function candidateNote(content: string, usedCandidate: string): string {
+  return `matched_candidate：完整字面「${content.trim()}」未出現於原始碼（規格閱讀寫法），以候選識別字「${usedCandidate}」word-boundary 命中`;
 }
 
 // ── api matching ────────────────────────────────────────────
@@ -227,7 +287,22 @@ export function buildApiPathRegex(apiPath: string): RegExp {
   return new RegExp(pattern);
 }
 
-/** 命中行 ±3 行內是否出現 method 關鍵字（大小寫不敏感）。 */
+/**
+ * API path 拆分點（Spring 類別層 @RequestMapping + 方法層 @PostMapping 的拆分式註解
+ * 讓完整 path 永遠不出現在同一行）。回傳所有 '/' 邊界的 {prefix, suffix} 組合，
+ * 最長 prefix 優先（類別層通常吃掉大半 path）。
+ */
+export function apiPathSplits(apiPath: string): Array<{ prefix: string; suffix: string }> {
+  const splits: Array<{ prefix: string; suffix: string }> = [];
+  for (let i = 1; i < apiPath.length; i++) {
+    if (apiPath[i] === '/') splits.push({ prefix: apiPath.slice(0, i), suffix: apiPath.slice(i) });
+  }
+  return splits.reverse();
+}
+
+/** 命中行 ±3 行內是否出現 method 關鍵字（大小寫不敏感）。
+ *  含「method 隱含在 hook 名稱」的慣例（getApi(/putApi(/postApi(…）——多個專案的
+ *  前端 API 層都用這種 hook，method 永遠不會以字面出現在呼叫行附近。 */
 function hasMethodNearby(file: ScannedFile, lineIdx: number, method: string): boolean {
   const lower = method.toLowerCase();
   const patterns = [
@@ -241,11 +316,13 @@ function hasMethodNearby(file: ScannedFile, lineIdx: number, method: string): bo
     `method = "${lower}"`,
     `requestmethod.${lower}`,    // RequestMethod.POST
   ];
+  // getApi( / putApi( — \b 防 targetApi( 誤中 getApi(
+  const hookRe = new RegExp(`\\b${lower}api\\s*\\(`);
   const from = Math.max(0, lineIdx - 3);
   const to = Math.min(file.lines.length - 1, lineIdx + 3);
   for (let i = from; i <= to; i++) {
     const line = file.lines[i].toLowerCase();
-    if (patterns.some(p => line.includes(p))) return true;
+    if (patterns.some(p => line.includes(p)) || hookRe.test(line)) return true;
   }
   return false;
 }
@@ -256,19 +333,39 @@ interface ApiMatchResult {
   note?: string;
 }
 
+/**
+ * 檔內找出「行比對正則」：完整 path 在單行出現 → 用完整正則；
+ * 否則嘗試拆分比對——某個 {prefix, suffix} 拆點的 prefix 與 suffix 都出現在
+ * **同一檔案**內（Spring 類別層 + 方法層拆分式註解），此時以 suffix 正則定位命中行。
+ * prefix 不在同檔 → 不算（不可只憑尾段命中——/search 這種尾段到處都是）。
+ */
+function apiLineRegexForFile(f: ScannedFile, fullRe: RegExp, splits: Array<{ prefix: string; suffix: string }>): { re: RegExp; split: boolean } | null {
+  if (fullRe.test(f.content)) return { re: fullRe, split: false };
+  for (const sp of splits) {
+    if (buildApiPathRegex(sp.prefix).test(f.content) && buildApiPathRegex(sp.suffix).test(f.content)) {
+      return { re: buildApiPathRegex(sp.suffix), split: true };
+    }
+  }
+  return null;
+}
+
 function matchApi(files: ScannedFile[], item: EngineItem): ApiMatchResult {
   const { method, path: apiPath } = parseApiContent(item.content, item.detail);
   if (!apiPath) {
     return { status: 'missing', evidence: [], note: 'API path 無法解析（content 應為 "POST /api/xxx" 或 "/api/xxx"）' };
   }
-  const pathRe = buildApiPathRegex(apiPath);
+  const fullRe = buildApiPathRegex(apiPath);
+  const splits = apiPathSplits(apiPath);
 
   const pathHits: Evidence[] = [];
   let methodOk = method === null; // 沒指定 method → 找到 path 就算命中
+  let usedSplit = false;
   for (const f of files) {
-    if (!pathRe.test(f.content)) continue;
+    const lineMatch = apiLineRegexForFile(f, fullRe, splits);
+    if (!lineMatch) continue;
     for (let i = 0; i < f.lines.length; i++) {
-      if (!pathRe.test(f.lines[i])) continue;
+      if (!lineMatch.re.test(f.lines[i])) continue;
+      if (lineMatch.split) usedSplit = true;
       if (method !== null && hasMethodNearby(f, i, method)) {
         methodOk = true;
         // method 命中的證據排最前
@@ -282,16 +379,17 @@ function matchApi(files: ScannedFile[], item: EngineItem): ApiMatchResult {
   }
 
   if (pathHits.length === 0) {
-    return { status: 'missing', evidence: [], note: 'workspace 中找不到此 API path' };
+    return { status: 'missing', evidence: [], note: 'workspace 中找不到此 API path（含拆分比對：prefix+suffix 同檔）' };
   }
+  const splitNote = usedSplit ? 'matched_split_path：完整 path 未在單行出現，以類別層 prefix + 方法層 suffix 同檔拆分命中' : null;
   if (!methodOk) {
     return {
       status: 'missing',
       evidence: pathHits.slice(0, MAX_EVIDENCE),
-      note: `matched_path_only：找到 path 但 ±3 行內找不到 ${method} method 關鍵字（method 不符）`,
+      note: `matched_path_only：找到 path 但 ±3 行內找不到 ${method} method 關鍵字（method 不符）${splitNote ? `；${splitNote}` : ''}`,
     };
   }
-  return { status: 'matched', evidence: pathHits.slice(0, MAX_EVIDENCE) };
+  return { status: 'matched', evidence: pathHits.slice(0, MAX_EVIDENCE), ...(splitNote ? { note: splitNote } : {}) };
 }
 
 // ── db_field evidence prioritization ────────────────────────
@@ -368,18 +466,24 @@ export function runComplianceEngine(items: EngineItem[], roots: WorkspaceRoots):
         break;
       }
       case 'db_field': {
-        const hits = matchIdentifier(files, item.content);
+        const { evidence: hits, usedCandidate } = matchIdentifierCandidates(files, item.content);
         results.push(hits.length > 0
-          ? { ...base, status: 'matched', evidence: prioritizeDbFieldEvidence(files, hits) }
-          : { ...base, status: 'missing', note: 'workspace 中找不到此 DB 欄位識別字（word-boundary）' });
+          ? {
+              ...base, status: 'matched', evidence: prioritizeDbFieldEvidence(files, hits),
+              ...(usedCandidate ? { note: candidateNote(item.content, usedCandidate) } : {}),
+            }
+          : { ...base, status: 'missing', note: 'workspace 中找不到此 DB 欄位識別字（word-boundary，含候選：表.欄位取欄位名）' });
         break;
       }
       case 'param':
       case 'response_field': {
-        const hits = matchIdentifier(files, item.content, MAX_EVIDENCE);
+        const { evidence: hits, usedCandidate } = matchIdentifierCandidates(files, item.content, MAX_EVIDENCE);
         results.push(hits.length > 0
-          ? { ...base, status: 'matched', evidence: hits.slice(0, MAX_EVIDENCE) }
-          : { ...base, status: 'missing', note: 'workspace 中找不到此識別字（word-boundary，不誤中子字串）' });
+          ? {
+              ...base, status: 'matched', evidence: hits.slice(0, MAX_EVIDENCE),
+              ...(usedCandidate ? { note: candidateNote(item.content, usedCandidate) } : {}),
+            }
+          : { ...base, status: 'missing', note: 'workspace 中找不到此識別字（word-boundary，不誤中子字串；含巢狀葉節點/token 候選）' });
         break;
       }
     }

@@ -60,6 +60,45 @@ beforeAll(() => {
     `  private String AGENT_USER_IDX;`,
     `}`,
   ].join('\n'));
+
+  // ── 字面比對盲點修正用 fixtures ──
+  // Spring 拆分式註解：類別層 prefix 與方法層 suffix 相隔 >±10 行（超出相關性窗口）
+  write(beRoot, 'src/main/java/CustLogController.java', [
+    `@RestController`,
+    `@RequestMapping("/fedi/cm004")`,
+    `public class CustLogController {`,
+    ...Array.from({ length: 12 }, (_, i) => `  private int filler${i};`),
+    `  @PostMapping("/search")`,
+    `  public Result search(@RequestBody CustLogQueryVo vo) {`,
+    `    return Result.ok(service.search(vo));`,
+    `  }`,
+    `}`,
+  ].join('\n'));
+  // 只有尾段 /search、沒有 /fedi/cm004 prefix 的檔案 — 拆分比對不可誤放
+  write(beRoot, 'src/main/java/UnrelatedSearch.java', [
+    `public class UnrelatedSearch {`,
+    `  private static final String PATH = "/search";`,
+    `}`,
+  ].join('\n'));
+  write(beRoot, 'src/main/java/CustLogVo.java', [
+    `public class CustLogVo {`,
+    `  private String oid;`,
+    `  private String uuid;`,
+    `}`,
+  ].join('\n'));
+  write(beRoot, 'src/main/java/AdmCustLogEntity.java', [
+    `@Entity`,
+    `@Table(name = "ADM_CUST_LOG")`,
+    `public class AdmCustLogEntity {`,
+    `  @Column(name = "OID")`,
+    `  private String oid;`,
+    `}`,
+  ].join('\n'));
+  // asteroid 含 'oid' 子字串 — 葉節點比對的 word-boundary 護欄用
+  write(feRoot, 'src/misc.ts', [
+    `const asteroid = 1;`,
+    `export const OPTION_TAG = "[OPTION]";`,
+  ].join('\n'));
 });
 
 afterAll(() => {
@@ -222,6 +261,59 @@ describe('evidence-validator', () => {
     it('checkRelevance：多行 ui_text 取首個非空行', () => {
       const reason = checkRelevance('ui_text', '\n代理人設定作業\n第二行', null, ['<h1>代理人設定作業</h1>']);
       expect(reason).toBeNull();
+    });
+  });
+
+  describe('字面比對盲點修正（候選識別字 + API path 拆分）', () => {
+    it('response_field resultList[].oid：證據指向 Java field 行 → 通過（葉節點候選）', () => {
+      const failures = validateReviewEvidence([
+        input({ itemType: 'response_field', content: 'resultList[].oid', side: 'backend', evidence: [{ file: 'src/main/java/CustLogVo.java', line: 2 }] }),
+      ], roots());
+      expect(failures).toEqual([]);
+    });
+
+    it('db_field ADM_CUST_LOG.OID：證據指向 @Column 行 → 通過', () => {
+      const failures = validateReviewEvidence([
+        input({ itemType: 'db_field', content: 'ADM_CUST_LOG.OID', side: 'backend', evidence: [{ file: 'src/main/java/AdmCustLogEntity.java', line: 4 }] }),
+      ], roots());
+      expect(failures).toEqual([]);
+    });
+
+    it('葉節點仍守 word-boundary：x[].oid 指向只有 asteroid 的行 → 拒', () => {
+      const failures = validateReviewEvidence([
+        input({ itemType: 'response_field', content: 'x[].oid', side: 'frontend', evidence: [{ file: 'src/misc.ts', line: 1 }] }),
+      ], roots());
+      expect(failures).toHaveLength(1);
+    });
+
+    it('中括號字面 [OPTION]：證據指向字面所在行 → 通過（\\b 修正）', () => {
+      const failures = validateReviewEvidence([
+        input({ itemType: 'param', content: '[OPTION]', side: 'frontend', evidence: [{ file: 'src/misc.ts', line: 2 }] }),
+      ], roots());
+      expect(failures).toEqual([]);
+    });
+
+    it('結構寫法 items:[{uuid}]：證據指向 uuid field 行 → 通過（token 候選）', () => {
+      const failures = validateReviewEvidence([
+        input({ itemType: 'param', content: 'items:[{uuid}]', side: 'backend', evidence: [{ file: 'src/main/java/CustLogVo.java', line: 3 }] }),
+      ], roots());
+      expect(failures).toEqual([]);
+    });
+
+    it('API 拆分：證據指向 @PostMapping("/search") 行、類別層 prefix 在窗口外 → 通過（同檔補齊 prefix）', () => {
+      const failures = validateReviewEvidence([
+        // @PostMapping("/search") 在第 16 行；@RequestMapping("/fedi/cm004") 在第 2 行，超出 ±10 窗口
+        input({ itemType: 'api', content: 'POST /fedi/cm004/search', side: 'backend', evidence: [{ file: 'src/main/java/CustLogController.java', line: 16 }] }),
+      ], roots());
+      expect(failures).toEqual([]);
+    });
+
+    it('API 拆分：檔內只有尾段、沒有 prefix → 拒（不可只憑尾段）', () => {
+      const failures = validateReviewEvidence([
+        input({ itemType: 'api', content: 'POST /fedi/cm004/search', side: 'backend', evidence: [{ file: 'src/main/java/UnrelatedSearch.java', line: 2 }] }),
+      ], roots());
+      expect(failures).toHaveLength(1);
+      expect(failures[0].reason).toContain('API path');
     });
   });
 });

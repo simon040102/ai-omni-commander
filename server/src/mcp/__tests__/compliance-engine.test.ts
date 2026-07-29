@@ -72,6 +72,65 @@ beforeAll(() => {
     `  AGENT_USER_ID VARCHAR2(20) NOT NULL`,
     `);`,
   ].join('\n'));
+
+  // ── 字面比對盲點修正用 fixtures（CM004 四類失敗模式的真實形狀）──
+  // Spring 拆分式註解：類別層 @RequestMapping + 方法層 @PostMapping，中間隔超過 ±3 行
+  write(beRoot, 'src/main/java/com/example/CustLogController.java', [
+    `@RestController`,
+    `@RequestMapping("/fedi/cm004")`,
+    `public class CustLogController {`,
+    ``,
+    `  private final CustLogService service;`,
+    ``,
+    `  public CustLogController(CustLogService service) {`,
+    `    this.service = service;`,
+    `  }`,
+    ``,
+    `  @PostMapping("/search")`,
+    `  public Result search(@RequestBody CustLogQueryVo vo) {`,
+    `    return Result.ok(service.search(vo));`,
+    `  }`,
+    `}`,
+  ].join('\n'));
+  // 巢狀路徑葉節點：response 欄位只以 Java field 存在
+  write(beRoot, 'src/main/java/com/example/CustLogVo.java', [
+    `public class CustLogVo {`,
+    `  private String oid;`,
+    `  private int pageSize;`,
+    `  private String uuid;`,
+    `}`,
+  ].join('\n'));
+  // 表.欄位：專案無 DDL，欄位只存在於 Entity 的 @Column
+  write(beRoot, 'src/main/java/com/example/AdmCustLogEntity.java', [
+    `@Entity`,
+    `@Table(name = "ADM_CUST_LOG")`,
+    `public class AdmCustLogEntity {`,
+    `  @Column(name = "OID")`,
+    `  private String oid;`,
+    `}`,
+  ].join('\n'));
+  // 完整字面優先驗證用：這個檔案有完整的 pagination.pageSize 字面
+  write(feRoot, 'src/hooks/usePagination.ts', [
+    `export function usePagination(state: State) {`,
+    `  return state.pagination.pageSize;`,
+    `}`,
+  ].join('\n'));
+  // 中括號字面 + word-boundary 陷阱字（asteroid 含 'oid' 子字串）
+  write(feRoot, 'src/constants.ts', [
+    `export const OPTION_TAG = "[OPTION]";`,
+    `const asteroid = 1;`,
+  ].join('\n'));
+  // method 隱含在 hook 名稱（getApi=GET、putApi=PUT）
+  write(feRoot, 'src/api/common.ts', [
+    `export async function loadReasons() {`,
+    `  const res = await getApi('/main/fedi/common/getList/getRejectReasonList');`,
+    `  return res.data;`,
+    `}`,
+  ].join('\n'));
+  // targetApi 是 \bgetapi\( 的陷阱字——獨立檔案，±3 行內無真正的 getApi
+  write(feRoot, 'src/api/trap.ts', [
+    `const other = targetApi('/main/fedi/common/other');`,
+  ].join('\n'));
 });
 
 afterAll(() => {
@@ -255,5 +314,115 @@ describe('runComplianceEngine', () => {
 
     expect(result.items[0].status).toBe('missing');
     expect(result.items[0].note).toContain('workspace');
+  });
+});
+
+describe('字面比對盲點修正（候選識別字推導 + API path 拆分）', () => {
+  it('巢狀路徑 resultList[].oid / pagination.pageSize → 以葉節點命中（規格寫法不會出現在原始碼）', () => {
+    const result = runComplianceEngine([
+      item({ id: 'nest1', itemType: 'response_field', content: 'resultList[].oid', side: 'backend' }),
+      item({ id: 'nest2', itemType: 'response_field', content: 'pagination.pageSize', side: 'backend' }),
+    ], { backend: beRoot });
+
+    const r1 = result.items.find(r => r.itemId === 'nest1')!;
+    expect(r1.status).toBe('matched');
+    expect(r1.note).toContain('oid'); // note 揭露用了哪個候選命中，reviewer 可辨識
+
+    expect(result.items.find(r => r.itemId === 'nest2')!.status).toBe('matched');
+  });
+
+  it('巢狀路徑：完整字面存在時優先命中完整字面（不降級）', () => {
+    const result = runComplianceEngine([
+      item({ id: 'full-first', itemType: 'response_field', content: 'pagination.pageSize', side: 'frontend' }),
+    ], { frontend: feRoot });
+
+    const r = result.items[0];
+    expect(r.status).toBe('matched');
+    expect(r.evidence![0].file).toBe('src/hooks/usePagination.ts'); // 完整字面所在檔
+    expect(r.note ?? '').not.toContain('候選'); // 完整命中不需降級註記
+  });
+
+  it('巢狀路徑：葉節點也不存在 → 仍 missing（不可放寬成 substring）', () => {
+    const result = runComplianceEngine([
+      item({ id: 'nest-miss', itemType: 'response_field', content: 'resultList[].nonexistField', side: 'backend' }),
+    ], { backend: beRoot });
+    expect(result.items[0].status).toBe('missing');
+  });
+
+  it('葉節點維持 word-boundary：x[].oid 不誤中 asteroid（含 oid 子字串）', () => {
+    const result = runComplianceEngine([
+      item({ id: 'wb', itemType: 'response_field', content: 'x[].oid', side: 'frontend' }),
+    ], { frontend: feRoot }); // frontend 只有 asteroid，沒有獨立的 oid
+    expect(result.items[0].status).toBe('missing');
+  });
+
+  it('表.欄位 ADM_CUST_LOG.OID → 以欄位名命中 @Column 行；表名單獨存在不算欄位命中', () => {
+    const result = runComplianceEngine([
+      item({ id: 'db-nest', itemType: 'db_field', content: 'ADM_CUST_LOG.OID', side: 'backend' }),
+      // 表名存在（@Table）但該欄位不存在 → 必須 missing，表名命中不可頂替欄位
+      item({ id: 'db-nocol', itemType: 'db_field', content: 'ADM_CUST_LOG.NOT_A_COLUMN', side: 'backend' }),
+    ], { backend: beRoot });
+
+    const hit = result.items.find(r => r.itemId === 'db-nest')!;
+    expect(hit.status).toBe('matched');
+    expect(hit.evidence!.some(e => e.file.endsWith('AdmCustLogEntity.java'))).toBe(true);
+
+    expect(result.items.find(r => r.itemId === 'db-nocol')!.status).toBe('missing');
+  });
+
+  it('API path 拆在類別/方法兩層註解（相隔 >±3 行）→ 拆分命中', () => {
+    const result = runComplianceEngine([
+      item({ id: 'api-split', itemType: 'api', content: 'POST /fedi/cm004/search', side: 'backend' }),
+    ], { backend: beRoot });
+
+    const r = result.items[0];
+    expect(r.status).toBe('matched');
+    expect(r.evidence!.some(e => e.file.endsWith('CustLogController.java'))).toBe(true);
+  });
+
+  it('API 拆分比對：prefix 不在同檔 → 仍 missing（不可只憑尾段命中）', () => {
+    const result = runComplianceEngine([
+      item({ id: 'api-noprefix', itemType: 'api', content: 'POST /other/module/search', side: 'backend' }),
+    ], { backend: beRoot });
+    expect(result.items[0].status).toBe('missing');
+  });
+
+  it('API 拆分比對：method 仍要驗（拆分命中行 ±3 行內找不到 method → missing）', () => {
+    const result = runComplianceEngine([
+      item({ id: 'api-wrongmethod', itemType: 'api', content: 'DELETE /fedi/cm004/search', side: 'backend' }),
+    ], { backend: beRoot });
+    const r = result.items[0];
+    expect(r.status).toBe('missing');
+    expect(r.note).toContain('matched_path_only');
+  });
+
+  it('method 隱含在 hook 名稱：getApi(path) 對 GET item 算 method 命中', () => {
+    const result = runComplianceEngine([
+      item({ id: 'hook1', itemType: 'api', content: 'GET /main/fedi/common/getList/getRejectReasonList', side: 'frontend' }),
+    ], { frontend: feRoot });
+    expect(result.items[0].status).toBe('matched');
+  });
+
+  it('hook 名稱比對守 word-boundary：targetApi( 不可誤判為 getApi(', () => {
+    const result = runComplianceEngine([
+      item({ id: 'hook2', itemType: 'api', content: 'GET /main/fedi/common/other', side: 'frontend' }),
+    ], { frontend: feRoot });
+    const r = result.items[0];
+    expect(r.status).toBe('missing');
+    expect(r.note).toContain('matched_path_only');
+  });
+
+  it('中括號字面 [OPTION] → 完整字面直接命中（\\b 只加在頭尾為 word char 的一側）', () => {
+    const result = runComplianceEngine([
+      item({ id: 'brk1', itemType: 'param', content: '[OPTION]', side: 'frontend' }),
+    ], { frontend: feRoot });
+    expect(result.items[0].status).toBe('matched');
+  });
+
+  it('結構寫法 items:[{uuid}] → 以 token 候選命中', () => {
+    const result = runComplianceEngine([
+      item({ id: 'brk2', itemType: 'param', content: 'items:[{uuid}]', side: 'backend' }),
+    ], { backend: beRoot });
+    expect(result.items[0].status).toBe('matched');
   });
 });
