@@ -17,7 +17,7 @@ import { detectLabel, detectTaskType } from '../../utils/taskClassification.js';
 import { normalizeDueDate, localTodayYmd, isOverdue } from '../../utils/dueDate.js';
 import { fetchAsanaSubtasksTree } from '../../utils/asanaSubtasks.js';
 import { runSpecChangeCheck, type SpecChangeTarget } from '../spec-change.js';
-import { parseTestCommands, getRequiredUnitTestItems, findLatestUnitTestVerification, listVerificationEntries, UNRELATED_TEST_FAILURE_RULE } from './verification-tools.js';
+import { parseTestCommands, getRequiredUnitTestItems, findLatestUnitTestVerification, listVerificationEntries, getVerificationItems, UNRELATED_TEST_FAILURE_RULE } from './verification-tools.js';
 import { getStalledHours, DEFAULT_STALE_THRESHOLD_HOURS } from '../stale-tasks.js';
 import { summarizeGapText } from '../../utils/specGapResolution.js';
 
@@ -741,7 +741,36 @@ ${shown.join('\n')}${more}
         }
       }
 
-      return { content: [{ type: 'text' as const, text: `Task ${taskId} status updated to "${status}"${notifyWarning}${openGapsReminder}` }] };
+      // ── 驗收覆蓋提醒（不擋、不是閘門）——completed 成功後附註未回報的驗收項 ──
+      // 與 open-gaps 提醒同一模式：把「靜默跳過」變成可見資訊，讓 orchestrator 當場
+      // 判斷要不要補跑。**刻意不做成閘門**：實測 60 筆已結案開發任務有 68% 本來就
+      // 報齊，沒報的多是 light 軌小改（「移除按鈕」之類）——強制覆蓋只會換來一排
+      // 自我認證的 N/A，看起來驗過了其實是儀式，比沉默更糟。閘門與否等這份提醒
+      // 累積出「警告有沒有人理」的實據再決定。
+      let verificationReminder = '';
+      if (status === 'completed') {
+        const vt = db.prepare('SELECT label, project_id FROM tasks WHERE id = ?').get(taskId) as { label: string; project_id: string } | undefined;
+        // 只對開發任務提醒（與執行計畫閘門同範圍）——其他 label 拿到的是「前後端完整
+        // 清單請挑適用項目」，逐項列未報只會製造噪音。
+        if (vt && ['frontend', 'backend', 'fullstack'].includes(vt.label)) {
+          const projRow = db.prepare('SELECT config_json FROM projects WHERE id = ?').get(vt.project_id) as { config_json: string | null } | undefined;
+          const cfg = parseJson<{ dbConnections?: unknown[] }>(projRow?.config_json ?? null, {});
+          const hasDbConnections = Array.isArray(cfg.dbConnections) && cfg.dbConnections.length > 0;
+          const { items } = getVerificationItems(vt.label, parseTestCommands(projRow?.config_json), hasDbConnections);
+          // 回報時可用 id 或 item 文字（見 report_verification_result），兩者都算已報
+          const reported = new Set(listVerificationEntries(db, taskId).map(e => e.item));
+          const missing = items.filter(i => !reported.has(i.id) && !reported.has(i.item));
+          if (missing.length > 0) {
+            verificationReminder = `
+
+⚠ 此任務有 ${missing.length}/${items.length} 項驗收未回報（提醒，不影響結案）：
+${missing.map(i => `- ${i.id}：${i.item}`).join('\n')}
+補跑後用 report_verification_result(taskId="${taskId}", results=[{item:"${missing[0]!.id}", passed:true, note:"..."}]) 回報；確實不適用的項目也請回報並在 note 寫明理由——留下稽核軌跡勝過靜默跳過。`;
+          }
+        }
+      }
+
+      return { content: [{ type: 'text' as const, text: `Task ${taskId} status updated to "${status}"${notifyWarning}${openGapsReminder}${verificationReminder}` }] };
     },
   );
 

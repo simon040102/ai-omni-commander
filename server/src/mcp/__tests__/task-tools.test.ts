@@ -520,6 +520,104 @@ describe('task-tools', () => {
     });
   });
 
+  describe('update_task_status 驗收覆蓋提醒（不擋、不是閘門）', () => {
+    /** 塞一筆 [VERIFICATION] 回報（格式同 report_verification_result 寫入）。 */
+    function seedVerification(taskId: string, lines: string[], projectId = 'proj-1') {
+      testDb.prepare(`
+        INSERT OR IGNORE INTO agents (id, project_id, role, status, model, current_task_id)
+        VALUES (?, ?, 'backend', 'running', 'external', ?)
+      `).run(`mcp-${taskId}`, projectId, taskId);
+      testDb.prepare(`
+        INSERT INTO agent_outputs (agent_id, task_id, stream_type, content)
+        VALUES (?, ?, 'system', ?)
+      `).run(`mcp-${taskId}`, taskId, `[VERIFICATION] 驗收：${lines.length}/${lines.length} 通過\n${lines.join('\n')}`);
+    }
+
+    it('backend 任務一項驗收都沒報 → 回應列出未報項目（含 API 煙霧測試）', async () => {
+      seedProject(testDb);
+      seedTask(testDb, 'task-1', 'proj-1', 'backend');
+      seedDispatch(testDb);
+
+      await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'in_progress' });
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+
+      expect(result.isError).toBeUndefined();
+      const text = result.content[0].text;
+      expect(text).toContain('項驗收未回報');
+      expect(text).toContain('不影響結案');
+      expect(text).toContain('be-api-smoke');
+      expect(text).toContain('be-ddl-match');
+      expect(text).toContain('report_verification_result');
+      // 提醒不擋：任務真的 completed 了
+      expect((testDb.prepare('SELECT status FROM tasks WHERE id = ?').get('task-1') as any).status).toBe('completed');
+    });
+
+    it('驗收項全部回報 → 不出現提醒', async () => {
+      seedProject(testDb);
+      seedTask(testDb, 'task-1', 'proj-1', 'backend');
+      seedDispatch(testDb);
+      seedVerification('task-1', [
+        '- [PASS] be-no-findall — 已 grep',
+        '- [PASS] be-ddl-match — 逐欄比對過',
+        '- [PASS] be-api-smoke — curl 回 200',
+        '- [PASS] be-seed-sql — 欄位數一致',
+      ]);
+
+      await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'in_progress' });
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).not.toContain('驗收未回報');
+    });
+
+    it('用項目文字（而非 id）回報也算已報，不誤列為未報', async () => {
+      seedProject(testDb);
+      seedTask(testDb, 'task-1', 'proj-1', 'backend');
+      seedDispatch(testDb);
+      seedVerification('task-1', [
+        '- [PASS] 靜態檢查：沒有「撈全表 + 記憶體過濾」的查詢 — ok',
+        '- [PASS] API 煙霧測試：每個新 API 回 200 不是 500 — ok',
+      ]);
+
+      await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'in_progress' });
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+
+      const text = result.content[0].text;
+      expect(text).toContain('驗收未回報');
+      // 文字回報的兩項不可出現在未報清單
+      expect(text).not.toContain('be-api-smoke');
+      expect(text).not.toContain('be-no-findall');
+      // 沒報的仍要列出
+      expect(text).toContain('be-ddl-match');
+      expect(text).toContain('be-seed-sql');
+    });
+
+    it('frontend 任務只列前端驗收項，不列後端項目', async () => {
+      seedProject(testDb);
+      seedTask(testDb, 'task-1', 'proj-1', 'frontend');
+      seedDispatch(testDb);
+
+      await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'in_progress' });
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+
+      const text = result.content[0].text;
+      expect(text).toContain('fe-tsc');
+      expect(text).toContain('fe-browser');
+      expect(text).not.toContain('be-api-smoke');
+    });
+
+    it('非開發 label（testing）不附驗收提醒', async () => {
+      seedProject(testDb);
+      testDb.prepare(`INSERT INTO tasks (id, project_id, title, label, task_type) VALUES ('t-other', 'proj-1', 'Doc task', 'testing', 'other')`).run();
+
+      await callTool(server, 'update_task_status', { taskId: 't-other', status: 'in_progress' });
+      const result = await callTool(server, 'update_task_status', { taskId: 't-other', status: 'completed' });
+
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).not.toContain('驗收未回報');
+    });
+  });
+
   describe('update_task_status spec compliance gate', () => {
     function seedChecklistItem(taskId: string, opts: { itemType?: string; content?: string; waived?: number } = {}) {
       testDb.prepare(`
