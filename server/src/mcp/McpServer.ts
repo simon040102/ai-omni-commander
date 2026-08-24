@@ -34,6 +34,8 @@ export function createOmniMcpServer(): McpServer {
       // 等於新使用者不用改全域 CLAUDE.md 就拿到使用規則。
       instructions: `OmniCommander MCP — 任務管理與開發脈絡提供者。連上此 MCP 的 session 必須遵守以下規則：
 
+**先確認你在哪（每個 session 開頭做一次）**：比對你的工作目錄與 list_projects 回傳的 workingDir／frontendPath／backendPath。命中代表**這個資料夾由 OmniCommander 管理**——該專案的所有開發／bug 修復任務一律走下列流程，不可直接動手改 code。使用者只是口頭描述需求、沒給 taskId 時也一樣：先用 list_pending_tasks／next_task 定位，找不到就 create_task 建一個，再照流程走。
+
 1. **開工前必先取執行計畫**：接到任何開發／實作任務（前端、後端、bug 修正），先呼叫 get_execution_plan(taskId) 並嚴格照回傳流程執行，不可跳步或臆測替代。找不到 taskId 先用 list_pending_tasks 或 next_task 定位。小型 bug（無 SA/SD）會自動走 light 軌——檢查表改抽 BUG 原文，回對標準不變（AI 回對 missing=0 才可標 completed）。
 2. **規格一律從工具取得**：需要 SA/SD 規格用 fetch_svn_specs 從 SVN 撈最新版；讀文件用 read_document；找欄位名／API 路徑／訊息文字用 search_documents。不可憑記憶、舊檔或猜測。
 3. **規格沒定義的不可自行編造**：遇到規格未定義的欄位／API／邏輯，呼叫 report_spec_gap(taskId, category, description) 記錄，標記 [NEEDS_CLARIFICATION] 後繼續其他有規格依據的部分。寧可不做也不要做錯。使用者對缺口拍板後必須立刻 resolve_spec_gap(gapId, resolutionNote=具體裁決) 落地 DB——裁決只由工具從 DB 自動注入派工／resume_task／AI 回對，嚴禁只把答案手動寫進派工 prompt 或對話帶過（不落地 = implementer 與 reviewer 看不到）。
