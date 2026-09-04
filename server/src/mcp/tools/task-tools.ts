@@ -4,6 +4,8 @@
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import fs from 'node:fs';
+import path from 'node:path';
 import { getMcpDb } from '../db.js';
 import { notifyWebServer } from '../notify.js';
 import {
@@ -15,11 +17,19 @@ import {
 import { parseJson, getAsanaPat, ASANA_API_BASE, ASANA_FETCH_TIMEOUT_MS } from '../helpers.js';
 import { detectLabel, detectTaskType } from '../../utils/taskClassification.js';
 import { normalizeDueDate, localTodayYmd, isOverdue } from '../../utils/dueDate.js';
+import { readImageSize, mimeTypeForImage, type ImageSize } from '../../utils/imageSize.js';
 import { fetchAsanaSubtasksTree } from '../../utils/asanaSubtasks.js';
 import { runSpecChangeCheck, type SpecChangeTarget } from '../spec-change.js';
 import { parseTestCommands, getRequiredUnitTestItems, findLatestUnitTestVerification, listVerificationEntries, getVerificationItems, UNRELATED_TEST_FAILURE_RULE } from './verification-tools.js';
 import { getStalledHours, DEFAULT_STALE_THRESHOLD_HOURS } from '../stale-tasks.js';
 import { summarizeGapText } from '../../utils/specGapResolution.js';
+
+/** Asana 附件上限（官方 100MB） */
+const ASANA_ATTACHMENT_MAX_BYTES = 100 * 1024 * 1024;
+/** 上傳比一般 API 慢，另給較長的 timeout */
+const ASANA_UPLOAD_TIMEOUT_MS = 120_000;
+/** 上傳後等 Asana 非同步算完圖片 metadata（官方建議 1~5 秒，取中間值） */
+const ASANA_METADATA_DELAY_MS = 2_000;
 
 interface TaskRow {
   id: string;
@@ -889,6 +899,265 @@ ${missing.map(i => `- ${i.id}：${i.item}`).join('\n')}
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         return { content: [{ type: 'text' as const, text: `Error fetching Asana comments: ${msg}` }], isError: true };
+      }
+    },
+  );
+
+  // ── Asana 寫入方向的共用 helper ───────────────────────────
+
+  /**
+   * 上傳單一檔案為 Asana 任務附件。parent 只能是 task/project/project_brief
+   * （API 限制，不能掛在 story 上——連網頁版 Ctrl+V 貼進留言的圖也是任務附件）。
+   * 走 POST /tasks/{gid}/attachments，file part 帶正確 MIME type（缺 type 會讓
+   * Asana 算不出圖片 metadata）。回傳的 size 用於 inline 圖的 data-src-* 屬性。
+   */
+  async function uploadAsanaFile(asanaPat: string, taskGid: string, filePath: string): Promise<{
+    gid: string | null; name: string; permanentUrl: string | null; bytes: number; size: ImageSize | null;
+  }> {
+    const stat = fs.statSync(filePath);
+    const filename = path.basename(filePath);
+    const bytes = fs.readFileSync(filePath);
+
+    const form = new FormData();
+    form.append('file', new Blob([bytes], { type: mimeTypeForImage(filename) }), filename);
+
+    // 不手動設 Content-Type — 讓 fetch 自己帶 multipart boundary
+    const res = await fetch(`${ASANA_API_BASE}/tasks/${taskGid}/attachments`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${asanaPat}`, 'Accept': 'application/json' },
+      body: form,
+      signal: AbortSignal.timeout(ASANA_UPLOAD_TIMEOUT_MS),
+    });
+    if (!res.ok) {
+      const hint = res.status === 403 ? '（403 通常代表 PAT 沒有該任務的寫入權限）' : '';
+      throw new Error(`upload failed for ${filename}: ${res.status} ${await res.text()}${hint}`);
+    }
+    const data = await res.json() as { data?: { gid?: string; name?: string; permanent_url?: string } };
+    return {
+      gid: data.data?.gid ?? null,
+      name: data.data?.name ?? filename,
+      permanentUrl: data.data?.permanent_url ?? null,
+      bytes: stat.size,
+      size: readImageSize(bytes),
+    };
+  }
+
+  /**
+   * 組 inline 圖片的 <img>。屬性照網頁版原生 Ctrl+V 產生的 markup 對齊：
+   * data-asana-gid 是真正的引用鍵，data-src-width/height 決定顯示大小
+   * （缺這兩個值 Asana 會渲染成極小且無法調整的縮圖——已知 API 限制），
+   * style 則複製原生的置中與 max-width 行為。src/data-thumbnail-url 是
+   * Asana 自己簽的短期 URL，外部產生不了，省略。
+   */
+  function buildInlineImgTag(gid: string, name: string, size: ImageSize | null): string {
+    const dims = size ? ` data-src-width="${size.width}" data-src-height="${size.height}"` : '';
+    return `<img data-asana-gid="${gid}" data-asana-type="attachment"${dims}`
+      + ` alt="${escapeHtml(name)}"`
+      + ` style="display:block;max-width:100%;margin-left:auto;margin-right:auto" />`;
+  }
+
+  /** 檔案前置檢查（存在、是檔案、未超過上限）。回傳錯誤訊息，通過則回 null。 */
+  function checkUploadableFile(filePath: string): string | null {
+    if (!fs.existsSync(filePath)) return `File not found: ${filePath}`;
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile()) return `Not a file: ${filePath}`;
+    if (stat.size > ASANA_ATTACHMENT_MAX_BYTES) return `File too large (${stat.size} bytes): ${filePath}。Asana 附件上限 100MB。`;
+    return null;
+  }
+
+  const escapeHtml = (s: string): string =>
+    s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  // ── add_asana_comment ─────────────────────────────────────
+  // ⚠ 唯一的 Asana 寫入方向。使用者 2026-09-03 明確開放（推翻 2026-07-06 的唯讀決定），
+  // 但條件是「留言前要問過使用者」——tool 層無法驗證是否真的問過，故採
+  // update_task_status/skipFlowGate 的同一模式：要求明示旗標 + 落地稽核軌跡。
+  //
+  // imagePaths 的 inline 圖片：Asana 富文字支援 <img>，但 inline image 是靠
+  // data-asana-gid 指向「已存在的 Asana 附件」，所以必然是兩步（先 upload 拿 gid、
+  // 再發 story）。官方文件只寫「讀取時」的屬性長相，沒有寫入格式規範——故 inline
+  // 送出失敗時自動降級為「附件已上傳 + 留言附 permanent_url 連結」，並在回應明講降級。
+  server.tool(
+    'add_asana_comment',
+    '在 Asana 任務上新增留言（**寫入客戶看得到的地方**），可選擇夾帶圖片內嵌在留言裡。可傳 taskId（omni UUID，自動查 sourceRef）或 taskGid。\n\n⚠ **送出前必須先把留言全文（含要夾帶哪些圖）給使用者看過並取得明確同意**，再帶 userApproved=true 呼叫——這是外部可見、事後難以撤回的動作，客戶／PM 都看得到。使用者沒看過內容就呼叫是違規；不確定就先問，不要先送再說。\n\nimagePaths 有帶圖時：圖片會先上傳為任務附件（Asana API 限制，inline 圖必須先存在才能引用），再內嵌進留言。**你必須先自己用 Read tool 看過每張圖**——不可送出沒看過的畫面，可能含有不該外流的資料。若 inline 語法被 Asana 拒絕，會自動降級為「附件已上傳 + 留言附連結」並在回應標明 degraded。\n\n每次送出都會寫入任務紀錄（[ASANA_COMMENT]）供稽核。留言請簡短切題（收件人是人不是 log），不要貼整份驗收報告或 stack trace。',
+    {
+      taskId: z.string().optional().describe('Omni task UUID — 會自動從 DB 查 sourceRef (Asana GID)'),
+      taskGid: z.string().optional().describe('Asana 任務 GID（直接傳，跳過 DB 查詢）'),
+      text: z.string().min(1).describe('留言內容（純文字）。收件人是客戶/PM，請簡短切題'),
+      imagePaths: z.array(z.string()).optional().describe('要內嵌在留言裡的圖片絕對路徑（每張上限 100MB）。你必須先自己 Read 看過每張圖的內容'),
+      userApproved: z.literal(true).describe('必須為 true，且代表你已把留言全文（含夾帶的圖）給使用者看過並取得明確同意'),
+      approvalNote: z.string().optional().describe('使用者同意的情境摘要（例如「使用者說：回覆 PM 說 bug 已修好，附上驗證截圖」），會寫入稽核紀錄'),
+    },
+    { title: 'Add Asana Comment', readOnlyHint: false, openWorldHint: true },
+    async ({ taskId, taskGid, text, imagePaths, approvalNote }) => {
+      const db = getMcpDb();
+
+      let resolvedGid = taskGid;
+      let taskRow: { id: string; project_id: string } | undefined;
+      if (taskId) {
+        const row = db.prepare('SELECT id, project_id, source_ref FROM tasks WHERE id = ?').get(taskId) as
+          { id: string; project_id: string; source_ref: string | null } | undefined;
+        if (!row) return { content: [{ type: 'text' as const, text: `Error: Task "${taskId}" not found` }], isError: true };
+        taskRow = { id: row.id, project_id: row.project_id };
+        if (!resolvedGid) {
+          if (!row.source_ref) return { content: [{ type: 'text' as const, text: `Error: Task "${taskId}" has no Asana sourceRef (not synced from Asana)` }], isError: true };
+          resolvedGid = row.source_ref;
+        }
+      }
+      if (!resolvedGid) {
+        return { content: [{ type: 'text' as const, text: 'Error: Must provide either taskId or taskGid' }], isError: true };
+      }
+
+      try {
+        const asanaPat = getAsanaPat(db);
+        if (!asanaPat) {
+          return { content: [{ type: 'text' as const, text: 'Error: Asana PAT not configured. Use set_global_config to set asana.pat.' }], isError: true };
+        }
+
+        const images = imagePaths ?? [];
+        // 前置檢查全部圖檔——寧可一張都還沒上傳就退回，也不要上傳一半才失敗
+        for (const p of images) {
+          const problem = checkUploadableFile(p);
+          if (problem) return { content: [{ type: 'text' as const, text: `Error: ${problem}` }], isError: true };
+        }
+
+        // Step 1（有圖才做）：先上傳成任務附件，取得 gid 供 inline 引用
+        const uploaded: Array<{ gid: string | null; name: string; permanentUrl: string | null; bytes: number; size: ImageSize | null }> = [];
+        for (const p of images) {
+          uploaded.push(await uploadAsanaFile(asanaPat, resolvedGid, p));
+        }
+        // Asana 的圖片 metadata 是上傳後非同步算的；官方建議上傳與引用之間留 1~5 秒。
+        // 我們已自行填 data-src-width/height 不依賴它，這段等待只是雙保險。
+        if (uploaded.length > 0) {
+          await new Promise(resolve => setTimeout(resolve, ASANA_METADATA_DELAY_MS));
+        }
+
+        const postStory = async (body: Record<string, unknown>) => {
+          const r = await fetch(`${ASANA_API_BASE}/tasks/${resolvedGid}/stories`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${asanaPat}`, 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify({ data: body }),
+            signal: AbortSignal.timeout(ASANA_FETCH_TIMEOUT_MS),
+          });
+          return { ok: r.ok, status: r.status, text: r.ok ? '' : await r.text(), json: r.ok ? await r.json() as { data?: { gid?: string; created_at?: string } } : null };
+        };
+
+        let result: { ok: boolean; status: number; text: string; json: { data?: { gid?: string; created_at?: string } } | null };
+        let degraded: string | null = null;
+
+        if (uploaded.length > 0) {
+          // Step 2：內嵌圖片。<img data-asana-gid> 指向剛上傳的附件
+          const imgTags = uploaded.filter(u => u.gid).map(u => buildInlineImgTag(u.gid!, u.name, u.size)).join('\n');
+          result = await postStory({ html_text: `<body>${escapeHtml(text)}\n${imgTags}</body>` });
+
+          if (!result.ok) {
+            // inline 語法被拒 → 降級成純文字 + 附件連結，並明確標示（不靜默失敗）
+            const links = uploaded.map(u => `${u.name}: ${u.permanentUrl ?? '(no permanent_url)'}`).join('\n');
+            degraded = `inline <img> 被 Asana 拒絕（${result.status} ${result.text}），已降級為純文字留言 + 附件連結`;
+            result = await postStory({ text: `${text}\n\n附件：\n${links}` });
+          }
+        } else {
+          result = await postStory({ text });
+        }
+
+        if (!result.ok) {
+          const hint = result.status === 403 ? '（403 通常代表 PAT 沒有該任務的寫入權限）' : '';
+          const uploadedNote = uploaded.length > 0
+            ? `\n⚠ 注意：${uploaded.length} 個附件**已經上傳到任務上**（留言失敗不會自動撤回），需要時請手動移除：${uploaded.map(u => u.gid).join(', ')}`
+            : '';
+          return { content: [{ type: 'text' as const, text: `Asana API error: ${result.status} ${result.text}${hint}${uploadedNote}` }], isError: true };
+        }
+
+        const storyGid = result.json?.data?.gid ?? null;
+
+        // 稽核軌跡：送出的內容與同意情境都落地（tool 無法驗證是否真的問過，紀錄讓人事後查得到）
+        if (taskRow) {
+          const preview = text.length > 500 ? `${text.slice(0, 500)}…（共 ${text.length} 字）` : text;
+          const imgLine = uploaded.length > 0
+            ? `\n夾帶圖片（${uploaded.length}）：${uploaded.map(u => `${u.name}(gid=${u.gid}, ${u.bytes}B)`).join('、')}`
+            : '';
+          const degradedLine = degraded ? `\n⚠ 降級：${degraded}` : '';
+          logTaskOutput(db, taskRow.id, taskRow.project_id,
+            `[ASANA_COMMENT] 已送出留言至 Asana 任務 ${resolvedGid}（storyGid=${storyGid}）\n使用者同意：${approvalNote?.trim() || '(未填 approvalNote)'}${imgLine}${degradedLine}\n內容：\n${preview}`);
+        }
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              ok: true, taskGid: resolvedGid, storyGid,
+              createdAt: result.json?.data?.created_at ?? null,
+              inlineImages: uploaded.length, degraded,
+              attachments: uploaded.map(u => ({ gid: u.gid, name: u.name, permanentUrl: u.permanentUrl })),
+              audited: !!taskRow,
+            }, null, 2),
+          }],
+        };
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: 'text' as const, text: `Error adding Asana comment: ${msg}` }], isError: true };
+      }
+    },
+  );
+
+  // ── upload_asana_attachment ───────────────────────────────
+  server.tool(
+    'upload_asana_attachment',
+    '上傳檔案（截圖等）作為 Asana 任務的附件（**客戶看得到**）。可傳 taskId 或 taskGid。\n\n⚠ **送出前必須先告知使用者要上傳哪個檔案並取得明確同意**，再帶 userApproved=true。你必須先自己看過該檔案內容（截圖用 Read tool 開過）——不可上傳沒看過的東西，畫面可能含有不該外流的資料。\n\n每次上傳都會寫入任務紀錄（[ASANA_ATTACHMENT]）供稽核。上限 100MB。',
+    {
+      taskId: z.string().optional().describe('Omni task UUID — 會自動從 DB 查 sourceRef (Asana GID)'),
+      taskGid: z.string().optional().describe('Asana 任務 GID（直接傳，跳過 DB 查詢）'),
+      filePath: z.string().min(1).describe('要上傳的檔案絕對路徑（必須已存在）'),
+      userApproved: z.literal(true).describe('必須為 true，且代表你已告知使用者要上傳的檔案並取得明確同意，且你自己已看過該檔案內容'),
+      approvalNote: z.string().optional().describe('使用者同意的情境摘要，會寫入稽核紀錄'),
+    },
+    { title: 'Upload Asana Attachment', readOnlyHint: false, openWorldHint: true },
+    async ({ taskId, taskGid, filePath, approvalNote }) => {
+      const db = getMcpDb();
+
+      let resolvedGid = taskGid;
+      let taskRow: { id: string; project_id: string } | undefined;
+      if (taskId) {
+        const row = db.prepare('SELECT id, project_id, source_ref FROM tasks WHERE id = ?').get(taskId) as
+          { id: string; project_id: string; source_ref: string | null } | undefined;
+        if (!row) return { content: [{ type: 'text' as const, text: `Error: Task "${taskId}" not found` }], isError: true };
+        taskRow = { id: row.id, project_id: row.project_id };
+        if (!resolvedGid) {
+          if (!row.source_ref) return { content: [{ type: 'text' as const, text: `Error: Task "${taskId}" has no Asana sourceRef (not synced from Asana)` }], isError: true };
+          resolvedGid = row.source_ref;
+        }
+      }
+      if (!resolvedGid) {
+        return { content: [{ type: 'text' as const, text: 'Error: Must provide either taskId or taskGid' }], isError: true };
+      }
+
+      const problem = checkUploadableFile(filePath);
+      if (problem) {
+        return { content: [{ type: 'text' as const, text: `Error: ${problem}` }], isError: true };
+      }
+
+      try {
+        const asanaPat = getAsanaPat(db);
+        if (!asanaPat) {
+          return { content: [{ type: 'text' as const, text: 'Error: Asana PAT not configured. Use set_global_config to set asana.pat.' }], isError: true };
+        }
+
+        const up = await uploadAsanaFile(asanaPat, resolvedGid, filePath);
+
+        if (taskRow) {
+          logTaskOutput(db, taskRow.id, taskRow.project_id,
+            `[ASANA_ATTACHMENT] 已上傳附件至 Asana 任務 ${resolvedGid}（attachmentGid=${up.gid}）\n檔案：${up.name}（${up.bytes} bytes）\n來源路徑：${filePath}\n使用者同意：${approvalNote?.trim() || '(未填 approvalNote)'}`);
+        }
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ ok: true, taskGid: resolvedGid, attachmentGid: up.gid, filename: up.name, bytes: up.bytes, permanentUrl: up.permanentUrl, audited: !!taskRow }, null, 2),
+          }],
+        };
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: 'text' as const, text: `Error uploading Asana attachment: ${msg}` }], isError: true };
       }
     },
   );
