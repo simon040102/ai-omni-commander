@@ -37,6 +37,30 @@ export const UNRELATED_TEST_FAILURE_RULE =
   '自己任務相關的測試全綠即可回報 passed=true，note 必列無關失敗清單';
 
 /**
+ * 判 FAIL 前的環境／程式歸因規則。驗收 FAIL 會擋結案（第六道閘門），
+ * 但實務上大量「測不過」源自環境（schema 未同步、設定缺漏、服務註冊殘留、
+ * session 過期），與受測程式無關——直接記 FAIL 會把環境債掛在任務頭上。
+ */
+export const ENV_VS_CODE_RULE =
+  '判 FAIL 前先歸因：同樣的操作在**未修改的基準版本**上會不會也失敗？（可用 git stash 退回基線重跑）。基線也失敗 → 屬環境／既有問題，不是本次的 FAIL，用 report_output 記錄後依下方 [BLOCKED] 慣例處理';
+
+/**
+ * 測不了的第三態。閘門只認 PASS/FAIL，且「從未回報的項目不擋結案」——
+ * 故環境測不了時的正確作法是「不回報 + 留下實證」，而非二選一硬湊。
+ * 這條把 agent 原本要自行發明的行為變成明示規則。
+ */
+export const BLOCKED_ITEM_RULE =
+  '環境因素真的測不了（服務起不來、DB schema 與程式不符、無對應環境）→ **不可回報 passed=true**（自我認證）、**也不要回報 passed=false**（會永久卡住結案閘門）。正確作法：該項**不回報**，改用 report_output 記錄 `[BLOCKED] {項目id}：{測不了的實證}`——實證要具體（例如實跑得到的錯誤訊息），不可只寫「環境有問題」。未回報的項目會出現在結案提醒中，可見性由該機制負責';
+
+/**
+ * 測試資料紀律。欄位名已有「以 schema 為準嚴禁猜」的規範，但資料「內容」
+ * 沒有——自行編造的擬真格式（電文、報文、代碼）一旦被後人當成規格參考，
+ * 比欄位打錯更難發現。
+ */
+export const TEST_DATA_RULE =
+  '測試資料優先取用系統既有的真實資料（同表或同性質表撈一筆），不要自行編造擬真格式（電文／報文／代碼結構等）；必須自建時要明顯可辨識（如 TEST- 前綴），不可模仿真實格式。**每一段 setup 都要有對應的 teardown**，條件用 setup 時的識別欄位精確界定，避免誤刪；對環境做過的改動（塞資料、改 schema、改設定檔）一律用 report_output 記錄，並附還原方式';
+
+/**
  * 禁裝擋板——與 ExecutionPipeline 的 buildUnitTestSection 同文
  * （web/MCP 邊界不互相 import，靠測試釘住兩處同步）：測試框架不存在代表
  * 專案設定與 workspace 實況不符，agent 自行裝框架會污染 workspace。
@@ -160,12 +184,12 @@ const BACKEND_ITEMS: VerificationItem[] = [
   {
     id: 'be-ddl-match',
     item: 'DDL 比對：CREATE TABLE 欄位名與 ORM/模型定義一致',
-    how: '逐欄比對 DDL 與 ORM 欄位定義（Entity/Model 對應），含系統共用欄位（如建立/修改時間、備註欄）——共用欄位的確切名稱以專案慣例為準',
+    how: '逐欄比對 DDL 與 ORM 欄位定義（Entity/Model 對應），含系統共用欄位（如建立/修改時間、備註欄）——共用欄位的確切名稱以專案慣例為準。**比對前先確認眼前這個環境的 schema 是不是最新**：眼前 DB 與 Entity 不一致時，要分辨是「程式寫錯欄位名」還是「這個環境的 schema 沒同步」——後者屬環境落差，不是本次的 FAIL，依 [BLOCKED] 慣例處理並回報落差清單',
   },
   {
     id: 'be-api-smoke',
     item: 'API 煙霧測試：每個新 API 回 200 不是 500',
-    how: '啟動服務後 curl 每個新增/修改的 API endpoint，確認回 200（單元測試只驗邏輯，煙霧測試才驗 SQL 和欄位名）',
+    how: '**服務要真的起得來**（起不來就是第一個要查的問題），再 curl 每個新增/修改的 API endpoint（單元測試只驗邏輯，煙霧測試才驗 SQL 和欄位名）。要求：(1) 帶**符合 SD INPUT 定義的實值**，不可用空 body 或亂填值混過去——假值可能被前面的驗證擋掉，測不到真正的查詢邏輯；(2) 不只看 200，要**逐欄核對回傳形狀與 SD 的 OUTPUT 定義一致**（欄位名打錯只有這裡抓得到）；(3) 錯誤路徑也要測（必輸欄位缺漏、查無資料的 id），確認回的是規格定義的錯誤格式而非 stack trace',
   },
   {
     id: 'be-seed-sql',
@@ -181,7 +205,7 @@ const BACKEND_ITEMS: VerificationItem[] = [
 export const BE_DATA_VERIFICATION_ITEM: VerificationItem = {
   id: 'be-data-verification',
   item: '資料異動驗證：query_external_db 確認新增/修改/刪除真實落地',
-  how: '用 query_external_db 的 count/sample 驗證資料真實落地：新增後查得到該筆、修改後 sample 確認欄位值正確、刪除後 count 查不到；欄位名以 describe_table 為準，嚴禁用猜的',
+  how: `用 query_external_db 的 count/sample 驗證資料真實落地：新增後查得到該筆、修改後 sample 確認欄位值正確、刪除後 count 查不到；欄位名以 describe_table 為準，嚴禁用猜的。本次為純查詢、無資料異動可驗時，回報 passed=true 並在 note 寫明「純查詢無 CRUD」。${TEST_DATA_RULE}`,
 };
 
 const FRONTEND_ITEMS: VerificationItem[] = [
@@ -193,7 +217,7 @@ const FRONTEND_ITEMS: VerificationItem[] = [
   {
     id: 'fe-browser',
     item: '瀏覽器測試：頁面能正常操作',
-    how: '用 Playwright 開啟頁面實際操作（查詢/新增/儲存等主要流程），確認無 console error、畫面符合規格（服務有跑的話）',
+    how: '用 Playwright 依 SA 的操作情境**完整走過一遍功能**（查詢＝輸入條件→送出→結果正確過濾；新增/修改/刪除＝走到資料真的變動；失敗路徑＝必填留空送出→出現規格定義的錯誤訊息），不是只開頁面看有沒有渲染。確認無 console error 且無失敗請求。**截圖後必須說出畫面上實際看到什麼**（幾筆資料、關鍵欄位顯示什麼值）——空白畫面、錯誤彈窗、0 筆結果一律先當 FAIL 查清楚，「有截圖」不等於「有通過」；證據用 report_verification_evidence 上傳 fullPage 截圖',
   },
 ];
 
@@ -251,7 +275,13 @@ export function registerVerificationTools(server: McpServer): void {
             taskId: task.id,
             label: task.label,
             note,
-            instruction: '逐項執行後呼叫 report_verification_result(taskId, results=[{item, passed, note?}]) 回報，item 用清單中的 id 或 item 文字。截圖等證據檔案用 report_verification_evidence(taskId, filePath, description) 上傳。',
+            instruction: `逐項執行後呼叫 report_verification_result(taskId, results=[{item, passed, note?}]) 回報，item 用清單中的 id 或 item 文字。截圖等證據檔案用 report_verification_evidence(taskId, filePath, description) 上傳。
+
+【回報紀律】
+- 每項如實回報 PASS/FAIL + 說明。**嚴禁**：只跑單元測試就宣稱功能可用（UT 綠 ≠ API 通）、API 只看 200 不核對回傳欄位、寫入操作不查 DB 就當作落地、用「程式碼看起來對」代替實際操作、FAIL 改成 PASS 而沒有重測。
+- ${ENV_VS_CODE_RULE}。
+- ${BLOCKED_ITEM_RULE}。
+- FAIL 修復後必須**重新執行該項**再回報 PASS，不是改回報值。`,
             items,
           }, null, 2),
         }],
