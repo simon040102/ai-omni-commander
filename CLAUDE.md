@@ -67,7 +67,7 @@ A dual-mode AI collaborative development system. Originally orchestrated multipl
      請提供 SA 文件路徑，或說「跳過」強制執行。
      ```
    - **跳過時必須用 `report_output` 記錄**：`[SKIP] 使用者跳過規格檢查：缺少 {缺少的文件類型} 文件`
-   - （可選）SA/SD 都齊時可先 `check_spec_consistency(taskId)`——同一次派工做兩個維度：(1) **SA↔SD 矛盾比對**（規格自相矛盾時實作永遠無法 100% 回對，矛盾先解決再開工）；(2) **規格模糊點預檢**（以 implementer 視角走決策樹，把「規格找不到唯一答案」的決策點開成 `ambiguous_spec` 缺口讓使用者拍板；advisory，不影響任何閘門、不阻止派工）。**使用時機（任務有大小之分，不是每次都跑；判斷者是 orchestrator、決定權在使用者，絕不自動觸發）**：
+   - （可選）SA/SD 都齊時可先 `check_spec_consistency(taskId)`——同一次派工做三個維度：(1) **SA↔SD 矛盾比對**（規格自相矛盾時實作永遠無法 100% 回對，矛盾先解決再開工）；(2) **同一份文件內部矛盾**（SD 五組／SA 四組，開 `spec_internal_conflict` 缺口——見下方行為註記）；(3) **規格模糊點預檢**（以 implementer 視角走決策樹，把「規格找不到唯一答案」的決策點開成 `ambiguous_spec` 缺口讓使用者拍板；advisory，不影響任何閘門、不阻止派工）。**使用時機（任務有大小之分，不是每次都跑；判斷者是 orchestrator、決定權在使用者，絕不自動觸發）**：
      1. light 軌／小 bug／小改 → 不跑也不提
      2. full 軌小規格（單頁 CRUD、欄位少）→ 預設不跑——模糊留給 implementer 撞到再 `report_spec_gap` 的既有機制
      3. full 軌大規格（多跳窗／多流程／長 SA）→ orchestrator 在此規格齊全檢查步驟「建議」使用者跑，使用者同意才跑
@@ -255,7 +255,7 @@ MCP Server（stdio，由 Claude Code 經 .mcp.json spawn）與 Web Server（Expr
   ```
 - 新增程式碼時**嚴禁**在 MCP process 內用 `process.cwd()` 解析路徑，一律走 `getDataDir()` / `resolveFromRepoRoot()`
 
-### MCP Tools (54 total)
+### MCP Tools (55 total)
 
 完整用法見各工具 description 與 server instructions（連線時自動注入）。分組一覽：
 
@@ -263,7 +263,7 @@ MCP Server（stdio，由 Claude Code 經 .mcp.json spawn）與 Web Server（Expr
 - **文件 / 規格**：`get_documents`, `read_document`, `search_documents`, `find_axure_snapshot`, `fetch_svn_specs`, `fetch_task_attachments`
 - **專案 / 設定**：`list_projects`, `get_project`, `create_project`, `update_project`, `set_extra_prompt`, `set_global_config`
 - **規格缺口**：`report_spec_gap`, `list_spec_gaps`, `resolve_spec_gap`, `check_spec_changes`, `check_spec_consistency`
-- **規格回對（checklist / compliance）**：`save_spec_checklist`, `get_spec_checklist`, `waive_checklist_item`, `run_spec_compliance`, `get_compliance_review_plan`, `save_compliance_review`
+- **規格回對（checklist / compliance）**：`save_spec_checklist`, `get_spec_checklist`, `waive_checklist_item`, `run_spec_compliance`, `get_compliance_review_plan`, `save_compliance_review`, `verify_db_schema`（db_field 對實體 DB 核對）
 - **驗收**：`get_verification_plan`, `get_test_baseline_plan`, `report_verification_result`, `report_verification_evidence`
 - **專案筆記**：`save_project_note`, `list_project_notes`, `archive_project_note`
 - **流程圖（Flow-Gated）**：`save_task_flow`, `report_flow_check`, `get_task_flows`, `save_sa_flow`
@@ -276,6 +276,9 @@ MCP Server（stdio，由 Claude Code 經 .mcp.json spawn）與 Web Server（Expr
 - **`sync_asana_tasks` subtask 遞迴抓取**：專案任務清單抓不到未 multi-home 進專案的 subtask（工作項目常在第二層），同步時自動對 `num_subtasks>0` 的未完成任務遞迴抓 subtask（深度上限 3、只抓未完成、gid 去重、每次同步 subtask API 上限 300 支超過截斷+警告）；assignee 過濾以任務本身判（先抓全樹再過濾）、parent_name=直接母任務、section 繼承根任務；`includeSubtasks=false` 可退回舊行為。共用邏輯：`server/src/utils/asanaSubtasks.ts`（Web 端 `AsanaSyncService.syncOnce` 同一份；Web 端截斷/部分失敗時本輪跳過任務刪除防誤刪）
 - **`fetch_svn_specs` 雙來源**：從 SVN **加上**專案設定的本地 `specFolders` 合併撈取；git 資料夾先安全 `git pull --ff-only`（dirty → 跳過 pull + 警告）
 - **`get_execution_plan` 自動判軌**：full / light 軌（見「選擇任務後」的任務軌道說明），並自動注入規格閱讀／規格遵循／可維護性／後端效能／後端安全五項規範
+- **`check_spec_consistency` 維度二「同一份文件內部矛盾」（新增，advisory）**：既有維度一的四個面向（欄位對齊/功能覆蓋/反向檢查/訊息與驗證規則）**全是跨文件比對，結構上不會去看同一份文件的前後段**——「SD 自己跟自己打架」永遠抓不到。實測某支功能（SA 362 行 + SD 979 行）事後找出 42 條規格問題，**驗證程式碼階段才浮現的 20 條裡有 10 條屬於這類**，純讀一份 SD 就成立，卻拖到最貴的階段才撞出來。因此派工 prompt 增加維度二：**SD 內部五組**（欄位定義表↔SQL 參考、SQL 本體↔實作備忘（明訂不要預設哪邊是基準——備忘可能是後來依實測回填的最新資訊）、INPUT/OUTPUT 表↔格式範例、章節↔章節、規範敘述↔同節 SQL）＋ **SA 內部四組**（欄位說明表↔**畫面稿圖片**、↔按鈕說明表、畫面章節↔輸出報表章節、檢核規則↔訊息文字）。判準「同一份文件裡同一件事被寫兩次以上就要對一次」；長規格（500 行以上）**先折疊重複結構（多段 UNION／相似 API 收成「一段完整＋段間差異表」）再建索引**（直接 grep 會被複製結構打敗：某欄位 26 個命中裡 21 個是逐段複製的同一句守衛）；範圍限定單一節時「章節↔章節」降級為「待跨節確認清單」寫進 report_output，不可靜默跳過。產出走 `report_spec_gap(category="spec_internal_conflict")`——**與 `sa_sd_mismatch` 分開的理由：後者要兩份文件才看得出來，這個純讀一份就成立，處理的人也不同**。新分類需要 spec_gaps 的 CHECK 擴充（v20 migration，照 v12/v17/v19 的重建 pattern，有 migration 測試守住資料保存）。**純 advisory：不影響任何閘門、不阻止派工**（grep 確認過沒有任何閘門讀 `spec_gaps`）
+- **`check_spec_consistency` 模糊點自查的「原型」含 SA 內嵌圖片**：原本只認外部 Axure（`find_axure_snapshot`），但 SA 常把畫面稿以 `![](../../Images/xxx.png)` 內嵌，**要用 Read tool 逐張打開看**。實測某支 SA 內嵌 6 張 PNG，打開後當場抓到三條文字表與圖打架（表寫「預帶當天」圖上是一整月區間、表寫「由新到舊排序」圖上是由舊到新、表寫彈窗標題「串連訊息」圖上畫成「檢視作業」）。配套紀律：**圖與文字表一致時圖是答案；不一致時交維度二列為矛盾，不可自行採信圖**（否則維度二要抓的東西會被維度三當成答案吞掉）；圖被裁切看不到要問的區域時據實寫「圖已開、該區域被裁切、無法判讀」
+- **`get_compliance_review_plan` 實體 DB 核對（步驟 4c，db_field 專用，**進判定**）**：前面所有關卡看的都是程式碼（原始碼字面、Entity `@Column`、DDL 檔），證明得了「程式碼裡有這個名字」，證明不了「正式資料庫真的有這個欄位」——**DDL 沒套用到該環境、Entity 對到另一張同名欄位的表、規格寫了一個從沒建過的欄位**，這三種在程式碼層面全都看不出來（規格與程式可以一起錯）。因此 reviewer plan 在**專案有設 `dbConnections` 且檢查表有 db_field 項**時會多一步：呼叫 `verify_db_schema(taskId, connectionLabel)` 查 `INFORMATION_SCHEMA.COLUMNS` 逐欄核對。判定規則——**實體 DB 明確說沒有該欄位（或整張表不存在）→ 該 db_field 判 missing（資料庫的答案優先於程式碼）**；實體 DB 確實有才可判 matched（evidence 照舊附程式碼 `file:line`，證據驗證器驗的是程式碼位置不是 DB）；**「無從判定」（沒撈到該表 schema）絕不可當成通過**，改用 `tables` 參數重跑或在 note 據實寫「未經實體 DB 核對」；型別/長度/nullable 與 SD 不符**不影響 matched/missing**（欄位確實存在），改開 `report_spec_gap(category="field_undefined")` 交使用者裁決。專案沒設 DB 連線 → 整步不出現（不叫 reviewer 做做不到的事，那只會換來一句自我認證的「已確認」）。核心比對為純函式 `server/src/mcp/db-schema-check.ts`；連線解析與 `query_external_db` 共用 `resolveDbConnection`，表名一律參數綁定、只讀 `INFORMATION_SCHEMA`（不碰業務資料表），一次上限 40 張表
 - **`get_compliance_review_plan` 合約反向對齊（code→spec 欄位，advisory）**：full 軌 reviewer plan 除既有單向逐項回對（spec→code）與「反向掃描規格原文」（spec→checklist 補檢查表）外，另含**合約反向對齊**步驟——枚舉程式對每個 api 實際帶的 request 參數／response 欄位／對應 db_field，與規格定義比對，**程式有、規格沒定義、且屬業務語意**的欄位用 `report_spec_gap(category="field_undefined")` 開缺口交使用者裁決（是過度實作該移除，還是規格待補）。**只做欄位維度**（param/response_field/db_field，**絕不對 ui_text/logic 反向**——誤報海嘯）；排除基礎設施雜訊（分頁 page/size/offset/limit、排序 sort/order、auth token、時間戳 createdAt/updatedAt、專案系統共用欄位如 MetaData 的 CREATE_DATE/MODIFY_DATE/DATA_REMARK）；規格對該 API 欄位定義不足則略過（不硬 diff）。**純 advisory：不影響 matched/missing 判定、不進完成閘門、不擋結案**，產出走既有 report_spec_gap 進 Web UI 待補規格面板。light 軌無 SA/SD 規格文件，不做此步驟
 - **Asana due date 同步**：兩條同步路徑（MCP `sync_asana_tasks`、Web `AsanaSyncService`）都把 due_on 落地到 `tasks.due_date`（原樣 YYYY-MM-DD，非字串→null，改期會觸發 UPDATE）；`get_task`/`list_pending_tasks`（另附 `overdue`）/`resume_task` 回傳 `dueDate`；`next_task` 在既有排序（bug 優先）之下同優先級內逾期/近到期優先（null 排最後），推薦理由帶到期資訊（如「已逾期 2 天」）；Web TaskList 任務列顯示到期日（逾期紅字）。共用純函式見 `server/src/utils/dueDate.ts`
 

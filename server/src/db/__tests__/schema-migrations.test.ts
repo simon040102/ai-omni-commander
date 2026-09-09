@@ -185,6 +185,68 @@ describe('schema migrations (v10–v19)', () => {
     expect((db.prepare("SELECT category FROM spec_gaps WHERE id='g1'").get() as any).category).toBe('ambiguous_spec');
   });
 
+  it('v20: rebuilds spec_gaps for spec_internal_conflict without losing rows', () => {
+    // Simulate a post-v19 / pre-v20 DB: has 'ambiguous_spec' but not 'spec_internal_conflict'
+    const db = new Database(':memory:');
+    db.pragma('foreign_keys = ON');
+    runMigrations(db);
+    db.exec('PRAGMA foreign_keys = OFF');
+    db.exec(`
+      DROP TABLE spec_gaps;
+      CREATE TABLE spec_gaps (
+        id              TEXT PRIMARY KEY,
+        task_id         TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        category        TEXT NOT NULL CHECK(category IN ('sa_missing', 'sd_missing', 'field_undefined',
+                                                          'api_undefined', 'logic_unclear', 'other', 'spec_changed', 'sa_sd_mismatch', 'ambiguous_spec')),
+        description     TEXT NOT NULL,
+        status          TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'resolved')),
+        resolution_note TEXT,
+        created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+        resolved_at     TEXT
+      );
+    `);
+    db.exec('PRAGMA foreign_keys = ON');
+
+    db.prepare("INSERT INTO projects (id, name, working_dir) VALUES ('p1','P','/tmp')").run();
+    db.prepare("INSERT INTO tasks (id, project_id, title, label, task_type) VALUES ('t1','p1','T','frontend','other')").run();
+    db.prepare("INSERT INTO spec_gaps (id, task_id, project_id, category, description) VALUES ('g1','t1','p1','ambiguous_spec','old gap')").run();
+    db.prepare("INSERT INTO spec_gaps (id, task_id, project_id, category, description, status, resolution_note) VALUES ('g2','t1','p1','sa_sd_mismatch','resolved one','resolved','選 B')").run();
+
+    // The 9-value CHECK rejects the new value before migration
+    expect(() => db.prepare("INSERT INTO spec_gaps (id, task_id, project_id, category, description) VALUES ('gx','t1','p1','spec_internal_conflict','x')").run()).toThrow();
+
+    runMigrations(db); // triggers the v20 rebuild only (v12/v17/v19 values already present)
+
+    // Existing rows survive, including status/resolution_note
+    expect((db.prepare("SELECT description FROM spec_gaps WHERE id='g1'").get() as any).description).toBe('old gap');
+    const resolved = db.prepare("SELECT status, resolution_note FROM spec_gaps WHERE id='g2'").get() as any;
+    expect(resolved.status).toBe('resolved');
+    expect(resolved.resolution_note).toBe('選 B');
+
+    // New value now accepted
+    db.prepare("INSERT INTO spec_gaps (id, task_id, project_id, category, description) VALUES ('g3','t1','p1','spec_internal_conflict','SD §1 INPUT 說可依 sortField 排序 vs 同節 SQL 參考寫死 ORDER BY')").run();
+
+    // Indexes recreated
+    const indexes = db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='spec_gaps'").all() as any[];
+    expect(indexes.map(i => i.name)).toEqual(expect.arrayContaining(['idx_spec_gaps_project', 'idx_spec_gaps_task', 'idx_spec_gaps_status']));
+
+    // Idempotent
+    runMigrations(db);
+    expect((db.prepare('SELECT COUNT(*) as c FROM spec_gaps').get() as any).c).toBe(3);
+    expect(db.inTransaction).toBe(false);
+  });
+
+  it('fresh DBs accept spec_internal_conflict from the base CREATE TABLE (no rebuild needed)', () => {
+    const db = new Database(':memory:');
+    db.pragma('foreign_keys = ON');
+    runMigrations(db);
+    db.prepare("INSERT INTO projects (id, name, working_dir) VALUES ('p1','P','/tmp')").run();
+    db.prepare("INSERT INTO tasks (id, project_id, title, label, task_type) VALUES ('t1','p1','T','frontend','other')").run();
+    db.prepare("INSERT INTO spec_gaps (id, task_id, project_id, category, description) VALUES ('g1','t1','p1','spec_internal_conflict','x')").run();
+    expect((db.prepare("SELECT category FROM spec_gaps WHERE id='g1'").get() as any).category).toBe('spec_internal_conflict');
+  });
+
   it('runs table rebuilds inside a transaction (atomic — no half-rebuilt table)', () => {
     // Source-level guard: every DROP/RENAME rebuild block must be wrapped in
     // BEGIN IMMEDIATE … COMMIT (PRAGMA foreign_keys stays outside — it is a
@@ -192,9 +254,9 @@ describe('schema migrations (v10–v19)', () => {
     const src = fs.readFileSync(
       path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'schema.ts'), 'utf-8');
     const rebuildBlocks = src.match(/BEGIN IMMEDIATE;/g) || [];
-    // agents + tasks + spec_gaps(v12) + documents(v13) + spec_gaps(v17) + spec_gaps(v19)
-    expect(rebuildBlocks.length).toBe(6);
-    expect((src.match(/\bCOMMIT;/g) || []).length).toBe(6);
+    // agents + tasks + spec_gaps(v12) + documents(v13) + spec_gaps(v17) + spec_gaps(v19) + spec_gaps(v20)
+    expect(rebuildBlocks.length).toBe(7);
+    expect((src.match(/\bCOMMIT;/g) || []).length).toBe(7);
     // No rebuild exec string may contain PRAGMA foreign_keys (must stay outside the tx)
     for (const block of src.split('BEGIN IMMEDIATE;').slice(1)) {
       const body = block.split('COMMIT;')[0]!;

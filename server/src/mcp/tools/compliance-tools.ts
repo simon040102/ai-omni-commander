@@ -522,11 +522,22 @@ ${JSON.stringify(created, null, 2)}`, '（created 清單被截斷——用 get_s
         };
       }
 
-      const project = db.prepare('SELECT id, name, frontend_path, backend_path FROM projects WHERE id = ?').get(task.project_id) as
-        { id: string; name: string; frontend_path: string | null; backend_path: string | null } | undefined;
+      const project = db.prepare('SELECT id, name, frontend_path, backend_path, config_json FROM projects WHERE id = ?').get(task.project_id) as
+        { id: string; name: string; frontend_path: string | null; backend_path: string | null; config_json: string | null } | undefined;
       if (!project) {
         return { content: [{ type: 'text' as const, text: `Error: Project "${task.project_id}" not found` }], isError: true };
       }
+
+      // 實體 DB 核對（步驟 4c）只有在「專案有設 DB 連線」且「檢查表真的有 db_field 項」時才出現。
+      // 沒連線就不要叫 reviewer 去做做不到的事——那只會換來一句自我認證的「已確認」。
+      const dbConnectionLabels: string[] = (() => {
+        if (!project.config_json) return [];
+        try {
+          const cfg = JSON.parse(project.config_json) as { dbConnections?: Array<{ label?: string }> };
+          return (cfg.dbConnections || []).map(c => c.label).filter((l): l is string => !!l);
+        } catch { return []; }
+      })();
+      const hasDbFieldItems = activeItems.some(i => i.item_type === 'db_field');
 
       // 依 task.label 決定 reviewer 的 workspace（同 run_spec_compliance 的規則）
       const workspaces: string[] = [];
@@ -729,7 +740,22 @@ ${missingLines.join('\n')}${staleBlock}${deltaTruncated ? '\n（清單已達大�
    - 沒有發現多餘業務欄位也要明確說「合約反向對齊：無多餘欄位」`
         : '';
 
-      const commonSteps = `${reverseScanStep}${contractReverseStep}
+      // 實體 DB 核對（步驟 4c）：db_field 的第三種驗法。
+      // 程式預檢掃原始碼字面、AI 回對看 Entity/@Column/DDL——兩層都只證明得了
+      // 「程式碼裡有這個名字」，證明不了「正式資料庫真的有這個欄位」。
+      // DDL 沒套用、Entity 對到別的表、規格寫了從沒建過的欄位，全都躲得過。
+      // 專案沒設 DB 連線或檢查表沒有 db_field 項 → 整步不出現（不叫 reviewer 做做不到的事）。
+      const dbSchemaStep = (dbConnectionLabels.length > 0 && hasDbFieldItems)
+        ? `
+4c. **實體 DB schema 核對（db_field 專用，進判定）**：呼叫 verify_db_schema(taskId="${taskId}", connectionLabel="${dbConnectionLabels[0]}"${dbConnectionLabels.length > 1 ? `　※此專案另有連線：${dbConnectionLabels.slice(1).join(', ')}` : ''}) 把檢查表的 db_field 項目拿去跟正式資料庫的 INFORMATION_SCHEMA 逐欄核對。判定規則——
+   - **實體 DB 明確說沒有這個欄位（或整張表不存在）→ 該 db_field 判 missing**，note 寫「實體 DB 的 {表} 沒有欄位 {欄位}」。**實體 DB 的答案優先於程式碼**：Entity 有 @Column 但 DB 沒有，代表 DDL 沒套用或對錯表，那就是真缺陷
+   - **實體 DB 確實有 → 才可判 matched**，evidence 照舊附程式碼 file:line（證據驗證器驗的是程式碼位置，不是 DB）
+   - **回報「無從判定」的項目絕不可當成通過**——那是沒撈到該表的 schema。改用 tables 參數指定表名重跑；真的撈不到（表在另一個資料庫、連線權限不足）就在 note 據實寫明「未經實體 DB 核對」，判定回退到 Entity/DDL 證據
+   - **型別／長度／可否為空與 SD 規格定義不符** → 不影響 matched/missing（欄位確實存在），改用 report_spec_gap(taskId="${taskId}", category="field_undefined", description="實體 DB 與規格不符：{表}.{欄位} 實際為 {實際型別}，SD 規格寫 {規格型別}") 開缺口交使用者裁決
+   - **規格提到但專案沒有 Entity 也沒有 DDL 的表**（只出現在原生 SQL 字串裡）——這種正是本步驟最有價值的地方，務必核對`
+        : '';
+
+      const commonSteps = `${reverseScanStep}${contractReverseStep}${dbSchemaStep}
 5. **判定標準（寧嚴勿鬆）**：每項判 matched 或 missing——
    - matched **必須附 evidence**（file + line，workspace 相對路徑）與一句說明（note）
    - **每筆 evidence 會被程式驗證**（檔案存在、行號有效、該行 ±${RELEVANCE_WINDOW} 行內確實含該文字/路徑/識別字）——引用不精確會整批退回，請引用實際包含該文字/路徑/識別字的行（如文字在 i18n 檔就引 i18n 檔）
@@ -827,7 +853,7 @@ ${orchestratorNote}
    - ui_text → 在程式碼中找到該文字的**渲染處**（不是只出現在註解/測試），確認與規格逐字一致
    - api → 確認 path、method、參數確實**串接**（前端有呼叫、後端有 handler），不是只出現字串
    - param / response_field → 確認參數/欄位確實進出該 API 的 request/response
-   - db_field → 確認 Entity（@Column name）/ DDL 中確實存在該欄位
+   - db_field → 確認 Entity（@Column name）/ DDL 中確實存在該欄位${dbSchemaStep ? '。**此專案有 DB 連線，程式碼證據不是終點——步驟 4c 會拿實體 DB 的 INFORMATION_SCHEMA 覆核，實體 DB 說沒有就是 missing**' : ''}
    - **logic → 追實際程式碼流程（Controller → Service → SQL / 元件 → handler → API），確認邏輯與規格描述一致。這是 AI 回對的核心價值，不可跳過、不可只憑檔名或函式名猜。若 implementer 已為該邏輯撰寫單元測試，測試檔中對應案例的 file+line 可作為 evidence（仍會被程式開檔驗證）**
 ${commonSteps}${saFlowSection}
 

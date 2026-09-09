@@ -504,7 +504,8 @@ export function runMigrations(db: Database.Database): void {
         task_id         TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
         project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
         category        TEXT NOT NULL CHECK(category IN ('sa_missing', 'sd_missing', 'field_undefined',
-                                                          'api_undefined', 'logic_unclear', 'other', 'spec_changed', 'sa_sd_mismatch', 'ambiguous_spec')),
+                                                          'api_undefined', 'logic_unclear', 'other', 'spec_changed', 'sa_sd_mismatch',
+                                                          'spec_internal_conflict', 'ambiguous_spec')),
         description     TEXT NOT NULL,
         status          TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'resolved')),
         resolution_note TEXT,
@@ -822,6 +823,53 @@ export function runMigrations(db: Database.Database): void {
         `);
       } catch (err) {
         process.stderr.write(`[schema] v19 spec_gaps ambiguous_spec migration failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        try { db.exec('ROLLBACK'); } catch { /* no open transaction */ }
+      } finally {
+        db.exec('PRAGMA foreign_keys = ON');
+      }
+    }
+  }
+
+  // =============================================
+  // v20 Migration: spec_gaps category CHECK 擴充 'spec_internal_conflict'
+  // （check_spec_consistency 維度二「同一份文件內部矛盾」用 report_spec_gap 寫入）。
+  // 與 sa_sd_mismatch 分開的理由：後者要兩份文件才看得出來，這個純讀一份就成立。
+  // Existing DBs 的 CHECK 沒有這個值 → 照 v12/v17/v19 pattern 重建表，不遺失資料。
+  // =============================================
+  {
+    const specGapsInfo = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='spec_gaps'").get() as { sql: string } | undefined;
+    if (specGapsInfo?.sql && !specGapsInfo.sql.includes("'spec_internal_conflict'")) {
+      try {
+        db.exec('PRAGMA foreign_keys = OFF');
+        db.exec(`
+          BEGIN IMMEDIATE;
+
+          CREATE TABLE IF NOT EXISTS spec_gaps_new (
+            id              TEXT PRIMARY KEY,
+            task_id         TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            category        TEXT NOT NULL CHECK(category IN ('sa_missing', 'sd_missing', 'field_undefined',
+                                                              'api_undefined', 'logic_unclear', 'other', 'spec_changed', 'sa_sd_mismatch',
+                                                              'spec_internal_conflict', 'ambiguous_spec')),
+            description     TEXT NOT NULL,
+            status          TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'resolved')),
+            resolution_note TEXT,
+            created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+            resolved_at     TEXT
+          );
+          INSERT OR IGNORE INTO spec_gaps_new (id, task_id, project_id, category, description, status, resolution_note, created_at, resolved_at)
+            SELECT id, task_id, project_id, category, description, status, resolution_note, created_at, resolved_at
+            FROM spec_gaps;
+          DROP TABLE spec_gaps;
+          ALTER TABLE spec_gaps_new RENAME TO spec_gaps;
+          CREATE INDEX IF NOT EXISTS idx_spec_gaps_project ON spec_gaps(project_id);
+          CREATE INDEX IF NOT EXISTS idx_spec_gaps_task ON spec_gaps(task_id);
+          CREATE INDEX IF NOT EXISTS idx_spec_gaps_status ON spec_gaps(status);
+
+          COMMIT;
+        `);
+      } catch (err) {
+        process.stderr.write(`[schema] v20 spec_gaps spec_internal_conflict migration failed: ${err instanceof Error ? err.message : String(err)}\n`);
         try { db.exec('ROLLBACK'); } catch { /* no open transaction */ }
       } finally {
         db.exec('PRAGMA foreign_keys = ON');

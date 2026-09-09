@@ -1,12 +1,20 @@
 /**
  * MCP tools for querying external databases.
- * query_external_db
+ * query_external_db, verify_db_schema
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type BetterSqlite3 from 'better-sqlite3';
 import { z } from 'zod';
 import mssql from 'mssql';
 import { getMcpDb } from '../db.js';
 import { CHARACTER_LIMIT } from '../helpers.js';
+import {
+  checkDbFields, describeColumn, isConfirmed, isRefuted, parseDbFieldRef, summarize,
+  type DbColumn, type DbFieldItem,
+} from '../db-schema-check.js';
+
+/** verify_db_schema 一次最多撈幾張表的 schema（避免一次拉爆整個資料庫）。 */
+export const VERIFY_SCHEMA_MAX_TABLES = 40;
 
 interface DbConnection {
   label: string;
@@ -130,6 +138,52 @@ function splitTableName(tableName: string): { schema: string | null; table: stri
 /** Quote a validated identifier for T-SQL. */
 function quoteIdent(name: string): string {
   return `[${name}]`;
+}
+
+/**
+ * 從專案設定解出一組 mssql 連線參數。兩個 DB 工具共用，
+ * 免得連線邏輯（connectionString fallback、預設 port、憑證選項）分兩份走鐘。
+ */
+function resolveDbConnection(
+  db: BetterSqlite3.Database,
+  projectId: string,
+  connectionLabel: string,
+): { config: mssql.config; database: string } | { error: string } {
+  const project = db.prepare('SELECT config_json FROM projects WHERE id = ?').get(projectId) as { config_json: string | null } | undefined;
+  if (!project) return { error: `Error: Project "${projectId}" not found` };
+
+  let dbConnections: DbConnection[] = [];
+  if (project.config_json) {
+    try {
+      dbConnections = (JSON.parse(project.config_json) as { dbConnections?: DbConnection[] }).dbConnections || [];
+    } catch {
+      return { error: 'Error: Failed to parse project config_json' };
+    }
+  }
+  const conn = dbConnections.find(c => c.label === connectionLabel);
+  if (!conn) {
+    const available = dbConnections.map(c => c.label).join(', ') || '(none)';
+    return { error: `Error: DB connection "${connectionLabel}" not found. Available: ${available}` };
+  }
+
+  const parsed = conn.connectionString ? parseConnectionString(conn.connectionString) : null;
+  const server = conn.server || parsed?.server;
+  if (!server) return { error: `Error: DB connection "${connectionLabel}" has no server configured. Check project DB settings.` };
+  const database = conn.database || parsed?.database || '';
+
+  return {
+    database,
+    config: {
+      server,
+      database,
+      user: conn.user || parsed?.user || '',
+      password: conn.password || parsed?.password || '',
+      port: conn.port || parsed?.port || 1433,
+      options: { encrypt: false, trustServerCertificate: true },
+      requestTimeout: 30000,
+      connectionTimeout: 10000,
+    },
+  };
 }
 
 export function registerDbTools(server: McpServer): void {
@@ -333,6 +387,133 @@ export function registerDbTools(server: McpServer): void {
           default:
             return { content: [{ type: 'text' as const, text: `Error: Unknown action "${action}"` }], isError: true };
         }
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: 'text' as const, text: `DB error: ${msg}` }], isError: true };
+      } finally {
+        if (pool) {
+          try { await pool.close(); } catch { /* ignore close errors */ }
+        }
+      }
+    },
+  );
+
+  // ── verify_db_schema ──────────────────────────────────────
+  // 規格回對的第三種驗法：db_field 對「真的 DB」核對。
+  // 程式預檢與 AI 回對都只看得到程式碼——DDL 沒套用、Entity 對錯表、
+  // 規格寫了從沒建過的欄位，這三種情況在程式碼層面都看不出來。
+  server.tool(
+    'verify_db_schema',
+    '把規格檢查表的 db_field 項目拿去跟**實體資料庫**的 INFORMATION_SCHEMA 逐欄核對（唯讀）。程式預檢與 AI 回對都只看程式碼（Entity/@Column/DDL），證明不了欄位在正式 DB 真的存在——DDL 沒套用、Entity 對到別的表、規格寫了從沒建過的欄位，這三種在程式碼層面都看不出來。回傳每項的判定（實體 DB 有 / 實體 DB 沒有 / 無從判定）與實際型別長度，供 reviewer 與 SD 規格的型別定義比對。**「無從判定」絕不可當成通過**。',
+    {
+      taskId: z.string().describe('任務 ID（取該任務規格檢查表的 db_field 項目）'),
+      connectionLabel: z.string().describe('DB 連線標籤（專案設定 dbConnections 裡的 label）'),
+      tables: z.array(z.string()).optional().describe('要撈 schema 的資料表清單（省略=從 db_field 檢查項的「表名.欄位名」自動推導；檢查項只寫欄位名時必須明確指定）'),
+    },
+    { title: 'Verify DB Schema', readOnlyHint: true, openWorldHint: true },
+    async ({ taskId, connectionLabel, tables }) => {
+      const db = getMcpDb();
+
+      const task = db.prepare('SELECT id, project_id FROM tasks WHERE id = ?').get(taskId) as { id: string; project_id: string } | undefined;
+      if (!task) {
+        return { content: [{ type: 'text' as const, text: `Error: Task "${taskId}" not found` }], isError: true };
+      }
+
+      const items = db.prepare(
+        "SELECT id, content FROM spec_checklist_items WHERE task_id = ? AND item_type = 'db_field' AND waived = 0 ORDER BY created_at ASC, rowid ASC"
+      ).all(taskId) as DbFieldItem[];
+      if (items.length === 0) {
+        return { content: [{ type: 'text' as const, text: '此任務的規格檢查表沒有未豁免的 db_field 項目，無需核對實體 DB。' }] };
+      }
+
+      const conn = resolveDbConnection(db, task.project_id, connectionLabel);
+      if ('error' in conn) {
+        return { content: [{ type: 'text' as const, text: conn.error }], isError: true };
+      }
+
+      // 表名來源：明確指定優先，否則從檢查項自動推導
+      const derived = [...new Set(items.map(i => parseDbFieldRef(i.content).table).filter((t): t is string => !!t))];
+      const wanted = tables?.length ? tables : derived;
+      if (wanted.length === 0) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: '無法判定要核對哪些資料表——db_field 檢查項都只寫了欄位名沒有表名。請用 tables 參數明確指定（例：tables=["FEDI_ESTATUS","FEDI_PAYEXT"]）。',
+          }],
+          isError: true,
+        };
+      }
+      if (wanted.length > VERIFY_SCHEMA_MAX_TABLES) {
+        return {
+          content: [{ type: 'text' as const, text: `一次最多核對 ${VERIFY_SCHEMA_MAX_TABLES} 張表（本次推導出 ${wanted.length} 張）。請用 tables 參數分批。` }],
+          isError: true,
+        };
+      }
+      for (const t of wanted) {
+        const err = validateTableIdentifier(t);
+        if (err) return { content: [{ type: 'text' as const, text: err }], isError: true };
+      }
+
+      let pool: mssql.ConnectionPool | null = null;
+      try {
+        pool = await mssql.connect(conn.config);
+        const req = pool.request();
+        // 表名全部參數綁定，不拼字串
+        const params = wanted.map((t, i) => { req.input(`t${i}`, mssql.NVarChar, t); return `@t${i}`; });
+        const result = await req.query(
+          `SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, NUMERIC_SCALE, IS_NULLABLE
+             FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME IN (${params.join(', ')})`
+        );
+
+        const columns: DbColumn[] = (result.recordset as Array<Record<string, unknown>>).map(r => ({
+          table: String(r.TABLE_NAME),
+          column: String(r.COLUMN_NAME),
+          dataType: String(r.DATA_TYPE),
+          maxLength: r.CHARACTER_MAXIMUM_LENGTH == null ? null : Number(r.CHARACTER_MAXIMUM_LENGTH),
+          numericPrecision: r.NUMERIC_PRECISION == null ? null : Number(r.NUMERIC_PRECISION),
+          numericScale: r.NUMERIC_SCALE == null ? null : Number(r.NUMERIC_SCALE),
+          nullable: String(r.IS_NULLABLE).toUpperCase() === 'YES',
+        }));
+
+        const foundTables = [...new Set(columns.map(c => c.table))];
+        const notFoundTables = wanted.filter(t => !foundTables.some(f => f.toUpperCase() === t.toUpperCase()));
+        const results = checkDbFields(items, columns, wanted);
+
+        const refuted = results.filter(r => isRefuted(r.verdict));
+        const unknown = results.filter(r => r.verdict === 'not_checked');
+
+        const lines = [
+          `# 實體 DB schema 核對（連線 ${connectionLabel}／資料庫 ${conn.database}）`,
+          '',
+          summarize(results),
+          '',
+          `撈取的資料表：${foundTables.join(', ') || '(無)'}${notFoundTables.length ? `\n**實體 DB 找不到的表：${notFoundTables.join(', ')}**` : ''}`,
+        ];
+        if (refuted.length) {
+          lines.push('', `## 實體 DB 沒有這些欄位（${refuted.length} 項——對應的 db_field 一律判 missing）`, '');
+          for (const r of refuted) lines.push(`- ${r.itemId}「${r.content}」：${r.note}`);
+        }
+        if (unknown.length) {
+          lines.push('', `## 無從判定（${unknown.length} 項——**不可當成通過**）`, '');
+          for (const r of unknown) lines.push(`- ${r.itemId}「${r.content}」：${r.note}`);
+        }
+        const confirmed = results.filter(r => isConfirmed(r.verdict));
+        if (confirmed.length) {
+          lines.push('', `## 實體 DB 確實有（${confirmed.length} 項，附實際型別供與 SD 規格比對）`, '');
+          for (const r of confirmed) {
+            lines.push(`- ${r.itemId}「${r.content}」：${r.actual ? `${r.actual.table}.${r.actual.column} ${describeColumn(r.actual)}` : r.note}${r.verdict === 'column_found_unqualified' ? '　⚠ 檢查項沒寫表名，命中的是同名欄位' : ''}`);
+          }
+        }
+        lines.push(
+          '',
+          '> 型別／長度／可否為空與 SD 規格定義不符時，用 report_spec_gap(category="field_undefined") 記錄交使用者裁決——那是規格與實體 DB 的落差，不是程式的錯。',
+        );
+
+        let text = lines.join('\n');
+        if (text.length > CHARACTER_LIMIT) {
+          text = text.slice(0, CHARACTER_LIMIT) + '\n\n…（內容過長已截斷，請用 tables 參數分批核對）';
+        }
+        return { content: [{ type: 'text' as const, text }] };
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         return { content: [{ type: 'text' as const, text: `DB error: ${msg}` }], isError: true };

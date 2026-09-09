@@ -2,7 +2,10 @@
 node_modules/
 dist/
 *.tsbuildinfo
-.claude/
+# .claude/ 不整個排除——排除整個目錄的話，底下的 ! 例外會失效（git 不進已排除的目錄）。
+# skills 是共用資產要進版控，只排除個人設定。
+.claude/settings.json
+.claude/settings.local.json
 
 # Database & uploads
 data/
