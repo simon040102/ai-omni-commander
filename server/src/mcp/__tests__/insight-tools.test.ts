@@ -28,11 +28,11 @@ function seedProject(db: Database.Database) {
   db.prepare(`INSERT INTO projects (id, name, working_dir) VALUES (?, ?, ?)`).run('proj-1', 'Test', '/tmp');
 }
 
-function seedTask(db: Database.Database, id: string, opts: { taskType?: string; status?: string; createdAt?: string; label?: string; dueDate?: string | null } = {}) {
+function seedTask(db: Database.Database, id: string, opts: { taskType?: string; status?: string; createdAt?: string; label?: string; dueDate?: string | null; sourceRef?: string | null; description?: string | null } = {}) {
   db.prepare(`
-    INSERT INTO tasks (id, project_id, title, label, task_type, status, created_at, updated_at, due_date)
-    VALUES (?, 'proj-1', ?, ?, ?, ?, ?, datetime('now'), ?)
-  `).run(id, `Task ${id}`, opts.label || 'backend', opts.taskType || 'feature', opts.status || 'pending', opts.createdAt || '2026-01-01 00:00:00', opts.dueDate ?? null);
+    INSERT INTO tasks (id, project_id, title, label, task_type, status, created_at, updated_at, due_date, source_ref, description)
+    VALUES (?, 'proj-1', ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?)
+  `).run(id, `Task ${id}`, opts.label || 'backend', opts.taskType || 'feature', opts.status || 'pending', opts.createdAt || '2026-01-01 00:00:00', opts.dueDate ?? null, opts.sourceRef ?? null, opts.description ?? null);
 }
 
 describe('insight-tools', () => {
@@ -202,6 +202,50 @@ describe('insight-tools', () => {
   });
 
   describe('update_task', () => {
+    // 描述是 implementer 與回對員實際會讀的東西。過期或錯誤的敘述留著比沒有更危險——
+    // 它讓接手的人**不去查證**，因為描述已經替他保證過了（2026-09-21 實例：任務描述
+    // 誤寫「無 SD」與「已登記依賴」，當時只能靠 report_output 更正，而輸出紀錄要翻、描述會被讀）。
+    it('可以更正 description（整段覆蓋）', async () => {
+      seedProject(testDb);
+      seedTask(testDb, 'task-d', { description: '【現況證據】無 SD、無表。' });
+
+      const result = await callTool(server, 'update_task', {
+        taskId: 'task-d',
+        description: '【更正】規格齊備，見 features/PF04。',
+      });
+      expect(result.isError).toBeUndefined();
+      const row = testDb.prepare('SELECT * FROM tasks WHERE id = ?').get('task-d') as any;
+      expect(row.description).toBe('【更正】規格齊備，見 features/PF04。');
+    });
+
+    // ★ 改了卻被下次同步悄悄還原，比不能改更糟：更正的人以為處理完了，
+    //   而下一個讀到的仍是舊文，且沒有任何跡象。
+    it('★ Asana 來源的任務改描述時要警告可能被同步覆蓋', async () => {
+      seedProject(testDb);
+      seedTask(testDb, 'task-a', { sourceRef: '12345' });
+
+      const result = await callTool(server, 'update_task', { taskId: 'task-a', description: '更正過的描述' });
+      expect(result.content[0].text).toContain('sync_asana_tasks');
+      expect(result.content[0].text).toContain('12345');
+    });
+
+    // ★ 負向：不是 Asana 來的就不要亂警告（雜訊會讓真正的警告被忽略）
+    it('★ 非 Asana 來源不加同步警告', async () => {
+      seedProject(testDb);
+      seedTask(testDb, 'task-m');
+
+      const result = await callTool(server, 'update_task', { taskId: 'task-m', description: '手動任務的描述' });
+      expect(result.content[0].text).not.toContain('sync_asana_tasks');
+    });
+
+    // ★ 負向：沒改描述就不該出現描述相關的警告
+    it('★ 只改 title 時不出現同步警告', async () => {
+      seedProject(testDb);
+      seedTask(testDb, 'task-t', { sourceRef: '999' });
+
+      const result = await callTool(server, 'update_task', { taskId: 'task-t', title: '新標題' });
+      expect(result.content[0].text).not.toContain('sync_asana_tasks');
+    });
     it('updates whitelisted fields and notifies task.updated with the full task', async () => {
       seedProject(testDb);
       seedTask(testDb, 'task-1', { label: 'frontend' });

@@ -12,7 +12,7 @@ import { z } from 'zod';
 import { getMcpDb } from '../db.js';
 import { notifyWebServer } from '../notify.js';
 import {
-  type FlowRole, type FlowType, type FlowGateState,
+  type FlowRole, type FlowType, type FlowGateState, type RoleFlowState,
   GATE_B_MAX_FAILURES, GATE_A_LABEL, GATE_B_LABEL, FLOW_COMPARE_RUBRIC, FLOW_NODE_LEVEL_SPEC,
   resolveRole, mutateFlowState, getFlowState, getRoleState,
   saveFlowFile, readFlowFile, logTaskOutput, findFlowInOtherRoles,
@@ -53,7 +53,12 @@ export function registerFlowTools(server: McpServer): void {
       taskId: z.string().describe('The task ID'),
       flowType: z.enum(['spec', 'plan', 'code', 'mindmap']).describe('Which flow this is'),
       mermaidContent: z.string().describe('The Mermaid content (flowchart TD for spec/plan/code; mindmap for mindmap)'),
-      role: z.enum(['frontend', 'backend']).optional().describe('Role slot for plan/code flows on dual-role tasks. Omit for single-role tasks.'),
+      role: z.enum(['frontend', 'backend']).optional().describe(
+        'Role slot for plan/code flows. **省略時不再無條件落到 default**：若這支任務只需要一個角色'
+        + '（get_execution_plan 依 label 初始化的那一個），就自動存進那個槽位。'
+        + '理由：閘門檢查的是任務實際需要的角色槽位，存錯槽位的後果是**所有實作與驗收都做完、'
+        + '才在 update_task_status 那一步被擋下**——最不值得的時機。雙角色任務仍必須明確指定。',
+      ),
       filename: z.string().optional().describe('Optional source document filename for display (e.g. SA spec filename)'),
       resetFailures: z.boolean().optional().describe('Reset the gate-B failure counter. ONLY with explicit user approval after [NEEDS_HUMAN]; the reset is logged.'),
     },
@@ -64,7 +69,28 @@ export function registerFlowTools(server: McpServer): void {
       if (!task) return err(`Error: Task "${taskId}" not found`);
       if (!mermaidContent.trim()) return err('Error: mermaidContent is empty');
 
-      const flowRole = resolveRole(role);
+      // role 省略時，落到「這支任務實際需要的那一個角色槽位」，而不是無條件 default。
+      //
+      // 2026-09-21 實例：任務 label=backend，implementer 存 code-flow 沒帶 role → 落進 default，
+      // 而完工閘檢查的是 backend 槽位。結果是**實作、測試、驗收全部做完，才在結案那一步被擋**，
+      // 然後得把兩張圖原封不動再存一次、兩道閘再跑一次。錯的成本全部集中在最後一刻。
+      //
+      // 只在「需要的角色剛好一個且不是 default」時自動選：雙角色任務自動選會選錯，
+      // 而選錯槽位比落到 default 更難查（圖存進去了、閘也過了，只是過在錯的那一半）。
+      let flowRole = resolveRole(role);
+      let roleAutoPicked: FlowRole | null = null;
+      if (role === undefined && (flowType === 'plan' || flowType === 'code')) {
+        const existing = getFlowState(db, taskId);
+        const required = existing
+          ? (Object.entries(existing.roles) as Array<[FlowRole, RoleFlowState | undefined]>)
+              .filter(([, rs]) => rs?.required)
+              .map(([r]) => r)
+          : [];
+        if (required.length === 1 && required[0] !== 'default') {
+          flowRole = required[0]!;
+          roleAutoPicked = flowRole;
+        }
+      }
       const ft = flowType as FlowType;
 
       const saved = saveFlowFile({
@@ -112,13 +138,18 @@ export function registerFlowTools(server: McpServer): void {
         data: { projectId: task.project_id, taskId, filename: filename || null, flowPath: saved.flowPath, flowType: ft, role: flowRole },
       }).catch(() => {});
 
+      // 自動選了槽位就要講出來——沉默地替人做決定，等於把「存錯槽位」換成「不知道存去哪」
+      const rolePicked = roleAutoPicked
+        ? `📌 未指定 role，已依本任務唯一需要的角色存進 **role=${roleAutoPicked}** 槽位（閘門檢查的就是這一個）。\n\n`
+        : '';
+
       // ── next-step instruction injection ──
       if (ft === 'mindmap') {
         return ok(`Mindmap 已存檔（${saved.flowPath}）。此圖為細節覆蓋清單，不影響閘門狀態。實作完成後請逐項核對程式碼是否涵蓋清單中的每個細節（欄位/訊息文字/驗證規則/按鈕/API 參數）。`);
       }
 
       if (ft === 'spec') {
-        return ok(`spec-flow 已存檔（hash=${saved.hash}）。
+        return ok(`${rolePicked}spec-flow 已存檔（hash=${saved.hash}）。
 ${roleStatusLine(state, flowRole)}
 
 ## 下一步
@@ -133,7 +164,7 @@ ${FLOW_NODE_LEVEL_SPEC}`);
         if (state.specExpected) {
           const specContent = state.spec ? readFlowFile(task.project_id, state.spec.hash) : null;
           if (specContent) {
-            return ok(`plan-flow 已存檔（hash=${saved.hash}，role=${flowRole}）。閘門狀態已重置。
+            return ok(`${rolePicked}plan-flow 已存檔（hash=${saved.hash}，role=${flowRole}）。閘門狀態已重置。
 ${roleStatusLine(state, flowRole)}
 
 ## ⚠ ${GATE_A_LABEL}：計畫涵蓋檢查（寫 code 之前必須完成）
@@ -145,7 +176,7 @@ ${roleStatusLine(state, flowRole)}
 ${specContent}
 \`\`\``);
           }
-          return ok(`plan-flow 已存檔（hash=${saved.hash}，role=${flowRole}）。閘門狀態已重置。
+          return ok(`${rolePicked}plan-flow 已存檔（hash=${saved.hash}，role=${flowRole}）。閘門狀態已重置。
 ${roleStatusLine(state, flowRole)}
 
 ## ⚠ 此任務有 SA/SD 規格文件，但 spec-flow 尚未儲存
@@ -153,7 +184,7 @@ ${GATE_A_LABEL}需要 spec-flow 才能做涵蓋檢查（**不會因缺 spec-flow
 下一步：讀取 SA/SD 規格文件，畫出規格流程圖，以 save_task_flow(taskId="${taskId}", flowType="spec") 儲存，然後再回報${GATE_A_LABEL}（gate="A"）。
 （雙角色任務：先用 get_task_flows 確認另一 role 是否已畫過 spec-flow，已存在就沿用不重畫。）`);
         }
-        return ok(`plan-flow 已存檔（hash=${saved.hash}，role=${flowRole}）。閘門狀態已重置。
+        return ok(`${rolePicked}plan-flow 已存檔（hash=${saved.hash}，role=${flowRole}）。閘門狀態已重置。
 ${roleStatusLine(state, flowRole)}
 
 ## ⚠ ${GATE_A_LABEL}（兩圖模式）
@@ -165,7 +196,7 @@ ${roleStatusLine(state, flowRole)}
       // ft === 'code'
       const rs = getRoleState(state, flowRole);
       if (rs.gateBFailures >= GATE_B_MAX_FAILURES) {
-        return ok(`code-flow 已存檔（hash=${saved.hash}，role=${flowRole}），但${GATE_B_LABEL}已失敗 ${rs.gateBFailures}/${GATE_B_MAX_FAILURES} 次。
+        return ok(`${rolePicked}code-flow 已存檔（hash=${saved.hash}，role=${flowRole}），但${GATE_B_LABEL}已失敗 ${rs.gateBFailures}/${GATE_B_MAX_FAILURES} 次。
 
 ## ⚠ [NEEDS_HUMAN] 停止自動修正
 請向使用者回報累積的差異清單，由使用者裁示：
@@ -178,7 +209,7 @@ ${roleStatusLine(state, flowRole)}
       const planContent = rs.plan ? readFlowFile(task.project_id, rs.plan.hash) : null;
       const mode = specContent ? '三方比對（code↔plan、code↔spec）' : '兩圖模式（code↔plan）';
 
-      return ok(`code-flow 已存檔（hash=${saved.hash}，role=${flowRole}）。${GATE_B_LABEL}已重置，目前失敗 ${rs.gateBFailures}/${GATE_B_MAX_FAILURES} 次。
+      return ok(`${rolePicked}code-flow 已存檔（hash=${saved.hash}，role=${flowRole}）。${GATE_B_LABEL}已重置，目前失敗 ${rs.gateBFailures}/${GATE_B_MAX_FAILURES} 次。
 ${roleStatusLine(state, flowRole)}
 
 ## ⚠ ${GATE_B_LABEL}：${mode}（跑測試之前必須完成）

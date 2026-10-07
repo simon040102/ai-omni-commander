@@ -876,4 +876,64 @@ export function runMigrations(db: Database.Database): void {
       }
     }
   }
+
+  // =============================================
+  // v21 Migration: 「已被取代」狀態 + 筆記出處/複查時間
+  //
+  // (a) spec_checklist_items 新增 superseded 系列欄位 — 檢查表項目的字面已被
+  //     後來的規格變更取代（程式沒錯、檢查表過期）。與 waived 是**不同的出口**：
+  //     豁免只要理由（「我們決定不做」），取代必須指出替代品（現行規格出處 +
+  //     現行字面）。既有 waived 欄位語意完全不動（向後相容）。
+  // (b) spec_compliance_runs 新增 superseded 計數 — 統計獨立一欄，不混進 waived。
+  // (c) project_notes 新增 source_ref（出處，無出處不收）與 last_reviewed_at
+  //     （最後複查時間；NULL 視同從未複查 → 以 created_at 計齡）。
+  //
+  // Idempotent：duplicate column 直接吞掉（v16 pattern），其餘錯誤警告後繼續。
+  // =============================================
+  {
+    const addColumn = (table: string, ddl: string): void => {
+      try {
+        db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!/duplicate column/i.test(msg)) {
+          process.stderr.write(`[schema] v21 ${table} ${ddl} migration failed: ${msg}
+`);
+        }
+      }
+    };
+    addColumn('spec_checklist_items', 'superseded INTEGER NOT NULL DEFAULT 0');
+    addColumn('spec_checklist_items', 'superseded_spec_ref TEXT');
+    addColumn('spec_checklist_items', 'superseded_text TEXT');
+    addColumn('spec_checklist_items', 'superseded_note TEXT');
+    addColumn('spec_checklist_items', 'superseded_at TEXT');
+    addColumn('spec_compliance_runs', 'superseded INTEGER NOT NULL DEFAULT 0');
+    addColumn('project_notes', 'source_ref TEXT');
+    addColumn('project_notes', 'last_reviewed_at TEXT');
+  }
+
+  // =============================================
+  // v22 Migration: spec_gaps.scope — 裁決的適用範圍。
+  //
+  // 【為什麼要這一欄】裁決原本只注入「開這個缺口的那一支任務」。但缺口是**誰遇到誰開**的，
+  // 而裁決管的往往是**別人**：2026-09-21 實例——「可收格式清單」與「上傳根目錄設定鍵」兩則
+  // 開在 KB 任務底下，真正要照它做的是「匯入管線」那一支；`resume_task(匯入管線)` 回傳的
+  // resolvedGaps 是空的。implementer 是自己 list_spec_gaps 撈出來才照做的，而**獨立回對員
+  // 不會這樣做**——它會照原始規格判 missing，把已經照裁決做對的東西判成沒做。
+  //
+  // scope='project' 的裁決在同一個專案的每一支任務都注入。預設維持 'task'（不改變既有行為）。
+  // =============================================
+  {
+    try {
+      const cols = db.prepare("PRAGMA table_info(spec_gaps)").all() as Array<{ name: string }>;
+      if (!cols.some(c => c.name === 'scope')) {
+        db.exec("ALTER TABLE spec_gaps ADD COLUMN scope TEXT NOT NULL DEFAULT 'task'");
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!/duplicate column/i.test(msg)) {
+        process.stderr.write(`[schema] v22 spec_gaps.scope migration failed: ${msg}\n`);
+      }
+    }
+  }
 }

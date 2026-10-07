@@ -186,21 +186,29 @@ export function registerInsightTools(server: McpServer): void {
   // ── update_task ───────────────────────────────────────────
   server.tool(
     'update_task',
-    '更新任務欄位（白名單：title / label / taskType / tags / section）。至少提供一個欄位。不可改 status——狀態請用 update_task_status。',
+    '更新任務欄位（白名單：title / description / label / taskType / tags / section）。至少提供一個欄位。不可改 status——狀態請用 update_task_status。'
+    + '\n\n**description 可以改，而且該改**：任務描述是 implementer 與回對員實際會讀的東西，'
+    + '裡面若有過期或錯誤的敘述（「無 SD」「已登記依賴」這類），留著比沒有更危險——'
+    + '它會讓接手的人**不去查證**，因為描述已經替他保證過了。發現描述與現況不符就直接更正，'
+    + '不要只補一筆 report_output：輸出紀錄要翻，描述會被讀。',
     {
       taskId: z.string().describe('任務 ID'),
       title: z.string().min(1).optional().describe('新標題'),
+      description: z.string().optional().describe(
+        '新描述（**整段覆蓋**，不是附加）。更正過期或錯誤的敘述時用它。'
+        + '要保留原文就自己把原文一起帶進來——工具不做合併，合併的結果沒有人審過。',
+      ),
       label: z.enum(TASK_LABELS).optional().describe('新 label（frontend/backend/fullstack/...）'),
       taskType: z.enum(TASK_TYPES).optional().describe('新任務類型（bug/feature/refactor/testing/other）'),
       tags: z.array(z.string()).optional().describe('新標籤陣列（整組覆蓋）'),
       section: z.string().optional().describe('新 Section 名稱（Asana 分區）'),
     },
     { title: 'Update Task', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    async ({ taskId, title, label, taskType, tags, section }) => {
+    async ({ taskId, title, description, label, taskType, tags, section }) => {
       const db = getMcpDb();
 
-      const task = db.prepare('SELECT id, project_id, status FROM tasks WHERE id = ?').get(taskId) as
-        { id: string; project_id: string; status: string } | undefined;
+      const task = db.prepare('SELECT id, project_id, status, source, source_ref FROM tasks WHERE id = ?').get(taskId) as
+        { id: string; project_id: string; status: string; source: string | null; source_ref: string | null } | undefined;
       if (!task) {
         return { content: [{ type: 'text' as const, text: `Error: Task "${taskId}" not found` }], isError: true };
       }
@@ -209,13 +217,14 @@ export function registerInsightTools(server: McpServer): void {
       const values: unknown[] = [];
       const changed: string[] = [];
       if (title !== undefined) { sets.push('title = ?'); values.push(title); changed.push('title'); }
+      if (description !== undefined) { sets.push('description = ?'); values.push(description); changed.push('description'); }
       if (label !== undefined) { sets.push('label = ?'); values.push(label); changed.push('label'); }
       if (taskType !== undefined) { sets.push('task_type = ?'); values.push(taskType); changed.push('taskType'); }
       if (tags !== undefined) { sets.push('tags = ?'); values.push(JSON.stringify(tags)); changed.push('tags'); }
       if (section !== undefined) { sets.push('section = ?'); values.push(section); changed.push('section'); }
 
       if (sets.length === 0) {
-        return { content: [{ type: 'text' as const, text: 'Error: 至少提供一個要更新的欄位（title/label/taskType/tags/section）。狀態請用 update_task_status。' }], isError: true };
+        return { content: [{ type: 'text' as const, text: 'Error: 至少提供一個要更新的欄位（title/description/label/taskType/tags/section）。狀態請用 update_task_status。' }], isError: true };
       }
 
       sets.push("updated_at = datetime('now')");
@@ -256,7 +265,14 @@ export function registerInsightTools(server: McpServer): void {
       });
 
       const warning = notifyOk ? '' : ' (warning: Web UI notification failed)';
-      return { content: [{ type: 'text' as const, text: `Task ${taskId} updated (${changed.join(', ')})${warning}` }] };
+      // 描述改了、而這支任務是從 Asana 同步來的 → 下次同步可能把描述蓋回去。
+      // **改了卻被悄悄還原，比不能改更糟**：更正的人以為處理完了，而下一個讀到的仍是舊文。
+      const asanaWarn = (changed.includes('description') && task.source_ref)
+        ? `\n\n⚠ 這支任務來自 Asana（sourceRef=${task.source_ref}）。`
+          + `**下一次 sync_asana_tasks 可能把描述蓋回 Asana 上的版本**——本次更正就會無聲消失。`
+          + `若這段更正必須留住，請一併改 Asana 上的原文，或改用 report_output 讓它不依賴描述欄位。`
+        : '';
+      return { content: [{ type: 'text' as const, text: `Task ${taskId} updated (${changed.join(', ')})${warning}${asanaWarn}` }] };
     },
   );
 

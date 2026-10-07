@@ -72,19 +72,44 @@ export interface ResolvedSpecGap {
   description: string;
   resolutionNote: string;
   resolvedAt: string | null;
+  /** 'task'＝只管開這個缺口的任務；'project'＝同專案每一支任務都適用 */
+  scope: 'task' | 'project';
+  /** 這一則是從別的任務帶過來的（scope='project' 時才可能為真）——注入時要標示出處 */
+  fromOtherTask: boolean;
 }
 
 /**
- * 取任務「已裁決且 note 非空」的規格缺口——三處迴流（派工 prompt / resume_task /
+ * 取「已裁決且 note 非空」的規格缺口——三處迴流（派工 prompt / resume_task /
  * AI 回對計畫）唯一共用的來源 SQL。舊資料（resolved 但 note 為空）不視為裁決。
+ *
+ * 【為什麼不只看 task_id】缺口是**誰遇到誰開**的，裁決管的卻往往是別人。2026-09-21 實例：
+ * 「可收格式清單」與「上傳根目錄設定鍵」兩則開在 KB 任務底下，真正要照它做的是「匯入管線」
+ * 那一支——而後者的 resolvedGaps 是空的。implementer 自己用 list_spec_gaps 撈出來才照做，
+ * **獨立回對員不會這樣做**，它會照原始規格判 missing，把照裁決做對的東西判成沒做。
+ *
+ * 所以：本任務自己的裁決 ＋ 同專案標為 scope='project' 的裁決，一起回。
+ * 後者帶 fromOtherTask=true，注入時要標明出處，讀的人才分得出「這是給我的」與「這是全案的」。
  */
 export function listResolvedSpecGaps(db: Database.Database, taskId: string): ResolvedSpecGap[] {
   const rows = db.prepare(`
-    SELECT id, category, description, resolution_note, resolved_at
-    FROM spec_gaps
-    WHERE task_id = ? AND status = 'resolved' AND resolution_note IS NOT NULL AND TRIM(resolution_note) != ''
-    ORDER BY resolved_at ASC, created_at ASC
-  `).all(taskId) as Array<{ id: string; category: string; description: string; resolution_note: string; resolved_at: string | null }>;
+    SELECT g.id, g.category, g.description, g.resolution_note, g.resolved_at,
+           COALESCE(g.scope, 'task') AS scope,
+           CASE WHEN g.task_id = :taskId THEN 0 ELSE 1 END AS from_other_task
+    FROM spec_gaps g
+    WHERE g.status = 'resolved'
+      AND g.resolution_note IS NOT NULL AND TRIM(g.resolution_note) != ''
+      AND (
+        g.task_id = :taskId
+        OR (
+          COALESCE(g.scope, 'task') = 'project'
+          AND g.project_id = (SELECT project_id FROM tasks WHERE id = :taskId)
+        )
+      )
+    ORDER BY from_other_task ASC, g.resolved_at ASC, g.created_at ASC
+  `).all({ taskId }) as Array<{
+    id: string; category: string; description: string; resolution_note: string;
+    resolved_at: string | null; scope: string; from_other_task: number;
+  }>;
 
   return rows.map(r => ({
     id: r.id,
@@ -92,6 +117,42 @@ export function listResolvedSpecGaps(db: Database.Database, taskId: string): Res
     description: r.description,
     resolutionNote: r.resolution_note,
     resolvedAt: r.resolved_at,
+    scope: r.scope === 'project' ? 'project' : 'task',
+    fromOtherTask: r.from_other_task === 1,
+  }));
+}
+
+/**
+ * 同專案、別的任務底下、**沒有**標成 project 範圍的已裁決缺口——只回摘要，不注入。
+ *
+ * 用途：讓接手的人看得到「這個專案還有這些裁決，但它們只掛在別支任務上」。
+ * 今天那兩則就是這種——沒有人記得標範圍，於是對需要它的任務等於不存在。
+ * **這不是裁決，是線索**：真的管到本任務的，要用 resolve_spec_gap(scope='project') 重新標記，
+ * 才會真的被注入。工具不替人猜哪一則相關——猜錯會把不相干的裁決當成規格。
+ */
+export function listOtherTaskResolvedGapDigest(
+  db: Database.Database,
+  taskId: string,
+  limit = 20,
+): Array<{ id: string; taskId: string; taskTitle: string; summary: string }> {
+  const rows = db.prepare(`
+    SELECT g.id, g.task_id, COALESCE(t.title, '(無標題)') AS task_title, g.description
+    FROM spec_gaps g
+    LEFT JOIN tasks t ON t.id = g.task_id
+    WHERE g.status = 'resolved'
+      AND g.resolution_note IS NOT NULL AND TRIM(g.resolution_note) != ''
+      AND COALESCE(g.scope, 'task') = 'task'
+      AND g.task_id != :taskId
+      AND g.project_id = (SELECT project_id FROM tasks WHERE id = :taskId)
+    ORDER BY g.resolved_at DESC
+    LIMIT :limit
+  `).all({ taskId, limit }) as Array<{ id: string; task_id: string; task_title: string; description: string }>;
+
+  return rows.map(r => ({
+    id: r.id,
+    taskId: r.task_id,
+    taskTitle: r.task_title,
+    summary: summarizeGapText(r.description, 120),
   }));
 }
 
@@ -101,9 +162,12 @@ export function summarizeGapText(text: string, max = 160): string {
   return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
 }
 
-/** 一條裁決的注入行：`- Q: {description 摘要} → 裁決: {resolution_note}`。 */
+/** 一條裁決的注入行：`- Q: {description 摘要} → 裁決: {resolution_note}`。
+ *  從別的任務帶過來的（全案適用）要標出來——讀的人才分得出「這是給我這一支的」與
+ *  「這是全案的規矩，只是別人先遇到」。不標的話，看到一條與自己功能無關的裁決會以為派錯了。 */
 export function formatResolutionLine(gap: ResolvedSpecGap): string {
-  return `- Q: ${summarizeGapText(gap.description)} → 裁決: ${summarizeGapText(gap.resolutionNote, 400)}`;
+  const prefix = gap.fromOtherTask ? '[全案適用，由別支任務裁決] ' : '';
+  return `- ${prefix}Q: ${summarizeGapText(gap.description)} → 裁決: ${summarizeGapText(gap.resolutionNote, 400)}`;
 }
 
 /**

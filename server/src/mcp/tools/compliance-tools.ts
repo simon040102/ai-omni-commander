@@ -26,12 +26,39 @@ import {
   runComplianceEngine,
   type EngineItem, type ChecklistItemType, type ChecklistSide, type ItemResult, type WorkspaceRoots,
 } from '../compliance-engine.js';
-import { validateReviewEvidence, RELEVANCE_WINDOW, type EvidenceCheckInput } from '../evidence-validator.js';
+import {
+  validateReviewEvidence, resolveProjectSpecRoots, RELEVANCE_WINDOW, type EvidenceCheckInput,
+} from '../evidence-validator.js';
+import { readSpecFolders } from '../../documents/FolderSpecSource.js';
+import {
+  validateWaiveReason, validateSupersede,
+  WAIVE_REASON_PRECISION_RULE, SUPERSEDE_PRECISION_RULE, MIN_WAIVE_REASON_CHARS,
+} from '../waiver-policy.js';
 import { listResolvedSpecGaps, buildResolutionLines } from '../../utils/specGapResolution.js';
 
 export const CHECKLIST_ITEM_TYPES = ['ui_text', 'api', 'param', 'response_field', 'db_field', 'logic'] as const;
 export const CHECKLIST_SIDES = ['frontend', 'backend', 'both'] as const;
 const MAX_ITEMS_PER_SAVE = 200;
+
+/**
+ * 本專案「規格來源」證據 root：交付物是規格文件的任務（architect：SA/SD 改寫、
+ * 知識庫維護）產出根本不在 frontend/backend workspace 裡——常常連磁碟都不同，
+ * 沒有任何相對路徑走得過去。只認 **專案已登記的** config_json.specFolders，
+ * 並由 resolveProjectSpecRoots 綁定專案（多專案共用知識庫只收 `<kb>/<本專案 id>`）。
+ *
+ * 只給證據驗證用；run_spec_compliance 的引擎掃描**刻意不加**——規格文件逐字
+ * 寫著 checklist 的 content，掃進來就是拿規格證明規格。
+ */
+function specRootsForProject(
+  db: ReturnType<typeof getMcpDb>,
+  projectId: string,
+  configJson: string | null | undefined,
+): string[] {
+  const folders = readSpecFolders(parseJson<unknown>(configJson, null));
+  if (folders.length === 0) return [];
+  const knownProjectIds = (db.prepare('SELECT id FROM projects').all() as Array<{ id: string }>).map(r => r.id);
+  return resolveProjectSpecRoots(projectId, folders.map(f => f.path), knownProjectIds);
+}
 
 export interface ChecklistRow {
   id: string;
@@ -45,6 +72,12 @@ export interface ChecklistRow {
   waived: number;
   waive_reason: string | null;
   created_at: string;
+  /** v21：已被取代（規格改了、程式沒錯、檢查表字面過期）——與 waived 是兩個不同的出口 */
+  superseded: number;
+  superseded_spec_ref: string | null;
+  superseded_text: string | null;
+  superseded_note: string | null;
+  superseded_at: string | null;
 }
 
 interface RunRow {
@@ -56,6 +89,7 @@ interface RunRow {
   missing: number;
   manual: number;
   waived: number;
+  superseded: number;
   results_json: string;
   source: string;
 }
@@ -79,6 +113,11 @@ function rowToItem(r: ChecklistRow): Record<string, unknown> {
     sourceRef: r.source_ref,
     waived: r.waived === 1,
     waiveReason: r.waive_reason,
+    superseded: r.superseded === 1,
+    supersededSpecRef: r.superseded_spec_ref,
+    supersededText: r.superseded_text,
+    supersededNote: r.superseded_note,
+    supersededAt: r.superseded_at,
     createdAt: r.created_at,
   };
 }
@@ -154,7 +193,7 @@ export function registerComplianceTools(server: McpServer): void {
         sourceRef: z.string().optional().describe('規格出處（規格檔名+章節，如 "SPEC_WA05.docx §3.2"）'),
         detail: z.record(z.string(), z.unknown()).optional().describe('補充資訊（自由物件，如 api 的 { "method": "POST" }）'),
       })).min(1).max(MAX_ITEMS_PER_SAVE).describe(`檢查表項目（一次最多 ${MAX_ITEMS_PER_SAVE} 項）`),
-      replace: z.boolean().optional().describe('true=先刪除此任務既有的未豁免項目再插入（waived 項目保留）；預設 false=append'),
+      replace: z.boolean().optional().describe('true=先刪除此任務既有的未豁免項目再插入（waived 與 superseded 項目保留）；預設 false=append'),
     },
     { title: 'Save Spec Checklist', readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     async ({ taskId, items, replace }) => {
@@ -177,7 +216,8 @@ export function registerComplianceTools(server: McpServer): void {
       const created: Array<{ id: string; itemType: ChecklistItemType; content: string }> = [];
       db.transaction(() => {
         if (replace) {
-          removed = db.prepare('DELETE FROM spec_checklist_items WHERE task_id = ? AND waived = 0').run(taskId).changes;
+          // waived 與 superseded 都保留：兩者都是已結論的項目，整份取代不可把結論洗掉
+          removed = db.prepare('DELETE FROM spec_checklist_items WHERE task_id = ? AND waived = 0 AND superseded = 0').run(taskId).changes;
         }
         for (const item of items) {
           const id = randomUUID();
@@ -216,7 +256,7 @@ export function registerComplianceTools(server: McpServer): void {
       });
 
       const warning = notifyOk ? '' : ' (warning: Web UI notification failed)';
-      const replaceNote = replace ? `（replace：移除 ${removed} 筆未豁免舊項目，waived 項目保留）` : '';
+      const replaceNote = replace ? `（replace：移除 ${removed} 筆未豁免舊項目，waived / superseded 項目保留）` : '';
       return {
         content: [{
           type: 'text' as const,
@@ -277,6 +317,7 @@ ${JSON.stringify(created, null, 2)}`, '（created 清單被截斷——用 get_s
             missing: run.missing,
             manual: run.manual,
             waived: run.waived,
+            superseded: run.superseded ?? 0,
           } : null,
         }, null, 2);
       };
@@ -306,10 +347,19 @@ ${JSON.stringify(created, null, 2)}`, '（created 清單被截斷——用 get_s
     '豁免一項規格檢查表項目（不再計入 run_spec_compliance 的 missing）。**必須附理由**（例如「規格此欄位屬 Phase 2，本次不實作——使用者已確認」）。豁免會記入任務輸出紀錄供人工稽核。',
     {
       itemId: z.string().describe('檢查表項目 ID（save_spec_checklist / get_spec_checklist 回傳的 id）'),
-      reason: z.string().min(1).describe('豁免理由（必填，會記入任務輸出紀錄）'),
+      reason: z.string().min(1).describe('豁免理由（必填，會記入任務輸出紀錄）。解除豁免（unwaive: true）時，這裡填「為什麼現在做得到了」。'),
+      unwaive: z.boolean().optional().describe('解除一項**已豁免但後來做掉了**的項目。預設 false。豁免理由通常寫著「本輪不實作」，項目做完之後那句話就成了過期的事實，而過期的豁免會讓下一輪的 AI 回對把已完成的項目繼續當成不用驗。'),
+      kind: z.enum(['temporary', 'permanent']).optional().describe(
+        '這是哪一種豁免（強烈建議指定）。'
+        + '`temporary`＝**暫時做不到，等前置到位就要回來做**（例：依賴的表還沒建）；'
+        + '`permanent`＝**判定不該做**，等規格改掉這一項之後它就消失，不會恢復。'
+        + '兩者混用同一種措辭，下一個讀的人會把「等前置」當成「已決定不做」而永遠不回來補——'
+        + '那些前置到位之後沒有人回收的豁免，就是這樣產生的。'
+        + 'temporary 的理由請寫明**等哪一個前置、由誰解除**；permanent 請寫明**依據哪一則裁決**。',
+      ),
     },
     { title: 'Waive Checklist Item', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    async ({ itemId, reason }) => {
+    async ({ itemId, reason, unwaive, kind }) => {
       const db = getMcpDb();
       if (!reason.trim()) {
         return { content: [{ type: 'text' as const, text: 'Error: 豁免理由（reason）不可為空白。' }], isError: true };
@@ -318,11 +368,54 @@ ${JSON.stringify(created, null, 2)}`, '（created 清單被截斷——用 get_s
       if (!item) {
         return { content: [{ type: 'text' as const, text: `Error: Checklist item "${itemId}" not found. 用 get_spec_checklist(taskId) 確認 itemId。` }], isError: true };
       }
-      if (item.waived === 1) {
-        return { content: [{ type: 'text' as const, text: `Checklist item ${itemId} is already waived（理由：${item.waive_reason || '(無)'}).` }] };
+
+      // 解除豁免：項目後來做掉了，豁免理由成了過期的事實。
+      //
+      // 為什麼需要這條路（2026-09-19 實例）：PF01「被擋下要留痕」先因缺代碼字面而豁免、
+      // 理由寫「本輪不實作」；同一支任務後來補了代碼值並做完，那句話就與事實相反。
+      // 沒有反向操作的話，下一輪 AI 回對會繼續把它當成不用驗的項目——
+      // 一個做完的功能從此沒有人驗它有沒有壞。與 resolve_spec_gap 原本不能修訂是同一型缺陷。
+      if (unwaive) {
+        if (item.waived !== 1) {
+          return { content: [{ type: 'text' as const, text: `Error: Checklist item ${itemId} 目前沒有被豁免，沒有東西可以解除。` }], isError: true };
+        }
+        db.prepare('UPDATE spec_checklist_items SET waived = 0, waive_reason = NULL WHERE id = ?').run(itemId);
+        const { agentId: unwaiveAgentId } = ensureMcpAgent(db, item.task_id, item.project_id);
+        db.prepare(`
+          INSERT INTO agent_outputs (agent_id, task_id, stream_type, content)
+          VALUES (?, ?, 'system', ?)
+        `).run(unwaiveAgentId, item.task_id, `[UNWAIVE] ${item.content}: ${reason.trim()}（原豁免理由：${item.waive_reason || '(無)'}）`);
+        await notifyWebServer({
+          event: 'task.checklistSaved',
+          data: { taskId: item.task_id, projectId: item.project_id, itemId, action: 'unwaived' },
+        });
+        return {
+          content: [{
+            type: 'text' as const,
+            text: `Checklist item 已解除豁免（${item.content}）。原豁免理由已記入任務輸出紀錄供追溯。`
+              + `\n\n⚠ 它現在會重新計入 missing——**請重新執行 AI 規格回對**讓 reviewer 實際驗證它做對了沒有，`
+              + `不要假設「做完了」就等於「做對了」。`,
+          }],
+        };
       }
 
-      db.prepare('UPDATE spec_checklist_items SET waived = 1, waive_reason = ? WHERE id = ?').run(reason.trim(), itemId);
+      if (item.waived === 1) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: `Checklist item ${itemId} is already waived（理由：${item.waive_reason || '(無)'}).`
+              + `\n\n若這一項**後來已經做掉了**，用 unwaive: true 重新呼叫來解除豁免，reason 填「為什麼現在做得到了」。`,
+          }],
+        };
+      }
+
+      // kind 前綴寫進理由本身：豁免理由是**下一個人唯一會讀到的東西**，
+      // 分類若只存在別的欄位或工具回應裡，等於沒有分類。
+      const kindPrefix = kind === 'temporary' ? '[暫時做不到／等前置] '
+        : kind === 'permanent' ? '[判定不該做／等規格刪除] '
+        : '';
+      const finalReason = kindPrefix + reason.trim();
+      db.prepare('UPDATE spec_checklist_items SET waived = 1, waive_reason = ? WHERE id = ?').run(finalReason, itemId);
 
       // 記入任務輸出紀錄（同 report_output 通道）供人工稽核
       const { agentId, created, role, title } = ensureMcpAgent(db, item.task_id, item.project_id);
@@ -335,7 +428,7 @@ ${JSON.stringify(created, null, 2)}`, '（created 清單被截斷——用 get_s
       db.prepare(`
         INSERT INTO agent_outputs (agent_id, task_id, stream_type, content)
         VALUES (?, ?, 'system', ?)
-      `).run(agentId, item.task_id, `[WAIVE] ${item.content}: ${reason.trim()}`);
+      `).run(agentId, item.task_id, `[WAIVE] ${item.content}: ${finalReason}`);
 
       const notifyOk = await notifyWebServer({
         event: 'task.checklistSaved',
@@ -346,7 +439,12 @@ ${JSON.stringify(created, null, 2)}`, '（created 清單被截斷——用 get_s
       return {
         content: [{
           type: 'text' as const,
-          text: `Checklist item waived（${item.content}）${warning}。若已有 AI 回對結果，需重新 AI 回對（get_compliance_review_plan → save_compliance_review）更新結果；程式預檢可重跑 run_spec_compliance(taskId="${item.task_id}")。`,
+          text: `Checklist item waived（${item.content}）${warning}。若已有 AI 回對結果，需重新 AI 回對（get_compliance_review_plan → save_compliance_review）更新結果；程式預檢可重跑 run_spec_compliance(taskId="${item.task_id}")。`
+            + (kind ? '' : `
+
+⚠ 未指定 kind。**「暫時做不到」與「判定不該做」是兩種東西，不該長得一樣**——`
+              + `混用同一種措辭時，下一個讀的人會把「等前置」當成「已決定不做」而永遠不回來補。`
+              + `請帶 kind="temporary"（並寫明等哪個前置、由誰解除）或 kind="permanent"（並寫明依據哪一則裁決）重下一次。`),
         }],
       };
     },
@@ -549,11 +647,15 @@ ${JSON.stringify(created, null, 2)}`, '（created 清單被截斷——用 get_s
         if (project.frontend_path) workspaces.push(`frontend: ${project.frontend_path}`);
         if (project.backend_path) workspaces.push(`backend: ${project.backend_path}`);
       }
+      // 規格來源 root（本專案已登記的 specFolders，綁定專案）——交付物是規格文件的
+      // 任務（architect：SA/SD 改寫維護）證據落在這裡；證據驗證器認得，reviewer 要知道。
+      const planSpecRoots = specRootsForProject(db, task.project_id, project.config_json);
+      for (const r of planSpecRoots) workspaces.push(`規格來源（證據可引用）: ${r}`);
       if (workspaces.length === 0) {
         return {
           content: [{
             type: 'text' as const,
-            text: `Error: 專案沒有可審查的 workspace 路徑（label=${task.label}，frontendPath=${project.frontend_path || 'N/A'}，backendPath=${project.backend_path || 'N/A'}）。用 update_project 設定 workspace 路徑。`,
+            text: `Error: 專案沒有可審查的 workspace 路徑（label=${task.label}，frontendPath=${project.frontend_path || 'N/A'}，backendPath=${project.backend_path || 'N/A'}），也沒有登記的規格資料夾（config_json.specFolders）。用 update_project 設定 workspace 路徑或規格資料夾。`,
           }],
           isError: true,
         };
@@ -755,9 +857,14 @@ ${missingLines.join('\n')}${staleBlock}${deltaTruncated ? '\n（清單已達大�
    - **規格提到但專案沒有 Entity 也沒有 DDL 的表**（只出現在原生 SQL 字串裡）——這種正是本步驟最有價值的地方，務必核對`
         : '';
 
+      // 規格 root 存在時，明說「交付物是規格文件就引規格檔」——不講清楚，回對員
+      // 遇到規格類項目只剩三條路：湊 workspace 內的假證據、判假 missing、或卡死。
+      const specEvidenceHint = planSpecRoots.length > 0
+        ? '\n   - 本任務的交付物若是**規格文件本身**（SA/SD 改寫、知識庫維護），證據就引用上列「規格來源」root 之下的規格檔 file:line——**不要**為了讓驗證過關去引用 workspace 裡湊得到的程式碼檔（那是假證據），也不要因為引用不到就判 missing（那是假 missing）'
+        : '';
       const commonSteps = `${reverseScanStep}${contractReverseStep}${dbSchemaStep}
 5. **判定標準（寧嚴勿鬆）**：每項判 matched 或 missing——
-   - matched **必須附 evidence**（file + line，workspace 相對路徑）與一句說明（note）
+   - matched **必須附 evidence**（file + line，相對於上列任一 root 的路徑，或該 root 之下的絕對路徑）與一句說明（note）${specEvidenceHint}
    - **每筆 evidence 會被程式驗證**（檔案存在、行號有效、該行 ±${RELEVANCE_WINDOW} 行內確實含該文字/路徑/識別字）——引用不精確會整批退回，請引用實際包含該文字/路徑/識別字的行（如文字在 i18n 檔就引 i18n 檔）
    - 找不到、不確定、規格與程式碼有出入 → 一律 missing，可用 note 說明疑點
 6. **一次寫回**：全部判完後呼叫 save_compliance_review(taskId="${taskId}", results=[{itemId, status, evidence: [{file, line}], note}, ...])，**必須涵蓋所有未豁免項目**。
@@ -921,8 +1028,8 @@ ${forbiddenSection}`;
       // workspace roots 依 task.label 解析（同 run_spec_compliance 的規則）——
       // 提早解析：carryForward 的證據重驗與 N1 的提交證據驗證共用。
       // root 未設定或路徑不存在 → 無法驗證（carryForward 直接拒；全量提交維持現行為並註記）。
-      const project = db.prepare('SELECT frontend_path, backend_path FROM projects WHERE id = ?').get(task.project_id) as
-        { frontend_path: string | null; backend_path: string | null } | undefined;
+      const project = db.prepare('SELECT frontend_path, backend_path, config_json FROM projects WHERE id = ?').get(task.project_id) as
+        { frontend_path: string | null; backend_path: string | null; config_json: string | null } | undefined;
       const roots: WorkspaceRoots = {};
       if (task.label === 'frontend') {
         if (project?.frontend_path) roots.frontend = project.frontend_path;
@@ -934,7 +1041,12 @@ ${forbiddenSection}`;
       }
       if (roots.frontend && !fs.existsSync(roots.frontend)) delete roots.frontend;
       if (roots.backend && !fs.existsSync(roots.backend)) delete roots.backend;
-      const hasRoots = Boolean(roots.frontend || roots.backend);
+      // 規格來源 root（本專案已登記的 specFolders）——交付物是規格文件的任務
+      // （architect）證據落在這裡，不在 workspace 之下。與 workspace root 同一套
+      // 解析規則（產物目錄排除、大小上限、`..` 逃逸防護），不是放行旗標。
+      const specRoots = specRootsForProject(db, task.project_id, project?.config_json);
+      if (specRoots.length > 0) roots.specRoots = specRoots;
+      const hasRoots = Boolean(roots.frontend || roots.backend || specRoots.length > 0);
 
       // ── S1：增量回對（carryForward）——「上輪 matched 且本次未提交」的項目
       // 由程式重驗上輪證據（validateReviewEvidence 開檔確認仍有效）後自動沿用。
@@ -1105,7 +1217,9 @@ ${lines.join('\n')}${noEvidence.length > 20 ? `\n（其餘 ${noEvidence.length -
               text: `Error: ${failures.length} 筆 matched 證據未通過程式驗證，整批拒收（未寫入 run）：
 ${lines.join('\n')}${more}
 
-請引用實際包含該文字/路徑/識別字的行（如文字在 i18n 檔就引 i18n 檔、API path 引呼叫處或 handler 定義行附近）；確實找不到證據就判 missing（寧嚴勿鬆）。修正證據後重新呼叫 save_compliance_review。`,
+請引用實際包含該文字/路徑/識別字的行（如文字在 i18n 檔就引 i18n 檔、API path 引呼叫處或 handler 定義行附近）；確實找不到證據就判 missing（寧嚴勿鬆）。修正證據後重新呼叫 save_compliance_review。${specRoots.length > 0
+              ? `\n可引用的 root：${[roots.frontend, roots.backend].filter(Boolean).join('、') || '（無 workspace）'}${[roots.frontend, roots.backend].some(Boolean) ? '、' : ''}規格來源 ${specRoots.join('、')}`
+              : '\n（此專案未登記規格資料夾——交付物是規格文件的任務請先用 update_project 設定 config_json.specFolders 指向規格位置，證據才引用得到）'}`,
             }],
             isError: true,
           };

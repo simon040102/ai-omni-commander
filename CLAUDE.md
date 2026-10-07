@@ -303,6 +303,12 @@ MCP Prompt：`start_task` — 標準任務工作流（get_execution_plan → in_
   - working tree dirty → 跳過 pull + 警告；pull 逾時 15s / 失敗 → best-effort 用現有內容 + 明確警告
   - git 指令一律 spawn 陣列參數（不過 shell）
 - 設定驗證（WS `project.update` + MCP `update_project`，`validateSpecFolders`）：path 必須是**絕對路徑**（MCP 跨專案載入，嚴禁相對路徑）、`gitPull` boolean、**與該專案 frontendPath/backendPath 相同或互為父子一律拒絕**（防誤 pull 程式碼 workspace）；路徑不存在只警告不拒絕
+- **規格資料夾同時是「證據 root」（AI 回對用）**：交付物是規格文件本身的任務（architect：SA/SD 改寫、知識庫維護）產出不在 frontend/backend workspace 裡（常常連磁碟都不同），證據驗證只認 workspace root 時整批被拒收（「絕對路徑不在 workspace 之下」）、run 寫不進去，而完工閘要求「最新 ai_review missing=0」→ 這類任務結構性地永遠結不了案，逼 reviewer 在假證據／假 missing／卡死之間選。因此 `save_compliance_review` 的證據解析除了 workspace root，另認 **本專案已登記的 specFolders**（`WorkspaceRoots.specRoots`，`resolveProjectSpecRoots`）：
+  - **綁專案，不綁磁碟**：只取該專案 `config_json.specFolders` 的 path；登記的資料夾底下若直接放著「以某個專案 id 命名的子資料夾」（多專案共用知識庫版面）→ **只收 `<kb>/<本專案 id>`**，本專案的子資料夾不存在就整個 root 不收（A 專案不得引用 B 專案的規格當證據）
+  - **驗法完全不變**：產物目錄排除、2MB 上限、`..` 逃逸防護、±10 行內容相關性一條不少；放寬的只是「哪些樹算數」。**沒有跳過驗證的旗標**，未登記規格資料夾的專案行為與修改前完全相同
+  - **引擎（`run_spec_compliance`）刻意不掃 specRoots**：規格文件逐字寫著 checklist 的 content，掃進去就是拿規格證明規格（`.html` Axure 原型在掃描白名單內，真的會中）
+  - `get_compliance_review_plan` 會把規格 root 列進 Workspace 段並明說「交付物是規格文件就引規格檔，不要湊 workspace 內的假證據、也不要因為引用不到就判假 missing」
+  - 與上一條「不可與 workspace 重疊」不變量無關：那條是為了**不對程式碼 workspace 跑 git pull**（寫入風險），這裡只做唯讀開檔驗證，沒有改動 specFolders 的設定語意或驗證條件
 
 ## Development
 

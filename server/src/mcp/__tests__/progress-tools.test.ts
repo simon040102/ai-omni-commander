@@ -45,6 +45,30 @@ describe('progress-tools', () => {
   });
 
   describe('report_output', () => {
+    // 契約守門：outputType 的每個值都必須真的寫得進 agent_outputs.stream_type。
+    // 2026-09-21 實例：enum 宣告支援 'milestone'，而 DB 的 CHECK 不收——通過參數驗證、
+    // 寫入時才被資料庫擋下，呼叫端拿到一句看不懂的 SQLite 約束錯誤。
+    // **宣告支援卻存不進去，比不支援更糟**：它讓人以為自己用錯了。
+    it('★ outputType 的每個允許值都寫得進 DB（enum ↔ CHECK 不得漂移）', async () => {
+      seedProject(testDb);
+      seedTask(testDb);
+      for (const t of ['text', 'tool_use', 'tool_result', 'system', 'error']) {
+        const r = await callTool(server, 'report_output', { taskId: 'task-1', content: `c-${t}`, outputType: t });
+        expect(r.isError, `outputType=${t} 應該寫得進去`).toBeUndefined();
+      }
+      const rows = testDb.prepare('SELECT stream_type FROM agent_outputs WHERE agent_id = ?').all('mcp-task-1') as any[];
+      expect(rows.map(r => r.stream_type).sort()).toEqual(['error', 'system', 'text', 'tool_result', 'tool_use']);
+    });
+
+    // ★ 負向：里程碑有獨立的 report_milestone，這裡不該再收
+    it('★ outputType=milestone 在參數驗證就被擋（不是留到 DB 才炸）', async () => {
+      seedProject(testDb);
+      seedTask(testDb);
+      const r = await callTool(server, 'report_output', { taskId: 'task-1', content: 'x', outputType: 'milestone' });
+      expect(r.isError).toBe(true);
+      const rows = testDb.prepare('SELECT * FROM agent_outputs').all() as any[];
+      expect(rows).toHaveLength(0);
+    });
     it('stores output and notifies web server', async () => {
       seedProject(testDb);
       seedTask(testDb);

@@ -280,6 +280,39 @@ describe('compliance-tools', () => {
   });
 
   describe('waive_checklist_item', () => {
+    // 「暫時做不到」與「判定不該做」是兩種東西，不該長得一樣。2026-09-21 實例：
+    // 兩項 OUTPUT 欄位的豁免沿用了前四項「解除條件」的措辭，回對員指出下一個讀的人
+    // 會把它當成暫時性豁免——前置到位之後沒有人回收的豁免就是這樣產生的。
+    const seedOne = async () => {
+      seedProject(testDb);
+      seedTask(testDb);
+      await callTool(server, 'save_spec_checklist', { taskId: 'task-1', items: [MISSING_ITEM] });
+      return (testDb.prepare('SELECT id FROM spec_checklist_items').get() as { id: string }).id;
+    };
+
+    it('★ kind=temporary 在理由前加「等前置」標記', async () => {
+      const id = await seedOne();
+      await callTool(server, 'waive_checklist_item', { itemId: id, reason: '等 ch_request 表建好', kind: 'temporary' });
+      const r = testDb.prepare('SELECT waive_reason FROM spec_checklist_items WHERE id = ?').get(id) as { waive_reason: string };
+      expect(r.waive_reason).toContain('[暫時做不到／等前置]');
+      expect(r.waive_reason).toContain('等 ch_request 表建好');
+    });
+
+    it('★ kind=permanent 標記與 temporary 不同（兩種豁免不可長得一樣）', async () => {
+      const id = await seedOne();
+      await callTool(server, 'waive_checklist_item', { itemId: id, reason: '裁決 b54e073e 判定此欄不該存在', kind: 'permanent' });
+      const r = testDb.prepare('SELECT waive_reason FROM spec_checklist_items WHERE id = ?').get(id) as { waive_reason: string };
+      expect(r.waive_reason).toContain('[判定不該做／等規格刪除]');
+      expect(r.waive_reason).not.toContain('等前置');
+    });
+
+    it('★ 未指定 kind 時理由不加前綴，但回應要提醒', async () => {
+      const id = await seedOne();
+      const res = await callTool(server, 'waive_checklist_item', { itemId: id, reason: '本輪不實作' });
+      const r = testDb.prepare('SELECT waive_reason FROM spec_checklist_items WHERE id = ?').get(id) as { waive_reason: string };
+      expect(r.waive_reason).toBe('本輪不實作');
+      expect(res.content[0].text).toContain('未指定 kind');
+    });
     it('rejects blank-only reason', async () => {
       seedProject(testDb);
       seedTask(testDb);
@@ -332,6 +365,74 @@ describe('compliance-tools', () => {
     it('returns error for unknown itemId', async () => {
       const result = await callTool(server, 'waive_checklist_item', { itemId: 'nope', reason: 'r' });
       expect(result.isError).toBe(true);
+    });
+
+    // ── unwaive：項目後來做掉了，豁免理由成了過期的事實 ────────────────
+    //
+    // 起因（2026-09-19 實例）：PF01「被擋下要留痕」先因缺代碼字面而豁免、理由寫「本輪不實作」；
+    // 同一支任務後來補了代碼值並做完，那句話就與事實相反。沒有反向操作的話，下一輪 AI 回對
+    // 會繼續把它當成不用驗的項目——一個做完的功能從此沒有人驗它有沒有壞。
+    describe('unwaive', () => {
+      async function seedWaived(): Promise<string> {
+        seedProject(testDb);
+        seedTask(testDb);
+        await callTool(server, 'save_spec_checklist', { taskId: 'task-1', items: [MISSING_ITEM] });
+        const row = testDb.prepare('SELECT id FROM spec_checklist_items').get() as { id: string };
+        await callTool(server, 'waive_checklist_item', { itemId: row.id, reason: '本輪不實作：缺代碼字面' });
+        return row.id;
+      }
+
+      it('沒帶 unwaive 時維持原樣，並告訴呼叫者有解除這條路', async () => {
+        const id = await seedWaived();
+        const again = await callTool(server, 'waive_checklist_item', { itemId: id, reason: '後來做掉了' });
+        expect(again.isError).toBeUndefined();
+        expect(again.content[0].text).toContain('already waived');
+        expect(again.content[0].text).toContain('unwaive');
+        const item = testDb.prepare('SELECT waived, waive_reason FROM spec_checklist_items WHERE id = ?').get(id) as { waived: number; waive_reason: string };
+        expect(item.waived).toBe(1);
+        expect(item.waive_reason).toBe('本輪不實作：缺代碼字面');
+      });
+
+      it('解除後重新計入 missing，且原豁免理由留在紀錄裡供追溯', async () => {
+        const id = await seedWaived();
+        const result = await callTool(server, 'waive_checklist_item', {
+          itemId: id, reason: '代碼值 access_denied 已登記並落地，本項已實作', unwaive: true,
+        });
+        expect(result.isError).toBeUndefined();
+
+        const item = testDb.prepare('SELECT waived, waive_reason FROM spec_checklist_items WHERE id = ?').get(id) as { waived: number; waive_reason: string | null };
+        expect(item.waived).toBe(0);
+        expect(item.waive_reason).toBeNull();
+
+        // 原豁免理由不能憑空消失——它是「當時為什麼不做」的唯一紀錄
+        const lines = (testDb.prepare('SELECT content FROM agent_outputs WHERE task_id = ?').all('task-1') as Array<{ content: string }>)
+          .filter(o => o.content.startsWith('[UNWAIVE]'));
+        expect(lines).toHaveLength(1);
+        expect(lines[0].content).toContain('本輪不實作：缺代碼字面');
+      });
+
+      it('回應要求重跑 AI 回對——「做完了」不等於「做對了」', async () => {
+        const id = await seedWaived();
+        const result = await callTool(server, 'waive_checklist_item', { itemId: id, reason: '已實作', unwaive: true });
+        expect(result.content[0].text).toContain('AI 規格回對');
+      });
+
+      it('對沒有被豁免的項目解除豁免要報錯', async () => {
+        seedProject(testDb);
+        seedTask(testDb);
+        await callTool(server, 'save_spec_checklist', { taskId: 'task-1', items: [MISSING_ITEM] });
+        const row = testDb.prepare('SELECT id FROM spec_checklist_items').get() as { id: string };
+
+        const result = await callTool(server, 'waive_checklist_item', { itemId: row.id, reason: '已實作', unwaive: true });
+        expect(result.isError).toBe(true);
+      });
+
+      it('解除豁免仍要附理由，空白照樣擋下且不動狀態', async () => {
+        const id = await seedWaived();
+        const result = await callTool(server, 'waive_checklist_item', { itemId: id, reason: '   ', unwaive: true });
+        expect(result.isError).toBe(true);
+        expect((testDb.prepare('SELECT waived FROM spec_checklist_items WHERE id = ?').get(id) as { waived: number }).waived).toBe(1);
+      });
     });
   });
 
@@ -1583,5 +1684,100 @@ describe('compliance-tools', () => {
       const status = (testDb.prepare("SELECT status FROM tasks WHERE id = 'task-1'").get() as { status: string }).status;
       expect(status).toBe('completed');
     });
+  });
+});
+
+
+// -- 交付物是規格文件的任務（architect）：證據落在已登記的規格來源 -----------
+//
+// 釘住的缺陷：這類任務的交付物不在 frontend/backend workspace 裡（實例：workspace 在
+// C 槽、規格在 D 槽的知識庫），證據驗證只認 workspace root 時整批被拒收、run 寫不進去，
+// 而完工閘要求「最新 ai_review missing=0」→ 任務結構性地永遠結不了案。修法是讓
+// **專案已登記的** specFolders 也成為證據 root，而且綁定專案（別的專案的規格擋下）。
+describe('compliance-tools：規格來源證據 root（architect 任務）', () => {
+  const OTHER_PROJECT = 'proj-other';
+  let server: McpServer;
+  let kbRoot: string;
+  let ownSpec: string;
+  let otherSpec: string;
+
+  beforeAll(() => {
+    kbRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'omni-tools-kb-'));
+    for (const [proj, file] of [['proj-1', 'F-AUDIT.md'], [OTHER_PROJECT, 'F-OTHER.md']] as const) {
+      const dir = path.join(kbRoot, proj, 'features');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, file), '訊息：稽核欄位設定已更新\n', 'utf-8');
+    }
+    ownSpec = path.join(kbRoot, 'proj-1', 'features', 'F-AUDIT.md');
+    otherSpec = path.join(kbRoot, OTHER_PROJECT, 'features', 'F-OTHER.md');
+  });
+
+  afterAll(() => {
+    fs.rmSync(kbRoot, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    testDb = freshDb();
+    server = new McpServer({ name: 'test', version: '0.1.0' }, { capabilities: { tools: {} } });
+    registerComplianceTools(server);
+    vi.mocked(notifyWebServer).mockClear();
+    // proj-1 登記知識庫根；另一個專案存在於 DB（知識庫底下有它的子資料夾）
+    testDb.prepare('INSERT INTO projects (id, name, working_dir, frontend_path, backend_path, config_json) VALUES (?, ?, ?, ?, ?, ?)')
+      .run('proj-1', 'Spec Project', '/tmp/project', feRoot, null, JSON.stringify({ specFolders: [{ path: kbRoot, gitPull: false }] }));
+    testDb.prepare('INSERT INTO projects (id, name, working_dir) VALUES (?, ?, ?)')
+      .run(OTHER_PROJECT, 'Other Project', '/tmp/other');
+    testDb.prepare('INSERT INTO tasks (id, project_id, title, description, label, task_type) VALUES (?, ?, ?, ?, ?, ?)')
+      .run('task-1', 'proj-1', '規格改寫', 'desc', 'architect', 'refactor');
+  });
+
+  async function seedSpecItem(): Promise<string> {
+    await callTool(server, 'save_spec_checklist', {
+      taskId: 'task-1',
+      items: [{ itemType: 'ui_text', content: '稽核欄位設定已更新', side: 'both' }],
+    });
+    return (testDb.prepare('SELECT id FROM spec_checklist_items WHERE task_id = ?').get('task-1') as { id: string }).id;
+  }
+
+  it('★ 證據指向本專案的規格檔 → 收下並寫入 ai_review run（missing=0）', async () => {
+    const itemId = await seedSpecItem();
+    const result = await callTool(server, 'save_compliance_review', {
+      taskId: 'task-1',
+      results: [{ itemId, status: 'matched', evidence: [{ file: ownSpec, line: 1 }], note: '規格已改寫' }],
+    });
+    expect(result.isError).toBeUndefined();
+    const run = testDb.prepare("SELECT * FROM spec_compliance_runs WHERE task_id = 'task-1' AND source = 'ai_review'").get() as Record<string, unknown>;
+    expect(run).toMatchObject({ matched: 1, missing: 0 });
+  });
+
+  it('★ 證據指向別的專案的規格檔 → 整批拒收、run 不寫入', async () => {
+    const itemId = await seedSpecItem();
+    const result = await callTool(server, 'save_compliance_review', {
+      taskId: 'task-1',
+      results: [{ itemId, status: 'matched', evidence: [{ file: otherSpec, line: 1 }] }],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('未通過程式驗證');
+    const run = testDb.prepare("SELECT COUNT(*) AS c FROM spec_compliance_runs WHERE task_id = 'task-1'").get() as { c: number };
+    expect(run.c).toBe(0);
+  });
+
+  it('★ 專案沒登記規格資料夾 → 規格路徑照樣拒收（沒有變成「絕對路徑一律通過」）', async () => {
+    testDb.prepare('UPDATE projects SET config_json = NULL WHERE id = ?').run('proj-1');
+    const itemId = await seedSpecItem();
+    const result = await callTool(server, 'save_compliance_review', {
+      taskId: 'task-1',
+      results: [{ itemId, status: 'matched', evidence: [{ file: ownSpec, line: 1 }] }],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('未登記規格資料夾');
+  });
+
+  it('get_compliance_review_plan 告訴 reviewer 規格 root 可以引用', async () => {
+    await seedSpecItem();
+    const plan = await callTool(server, 'get_compliance_review_plan', { taskId: 'task-1' });
+    expect(plan.isError).toBeUndefined();
+    expect(plan.content[0].text).toContain('規格來源（證據可引用）');
+    expect(plan.content[0].text).toContain(path.join(kbRoot, 'proj-1'));
+    expect(plan.content[0].text).not.toContain(path.join(kbRoot, OTHER_PROJECT));
   });
 });

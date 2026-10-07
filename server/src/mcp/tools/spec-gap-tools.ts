@@ -26,6 +26,9 @@ interface SpecGapRow {
   resolution_note: string | null;
   created_at: string;
   resolved_at: string | null;
+  /** 'task' | 'project'。v22 遷移以 NOT NULL DEFAULT 'task' 加入，SQLite 會把既有列
+   *  回填成 'task'，所以實務上不會是 NULL；型別留 null 只是對更舊的 schema 防禦。 */
+  scope: string | null;
 }
 
 export function registerSpecGapTools(server: McpServer): void {
@@ -144,17 +147,35 @@ export function registerSpecGapTools(server: McpServer): void {
     {
       gapId: z.string().describe('缺口 ID（report_spec_gap 回傳的 id）'),
       resolutionNote: z.string().min(RESOLUTION_NOTE_MIN_LENGTH).describe('裁決內容（必填）：使用者拍板的具體決定，效力等同規格（例如「選 B：刪除前 confirm 彈窗」）。不可只寫「可以」「好」「照舊」等空泛詞。'),
+      revise: z.boolean().optional().describe('修訂一則**已落地但發現是錯的**裁決。預設 false（已解決的缺口原樣拒收）。裁決會自動注入後續派工與 AI 回對，所以錯的裁決若沒有更正管道就會一直注入下去——這個旗標就是那個管道。前一版不會被刪掉，會以「已被取代」的形式附在新裁決之後。'),
+      scope: z.enum(['task', 'project']).optional().describe(
+        '這則裁決管到誰。`task`（預設）＝只注入開這個缺口的那一支任務；'
+        + '`project`＝**同專案每一支任務都注入**。\n'
+        + '缺口是「誰遇到誰開」的，而裁決管的往往是別人——**定共用基礎、命名、代碼值域、'
+        + '設定鍵、跨功能契約的裁決，幾乎都該是 project**。判準：「照這則做的人，會不會有'
+        + '別支任務的人？」會，就選 project。\n'
+        + '選錯的代價不對稱：標成 project 只是多注入幾行；標成 task 而實際跨任務，'
+        + '那支真正要照做的任務**看不到它**，獨立回對員會照原始規格判 missing。',
+      ),
     },
     { title: 'Resolve Spec Gap', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    async ({ gapId, resolutionNote }) => {
+    async ({ gapId, resolutionNote, revise, scope }) => {
       const db = getMcpDb();
 
       const gap = db.prepare('SELECT * FROM spec_gaps WHERE id = ?').get(gapId) as SpecGapRow | undefined;
       if (!gap) {
         return { content: [{ type: 'text' as const, text: `Error: Spec gap "${gapId}" not found. 用 list_spec_gaps 確認 gapId。` }], isError: true };
       }
-      if (gap.status === 'resolved') {
-        return { content: [{ type: 'text' as const, text: `Spec gap ${gapId} is already resolved (at ${gap.resolved_at}).` }] };
+      if (gap.status === 'resolved' && !revise) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: `Spec gap ${gapId} is already resolved (at ${gap.resolved_at})。`
+              + `\n\n若這一則裁決**本身是錯的**（而不是要補充細節），用 revise: true 重新呼叫來修訂。`
+              + `裁決會自動注入後續派工與 AI 回對計畫，錯的裁決不更正就會一直注入下去；`
+              + `修訂會把前一版以「已被取代」的形式保留在新裁決之後，不會憑空消失。`,
+          }],
+        };
       }
 
       // E1：答案品質驗證（zod 已擋長度，這裡再防呆一次並擋空泛詞——涵蓋不經 zod 的呼叫路徑）
@@ -163,10 +184,30 @@ export function registerSpecGapTools(server: McpServer): void {
         return { content: [{ type: 'text' as const, text: `Error: ${validation.error}` }], isError: true };
       }
 
+      // 修訂：把前一版接在新裁決之後保留。
+      //
+      // 為什麼不直接覆蓋：一則錯的裁決被悄悄換掉，和不能換一樣糟——下一個人會看到一份
+      // 與程式碼、與測試註解對不上的「規格條文」，而且查不出它何時變過。實例（2026-09-19）：
+      // 碼值換中文的裁決當天落地、當天被推翻，撤回時程式／測試／流程圖／驗證報告都改了，
+      // 唯獨這裡改不動，於是 reviewer 拿到兩份互相矛盾的條文。
+      let finalNote = validation.note;
+      if (gap.status === 'resolved') {
+        const previous = (gap.resolution_note ?? '').trim();
+        if (previous === validation.note) {
+          return { content: [{ type: 'text' as const, text: `Error: revise 的裁決內容與現行版本完全相同，沒有東西可修訂。` }], isError: true };
+        }
+        if (previous) {
+          finalNote = `${validation.note}\n\n---\n【已被取代的前一版裁決（落地於 ${gap.resolved_at}）——不可照辦，僅供追溯】\n${previous}`;
+        }
+      }
+
+      // scope 沒帶就維持現值（修訂時不該把既有範圍悄悄改回預設）；新裁決沒帶則是 'task'
+      const finalScope = scope ?? (gap.scope === 'project' ? 'project' : 'task');
+
       db.prepare(`
-        UPDATE spec_gaps SET status = 'resolved', resolution_note = ?, resolved_at = datetime('now')
+        UPDATE spec_gaps SET status = 'resolved', resolution_note = ?, scope = ?, resolved_at = datetime('now')
         WHERE id = ?
-      `).run(validation.note, gapId);
+      `).run(finalNote, finalScope, gapId);
 
       const notifyOk = await notifyWebServer({
         event: 'task.specGap',
@@ -174,7 +215,20 @@ export function registerSpecGapTools(server: McpServer): void {
       });
 
       const warning = notifyOk ? '' : ' (warning: Web UI notification failed)';
-      return { content: [{ type: 'text' as const, text: `Spec gap ${gapId} marked as resolved${warning}。裁決已落地 DB——後續派工 prompt / resume_task / AI 回對計畫會自動注入此裁決（效力等同規格），不需（也不可）手動轉述。` }] };
+      const scopeLine = finalScope === 'project'
+        ? `\n\n📌 範圍：**全案適用**——同專案每一支任務的派工、resume_task 與 AI 回對都會注入這一則，並標示它由本任務裁決。`
+        : `\n\n📌 範圍：**只有本任務**（scope=task，預設）。`
+          + `\n若這則裁決其實**別支任務也要照做**（共用基礎、命名、代碼值域、設定鍵、跨功能契約通常都是），`
+          + `現在就用 \`scope: "project"\` 重下一次。`
+          + `\n判準：「照這則做的人，會不會有別支任務的人？」會，就是 project。`
+          + `\n**標錯的代價不對稱**：多標只是多幾行；少標的話，真正要照做的那支任務看不到它，`
+          + `而獨立回對員會照原始規格判 missing——把已經照裁決做對的東西判成沒做。`;
+      const revised = gap.status === 'resolved'
+        ? `Spec gap ${gapId} 的裁決已修訂${warning}。前一版已以「已被取代」的形式保留在同一則裡，供追溯但明示不可照辦。`
+          + `\n\n⚠ 裁決錯過一次的話，同一個決定通常有好幾份副本：程式、測試、流程圖、驗證報告、以及這裡。`
+          + `**回頭確認其餘幾份都跟著改了**——漏掉任何一份，下一個人會從那一份讀到已經不成立的事實。${scopeLine}`
+        : `Spec gap ${gapId} marked as resolved${warning}。裁決已落地 DB——後續派工 prompt / resume_task / AI 回對計畫會自動注入此裁決（效力等同規格），不需（也不可）手動轉述。${scopeLine}`;
+      return { content: [{ type: 'text' as const, text: revised }] };
     },
   );
 }

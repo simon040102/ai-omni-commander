@@ -426,3 +426,189 @@ describe('字面比對盲點修正（候選識別字推導 + API path 拆分）'
     expect(result.items[0].status).toBe('matched');
   });
 });
+
+// ════════════════════════════════════════════════════════════
+// 假 matched：只在測試碼／只在註解命中 → 降級為 missing
+//
+// 2026-09-21 一天踩三次。**假 matched 比假 missing 危險**：missing 有人回頭看，
+// 綠色的項目沒有人會回頭打開。
+// ════════════════════════════════════════════════════════════
+describe('假 matched 防線（測試碼／註解）', () => {
+  let root: string;
+
+  beforeAll(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'omni-weak-'));
+    // 只存在於測試治具的字面（實作根本沒做）
+    write(root, 'src/test/java/com/x/UploadTest.java', [
+      'class UploadTest {',
+      '  static final String MSG = "這份是掃描檔，沒有可擷取的文字";',
+      '  void t() { assertEquals(MSG, svc.reject()); }',
+      '}',
+    ].join('\n'));
+    // 只存在於註解的參數名
+    write(root, 'src/main/java/com/x/WorkerProps.java', [
+      '/**',
+      ' * 同一份 SD 的 intervalHours 則有明文固定 6 小時。',
+      ' */',
+      'public class WorkerProps {',
+      '  private int concurrency = 1;',
+      '}',
+    ].join('\n'));
+    // 產品程式碼與測試碼都有 → 必須 matched，且證據要指產品碼
+    write(root, 'src/main/java/com/x/RealSvc.java', 'public class RealSvc { private String tenantUuid; }');
+    write(root, 'src/test/java/com/x/RealSvcTest.java', 'class RealSvcTest { String tenantUuid = "t"; }');
+  });
+
+  afterAll(() => { fs.rmSync(root, { recursive: true, force: true }); });
+
+  it('★ ui_text 只在測試治具命中 → missing，不是 matched', () => {
+    const r = runComplianceEngine([
+      item({ id: 'w1', itemType: 'ui_text', content: '這份是掃描檔，沒有可擷取的文字', side: 'backend' }),
+    ], { backend: root });
+    expect(r.items[0].status).toBe('missing');
+    expect(r.items[0].note).toContain('測試碼');
+    expect(r.items[0].note).toContain('查得到字串不等於有實作');
+    // 證據仍要附上，讓人查得到是命中在哪
+    expect(r.items[0].evidence?.[0].file).toContain('UploadTest');
+  });
+
+  it('★ param 只在註解命中 → missing，不是 matched', () => {
+    const r = runComplianceEngine([
+      item({ id: 'w2', itemType: 'param', content: 'intervalHours', side: 'backend' }),
+    ], { backend: root });
+    expect(r.items[0].status).toBe('missing');
+    expect(r.items[0].note).toContain('註解');
+  });
+
+  it('★★ 產品碼有、測試碼也有 → 仍是 matched（不可誤降級）', () => {
+    const r = runComplianceEngine([
+      item({ id: 'w3', itemType: 'param', content: 'tenantUuid', side: 'backend' }),
+    ], { backend: root });
+    expect(r.items[0].status).toBe('matched');
+    // 證據只能指產品碼——指測試碼等於把治具當實作
+    expect(r.items[0].evidence?.every(e => !e.file.includes('Test'))).toBe(true);
+  });
+
+  it('★★ 產品碼裡的「行內尾註」不算註解行（那一行有程式碼）', () => {
+    write(root, 'src/main/java/com/x/Inline.java', 'private int maxAttempts = 3; // 重試上限');
+    const r = runComplianceEngine([
+      item({ id: 'w4', itemType: 'param', content: 'maxAttempts', side: 'backend' }),
+    ], { backend: root });
+    expect(r.items[0].status).toBe('matched');
+  });
+});
+
+// ════════════════════════════════════════════════════════════
+// 收集上限 vs 強弱分類：**收集必須先收滿，才能分強弱**
+//
+// 2026-09-22 迴歸：matchSubstring／matchIdentifierCandidates 原本以 MAX_EVIDENCE(2)
+// 當「收集」上限，一收滿兩筆就 return。前兩筆若落在註解，真正的宣告行根本沒被收進來
+// → strong 為空 → 整項降級 missing。
+// 實際後果：某一輪只是**補了 javadoc**，註解行因此排在宣告行前面，
+// 三個原本 matched 的常數當場變 missing——**程式只有變好，判定卻變差**。
+// 誤降級比漏判更難查：實作者會去找一個根本不存在的缺陷。
+// ════════════════════════════════════════════════════════════
+describe('★★ 註解行數多於 MAX_EVIDENCE 時，仍要看得到後面的產品碼', () => {
+  let root: string;
+
+  beforeAll(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'omni-scanlimit-'));
+    // javadoc 連續 4 行提到同一段文字，宣告行排在第 5 行之後
+    write(root, 'src/main/java/com/x/Msg.java', [
+      '/**',
+      ' * 不支援的格式：拒絕並回覆「不支援的格式」。',
+      ' * 呼叫端看到「不支援的格式」時應停止重試。',
+      ' * 「不支援的格式」不寫入稽核明細。',
+      ' * 歷史：前版以「不支援的格式」當 fallback。',
+      ' */',
+      'public final class Msg {',
+      '  public static final String UNSUPPORTED = "不支援的格式";',
+      '}',
+    ].join('\n'));
+    // 同一形狀，但比對的是識別字（param／response_field 走 matchIdentifierCandidates）
+    write(root, 'src/main/java/com/x/Props.java', [
+      '/**',
+      ' * retryLimit 代表重試上限。',
+      ' * retryLimit 為 0 時不重試。',
+      ' * retryLimit 由設定檔覆寫。',
+      ' */',
+      'public class Props {',
+      '  private int retryLimit = 3;',
+      '}',
+    ].join('\n'));
+  });
+
+  afterAll(() => { fs.rmSync(root, { recursive: true, force: true }); });
+
+  it('★★ ui_text：前 4 筆命中都在 javadoc，第 5 筆才是宣告 → 仍 matched', () => {
+    const r = runComplianceEngine([
+      item({ id: 's1', itemType: 'ui_text', content: '不支援的格式', side: 'backend' }),
+    ], { backend: root });
+    expect(r.items[0].status).toBe('matched');
+    // 回傳筆數仍受 MAX_EVIDENCE 節制（收集上限不等於回傳上限）
+    expect((r.items[0].evidence ?? []).length).toBeLessThanOrEqual(2);
+    // 證據必須是產品碼那一行，不是註解行
+    expect(r.items[0].evidence?.[0].line).toBe(8);
+  });
+
+  it('★★ param：前 3 筆命中都在 javadoc，宣告排在後面 → 仍 matched', () => {
+    const r = runComplianceEngine([
+      item({ id: 's2', itemType: 'param', content: 'retryLimit', side: 'backend' }),
+    ], { backend: root });
+    expect(r.items[0].status).toBe('matched');
+    expect(r.items[0].evidence?.[0].line).toBe(7);
+  });
+
+  it('★★ response_field 同一條路徑', () => {
+    const r = runComplianceEngine([
+      item({ id: 's3', itemType: 'response_field', content: 'retryLimit', side: 'backend' }),
+    ], { backend: root });
+    expect(r.items[0].status).toBe('matched');
+  });
+
+  it('★ 負向：全篇只有註解時仍要降級（收集放寬不可讓假 matched 回來）', () => {
+    write(root, 'src/main/java/com/x/OnlyDoc.java', [
+      '/**',
+      ' * ghostField 只在文件裡出現。',
+      ' * ghostField 沒有任何實作。',
+      ' * ghostField 三次也還是註解。',
+      ' */',
+      'public class OnlyDoc { }',
+    ].join('\n'));
+    const r = runComplianceEngine([
+      item({ id: 's4', itemType: 'param', content: 'ghostField', side: 'backend' }),
+    ], { backend: root });
+    expect(r.items[0].status).toBe('missing');
+    expect(r.items[0].note).toContain('註解');
+  });
+});
+
+
+// -- specRoots 只給證據驗證，引擎一律不掃 --------------------------------
+//
+// 為什麼要有這條測試：規格文件裡逐字寫著 checklist 的 content，一旦把規格 root
+// 併進引擎的掃描範圍，每一項都會在規格檔裡命中 → 全部假 matched（拿規格證明規格）。
+// WorkspaceRoots.specRoots 是刻意只給 evidence-validator 用的欄位，這裡釘住它。
+describe('specRoots 不進引擎掃描', () => {
+  let specRoot: string;
+
+  beforeAll(() => {
+    specRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'omni-engine-spec-'));
+    // 副檔名刻意用 .html（Axure 原型——真的會被登記在 specFolders 裡，且在引擎的掃描白名單內）：
+    // 用 .md 的話測試會因為白名單擋掉而假通過，證明不了 specRoots 沒被掃。
+    write(specRoot, 'features/F-ONLY-IN-SPEC.html', '<p>訊息：這段字只存在於規格文件裡</p>');
+  });
+
+  afterAll(() => {
+    fs.rmSync(specRoot, { recursive: true, force: true });
+  });
+
+  it('只寫在規格文件裡、程式碼沒做的文字 → 照樣 missing（不可拿規格當程式證據）', () => {
+    const result = runComplianceEngine(
+      [item({ id: 'spec-only', itemType: 'ui_text', content: '這段字只存在於規格文件裡', side: 'frontend' })],
+      { frontend: feRoot, backend: beRoot, specRoots: [specRoot] },
+    );
+    expect(result.items[0].status).toBe('missing');
+    expect(result.items[0].evidence ?? []).toEqual([]);
+  });
+});

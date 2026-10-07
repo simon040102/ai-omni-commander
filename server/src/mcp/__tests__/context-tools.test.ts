@@ -136,6 +136,9 @@ describe('context-tools', () => {
         description: '刪除是否需要確認？',
         resolutionNote: '選 B：刪除前 confirm 彈窗',
         resolvedAt: '2026-01-01 00:00:00',
+        // v22：裁決的適用範圍。未指定＝只管本任務（既有行為不變）
+        scope: 'task',
+        fromOtherTask: false,
       }]);
       expect(data.openSpecGaps).toHaveLength(1);
       expect(data.nextSteps).toContain('規格裁決');

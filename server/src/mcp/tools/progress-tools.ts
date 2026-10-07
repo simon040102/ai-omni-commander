@@ -8,6 +8,19 @@ import { getMcpDb } from '../db.js';
 import { notifyWebServer } from '../notify.js';
 import { ensureMcpAgent } from '../helpers.js';
 
+/**
+ * `agent_outputs.stream_type` 的 CHECK 允許值——**參數 enum 與執行期檢查的唯一來源**。
+ *
+ * 2026-09-21 實例：enum 宣告支援 `'milestone'`，而 DB 的 CHECK 不收。參數驗證放行、
+ * 寫入時才被資料庫擋下，呼叫端拿到一句看不懂的 SQLite 約束錯誤。
+ * **宣告支援卻存不進去，比不支援更糟**——它讓人以為自己用錯了，而其實是契約自己對不上。
+ *
+ * 這一份要與 `db/schema.ts` 的 `CHECK(stream_type IN (...))` 一字不差。
+ * 里程碑走 `report_milestone`，不在這裡。
+ */
+export const OUTPUT_STREAM_TYPES = ['text', 'tool_use', 'tool_result', 'system', 'error'] as const;
+export type OutputStreamType = typeof OUTPUT_STREAM_TYPES[number];
+
 export function registerProgressTools(server: McpServer): void {
 
   // ── report_output ─────────────────────────────────────────
@@ -17,12 +30,24 @@ export function registerProgressTools(server: McpServer): void {
     {
       taskId: z.string().describe('The task ID this output belongs to'),
       content: z.string().describe('The output content to display'),
-      outputType: z.enum(['text', 'tool_use', 'tool_result', 'system', 'milestone']).optional().describe('Output type for display styling (default: text)'),
+      // 'milestone' 曾列在這個 enum 裡，但 agent_outputs.stream_type 的 CHECK 不收它——
+      // 通過參數驗證、寫入時才被資料庫擋下，呼叫端拿到的是一句看不懂的 SQLite 約束錯誤。
+      // **宣告支援卻存不進去，比不支援更糟**：它讓人以為自己用錯了，而其實是契約自己對不上。
+      // 里程碑有獨立的 report_milestone，這裡移除；'error' 則是資料庫本來就收、只是沒開放。
+      outputType: z.enum(OUTPUT_STREAM_TYPES).optional().describe(
+        'Output type for display styling (default: text)。'
+        + '**里程碑請用 report_milestone**，不是這裡——本 enum 的值必須與 agent_outputs.stream_type 的 CHECK 一致。',
+      ),
     },
     { title: 'Report Output', readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     async ({ taskId, content, outputType }) => {
       const db = getMcpDb();
       const streamType = outputType || 'text';
+      // 防禦：呼叫端若繞過參數驗證（測試 harness、舊版客戶端），要在這裡給看得懂的錯，
+      // 不要讓它撞到 DB 的 CHECK 變成一句 SQLite 約束訊息。
+      if (!(OUTPUT_STREAM_TYPES as readonly string[]).includes(streamType)) {
+        return { content: [{ type: 'text' as const, text: `Error: outputType "${streamType}" 不在允許值內（${OUTPUT_STREAM_TYPES.join(' / ')}）。里程碑請用 report_milestone。` }], isError: true };
+      }
 
       // Get task to find project
       const task = db.prepare('SELECT project_id FROM tasks WHERE id = ?').get(taskId) as { project_id: string } | undefined;

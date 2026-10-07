@@ -18,7 +18,7 @@ import { notifyWebServer } from '../notify.js';
 import { truncateResponse, parseJson } from '../helpers.js';
 import { getFlowState, getCompletionBlockers, logTaskOutput, type FlowGateState, type RoleFlowState, type FlowRole } from '../flow-gate.js';
 import { runSpecChangeCheck, type SpecChangeTarget } from '../spec-change.js';
-import { listResolvedSpecGaps } from '../../utils/specGapResolution.js';
+import { listResolvedSpecGaps, listOtherTaskResolvedGapDigest } from '../../utils/specGapResolution.js';
 
 interface TaskRow {
   id: string;
@@ -130,6 +130,13 @@ export function registerContextTools(server: McpServer): void {
       // 讓接手 session 看到「已裁決了什麼」，不需依賴前一個 session 的對話。
       const resolvedGaps = listResolvedSpecGaps(db, taskId);
 
+      // ── 同專案、掛在別支任務、且**沒有**標成全案適用的已裁決缺口 ──
+      // 這不是裁決、不注入，只是線索：裁決是「誰遇到誰開」的，管到別人卻沒標範圍的，
+      // 對真正要照做的那一支等於不存在（2026-09-21 實例：可收格式清單與上傳根目錄
+      // 開在 KB 任務底下，匯入管線那支看不到）。工具不替人猜哪一則相關——猜錯會把
+      // 不相干的裁決當成規格；由接手的人自己判，真的相關就用 scope='project' 重下。
+      const otherTaskGapHints = listOtherTaskResolvedGapDigest(db, taskId);
+
       // ── latest verification result ──
       const lastVerification = db.prepare(`
         SELECT content, timestamp FROM agent_outputs
@@ -177,6 +184,11 @@ export function registerContextTools(server: McpServer): void {
       }
       if (resolvedGaps.length > 0) {
         steps.push(`已有 ${resolvedGaps.length} 筆規格裁決（見 resolvedGaps）——使用者已拍板，效力等同規格，實作與 AI 回對必須遵守，不可用對話轉述替代`);
+      }
+      if (otherTaskGapHints.length > 0) {
+        steps.push(`同專案另有 ${otherTaskGapHints.length} 筆已裁決缺口掛在**別支任務**底下、且未標成全案適用（見 otherTaskGapHints）——`
+          + `它們**不會**被注入本任務的派工與 AI 回對。逐筆看一眼：若其中有管到本任務的（共用基礎、命名、代碼值域、設定鍵、跨功能契約通常都是），`
+          + `用 resolve_spec_gap(gapId, resolutionNote=原文, scope="project") 重新標記，否則回對員會照原始規格判 missing`);
       }
       if (task.status === 'completed') {
         steps.push('任務已標記 completed——如需重做或修正，先與使用者確認再 update_task_status。');
@@ -228,7 +240,8 @@ export function registerContextTools(server: McpServer): void {
         recentOutputs: { total: outputsTotal, showing: recentOutputs.length, outputs: recentOutputs },
         openSpecGaps: openGaps.map(g => ({ id: g.id, category: g.category, description: g.description, createdAt: g.created_at })),
         // 使用者已拍板的規格裁決——效力等同規格條文，實作/驗證必須遵守（resolve_spec_gap 落地）
-        resolvedGaps: resolvedGaps.map(g => ({ id: g.id, category: g.category, description: g.description, resolutionNote: g.resolutionNote, resolvedAt: g.resolvedAt })),
+        resolvedGaps: resolvedGaps.map(g => ({ id: g.id, category: g.category, description: g.description, resolutionNote: g.resolutionNote, resolvedAt: g.resolvedAt, scope: g.scope, fromOtherTask: g.fromOtherTask })),
+        otherTaskGapHints,
         lastVerification: lastVerification ? { content: lastVerification.content, timestamp: lastVerification.timestamp } : null,
         dependencies: dependencies.map(d => ({ taskId: d.id, title: d.title, status: d.status })),
         projectNotes: notes.map(n => ({ id: n.id, category: n.category, content: n.content })),

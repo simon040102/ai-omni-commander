@@ -93,6 +93,36 @@ describe('flow-gated development', () => {
 
   // ── save_task_flow ────────────────────────────────────────
   describe('save_task_flow', () => {
+    // role 省略時落到 default，而閘門檢查的是任務實際需要的槽位——2026-09-21 實例：
+    // 實作、測試、驗收全部做完，才在 update_task_status 那一步被擋下，然後得把兩張圖
+    // 原封不動再存一次、兩道閘再跑一次。錯的成本全集中在最後一刻。
+    it('★ 單一角色任務省略 role 時，自動存進該角色槽位（不落 default）', async () => {
+      setFlowState(testDb, 'task-1', { specExpected: false, roles: { backend: { required: true, gateBFailures: 0 } } });
+      const r = await callTool(server, 'save_task_flow', { taskId: 'task-1', flowType: 'plan', mermaidContent: 'flowchart TD; A-->B' });
+      expect(r.isError).toBeUndefined();
+      expect(r.content[0].text).toContain('role=backend');
+      const st = JSON.parse((testDb.prepare('SELECT flow_state FROM tasks WHERE id = ?').get('task-1') as { flow_state: string }).flow_state);
+      expect(st.roles.backend.plan).toBeDefined();
+      expect(st.roles.default?.plan).toBeUndefined();
+    });
+
+    // ★ 負向：雙角色任務自動選會選錯，而選錯槽位比落 default 更難查
+    //   （圖存進去了、閘也過了，只是過在錯的那一半）
+    it('★ 雙角色任務省略 role 時仍落 default，不自動猜', async () => {
+      setFlowState(testDb, 'task-1', { specExpected: false, roles: { frontend: { required: true, gateBFailures: 0 }, backend: { required: true, gateBFailures: 0 } } });
+      await callTool(server, 'save_task_flow', { taskId: 'task-1', flowType: 'plan', mermaidContent: 'flowchart TD; A-->B' });
+      const st = JSON.parse((testDb.prepare('SELECT flow_state FROM tasks WHERE id = ?').get('task-1') as { flow_state: string }).flow_state);
+      expect(st.roles.default.plan).toBeDefined();
+      expect(st.roles.backend.plan).toBeUndefined();
+    });
+
+    // ★ 負向：明確指定就照指定的來，不可被自動選蓋掉
+    it('★ 明確指定 role 時不受自動選影響', async () => {
+      setFlowState(testDb, 'task-1', { specExpected: false, roles: { backend: { required: true, gateBFailures: 0 } } });
+      await callTool(server, 'save_task_flow', { taskId: 'task-1', flowType: 'plan', role: 'frontend', mermaidContent: 'flowchart TD; A-->B' });
+      const st = JSON.parse((testDb.prepare('SELECT flow_state FROM tasks WHERE id = ?').get('task-1') as { flow_state: string }).flow_state);
+      expect(st.roles.frontend.plan).toBeDefined();
+    });
     it('saves spec flow with legacy-compatible file pair and updates state', async () => {
       const result = await callTool(server, 'save_task_flow', {
         taskId: 'task-1', flowType: 'spec', mermaidContent: MMD, filename: 'SPEC_SA.docx',

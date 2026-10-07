@@ -5,6 +5,7 @@ import {
   validateResolutionNote,
   RESOLUTION_NOTE_MIN_LENGTH,
   listResolvedSpecGaps,
+  listOtherTaskResolvedGapDigest,
   summarizeGapText,
   formatResolutionLine,
   buildResolutionLines,
@@ -66,11 +67,11 @@ describe('listResolvedSpecGaps（E2 唯一來源 SQL）', () => {
     db.prepare(`INSERT INTO tasks (id, project_id, title, label, task_type) VALUES ('task-1', 'proj-1', 'WA05', 'frontend', 'feature')`).run();
   });
 
-  function insertGap(id: string, opts: { status?: string; note?: string | null; resolvedAt?: string | null; taskId?: string } = {}) {
+  function insertGap(id: string, opts: { status?: string; note?: string | null; resolvedAt?: string | null; taskId?: string; scope?: string; projectId?: string } = {}) {
     db.prepare(`
-      INSERT INTO spec_gaps (id, task_id, project_id, category, description, status, resolution_note, resolved_at)
-      VALUES (?, ?, 'proj-1', 'logic_unclear', ?, ?, ?, ?)
-    `).run(id, opts.taskId ?? 'task-1', `desc-${id}`, opts.status ?? 'resolved', opts.note ?? null, opts.resolvedAt ?? null);
+      INSERT INTO spec_gaps (id, task_id, project_id, category, description, status, resolution_note, resolved_at, scope)
+      VALUES (?, ?, ?, 'logic_unclear', ?, ?, ?, ?, ?)
+    `).run(id, opts.taskId ?? 'task-1', opts.projectId ?? 'proj-1', `desc-${id}`, opts.status ?? 'resolved', opts.note ?? null, opts.resolvedAt ?? null, opts.scope ?? 'task');
   }
 
   it('returns only resolved gaps with a non-empty note, ordered by resolved_at ASC', () => {
@@ -93,10 +94,93 @@ describe('listResolvedSpecGaps（E2 唯一來源 SQL）', () => {
 
     expect(listResolvedSpecGaps(db, 'task-1').map(g => g.id)).toEqual(['g-1']);
   });
+
+  // ══════════════════════════════════════════════════════════
+  // scope='project'：裁決是「誰遇到誰開」的，管的卻往往是別人
+  //
+  // 2026-09-21 實例：「可收格式清單」與「上傳根目錄設定鍵」開在 KB 任務底下，
+  // 真正要照做的是「匯入管線」那一支——而它的 resolvedGaps 是空的。implementer
+  // 自己 list_spec_gaps 撈出來才照做，但**獨立回對員不會這樣做**，會照原始規格
+  // 判 missing，把已經照裁決做對的東西判成沒做。
+  // ══════════════════════════════════════════════════════════
+  describe('scope（跨任務適用）', () => {
+    beforeEach(() => {
+      db.prepare(`INSERT INTO tasks (id, project_id, title, label, task_type) VALUES ('task-2', 'proj-1', '匯入管線', 'backend', 'feature')`).run();
+      db.prepare(`INSERT INTO projects (id, name, working_dir) VALUES ('proj-2', 'Other', '/tmp2')`).run();
+      db.prepare(`INSERT INTO tasks (id, project_id, title, label, task_type) VALUES ('task-x', 'proj-2', '別專案', 'backend', 'feature')`).run();
+    });
+
+    it('別支任務標 project 的裁決會注入，且標記 fromOtherTask', () => {
+      insertGap('g-mine', { note: '我自己的裁決', resolvedAt: '2026-01-02 00:00:00' });
+      insertGap('g-shared', { note: '上傳根目錄走 Spring 屬性', resolvedAt: '2026-01-01 00:00:00', taskId: 'task-2', scope: 'project' });
+
+      const gaps = listResolvedSpecGaps(db, 'task-1');
+      expect(gaps.map(g => g.id).sort()).toEqual(['g-mine', 'g-shared']);
+      expect(gaps.find(g => g.id === 'g-shared')).toMatchObject({ scope: 'project', fromOtherTask: true });
+      expect(gaps.find(g => g.id === 'g-mine')).toMatchObject({ scope: 'task', fromOtherTask: false });
+    });
+
+    it('★ 別支任務標 task 的裁決不可注入（否則不相干的裁決會被當成規格）', () => {
+      insertGap('g-theirs', { note: '只管他們那一支', resolvedAt: '2026-01-01 00:00:00', taskId: 'task-2', scope: 'task' });
+      expect(listResolvedSpecGaps(db, 'task-1')).toEqual([]);
+    });
+
+    it('★ 別專案標 project 的裁決不可跨專案注入', () => {
+      insertGap('g-other-proj', { note: '別的專案的全案裁決', resolvedAt: '2026-01-01 00:00:00', taskId: 'task-x', projectId: 'proj-2', scope: 'project' });
+      expect(listResolvedSpecGaps(db, 'task-1')).toEqual([]);
+    });
+
+    it('自己任務的裁決排在前面（先看自己的，再看全案的）', () => {
+      insertGap('g-shared', { note: '全案', resolvedAt: '2026-01-01 00:00:00', taskId: 'task-2', scope: 'project' });
+      insertGap('g-mine', { note: '自己的', resolvedAt: '2026-01-09 00:00:00' });
+      expect(listResolvedSpecGaps(db, 'task-1').map(g => g.id)).toEqual(['g-mine', 'g-shared']);
+    });
+
+    // v22 遷移用 `ADD COLUMN scope TEXT NOT NULL DEFAULT 'task'`，SQLite 會把既有列
+    // 回填成 'task'，所以 NULL 在實務上不會出現（第一版測試假設會，是錯的）。
+    // 真正該釘的是：**沒帶 scope 建立的缺口仍然照常注入**——這是 report_spec_gap 的
+    // 實際路徑，加了這一欄不可以讓既有裁決從注入清單裡消失。
+    it('★ 建立時未指定 scope 的缺口視同 task，且照常注入（加欄位不得讓既有裁決消失）', () => {
+      db.prepare(`
+        INSERT INTO spec_gaps (id, task_id, project_id, category, description, status, resolution_note, resolved_at)
+        VALUES ('g-nocol', 'task-1', 'proj-1', 'logic_unclear', 'desc', 'resolved', '舊裁決', '2026-01-01 00:00:00')
+      `).run();
+      const gaps = listResolvedSpecGaps(db, 'task-1');
+      expect(gaps.map(g => g.id)).toEqual(['g-nocol']);
+      expect(gaps[0].scope).toBe('task');
+      expect(gaps[0].fromOtherTask).toBe(false);
+    });
+  });
+
+  describe('listOtherTaskResolvedGapDigest（線索，不是裁決）', () => {
+    beforeEach(() => {
+      db.prepare(`INSERT INTO tasks (id, project_id, title, label, task_type) VALUES ('task-2', 'proj-1', '匯入管線', 'backend', 'feature')`).run();
+    });
+
+    it('列出同專案、別支任務、未標 project 的已裁決缺口', () => {
+      insertGap('g-hint', { note: '可收格式清單照舊碼', resolvedAt: '2026-01-01 00:00:00', taskId: 'task-2', scope: 'task' });
+      const hints = listOtherTaskResolvedGapDigest(db, 'task-1');
+      expect(hints).toHaveLength(1);
+      expect(hints[0]).toMatchObject({ id: 'g-hint', taskId: 'task-2', taskTitle: '匯入管線' });
+    });
+
+    it('★ 已經標成 project 的不再出現在線索裡（它已經被注入了，再列一次會讓人以為還沒處理）', () => {
+      insertGap('g-done', { note: '已標全案', resolvedAt: '2026-01-01 00:00:00', taskId: 'task-2', scope: 'project' });
+      expect(listOtherTaskResolvedGapDigest(db, 'task-1')).toEqual([]);
+    });
+
+    it('★ 自己任務的裁決不出現在線索裡（那些已經在 resolvedGaps）', () => {
+      insertGap('g-mine', { note: '自己的裁決', resolvedAt: '2026-01-01 00:00:00' });
+      expect(listOtherTaskResolvedGapDigest(db, 'task-1')).toEqual([]);
+    });
+  });
 });
 
 describe('formatting helpers', () => {
-  const gap = (id: string, desc: string, note: string) => ({ id, category: 'other', description: desc, resolutionNote: note, resolvedAt: null });
+  const gap = (id: string, desc: string, note: string, fromOtherTask = false) => ({
+    id, category: 'other', description: desc, resolutionNote: note, resolvedAt: null,
+    scope: (fromOtherTask ? 'project' : 'task') as 'task' | 'project', fromOtherTask,
+  });
 
   it('summarizeGapText collapses whitespace and truncates', () => {
     expect(summarizeGapText('a\n b\t c')).toBe('a b c');
@@ -108,6 +192,19 @@ describe('formatting helpers', () => {
     expect(formatResolutionLine(gap('g', '刪除是否需要確認？', '選 B：刪除前 confirm 彈窗'))).toBe(
       '- Q: 刪除是否需要確認？ → 裁決: 選 B：刪除前 confirm 彈窗',
     );
+  });
+
+  // 從別支任務帶過來的裁決要標出處：不標的話，讀的人看到一條與自己功能無關的裁決
+  // 會以為派錯了而忽略它——那正是這個機制要防的事。
+  it('formatResolutionLine 標示「由別支任務裁決、全案適用」', () => {
+    const line = formatResolutionLine(gap('g', '上傳根目錄設定鍵？', '走 Spring 屬性，不進清冊', true));
+    expect(line).toContain('[全案適用，由別支任務裁決]');
+    expect(line).toContain('走 Spring 屬性');
+  });
+
+  // ★ 負向：自己任務的裁決不可被標成別人的（標了會讓人以為不是給自己的）
+  it('★ 自己任務的裁決不帶「別支任務」前綴', () => {
+    expect(formatResolutionLine(gap('g', 'q', 'a'))).not.toContain('別支任務');
   });
 
   it('buildResolutionLines honors the char budget and flags truncation', () => {
