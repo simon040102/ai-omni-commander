@@ -24,6 +24,18 @@ import { parseTestCommands, getRequiredUnitTestItems, findLatestUnitTestVerifica
 import { getStalledHours, DEFAULT_STALE_THRESHOLD_HOURS } from '../stale-tasks.js';
 import { summarizeGapText } from '../../utils/specGapResolution.js';
 
+/** update_task_status 完成閘門的代號（skipGates 用）。順序同閘門判斷順序。 */
+const COMPLETION_GATE_KEYS = ['flow', 'checklist', 'ai_review', 'unit', 'plan', 'verify'] as const;
+type CompletionGateKey = typeof COMPLETION_GATE_KEYS[number];
+const COMPLETION_GATE_LABELS: Record<CompletionGateKey, string> = {
+  flow: '完工閘（Flow-Gated）',
+  checklist: '檢查表',
+  ai_review: 'AI 規格回對',
+  unit: '單元測試',
+  plan: '執行計畫',
+  verify: '驗收結果',
+};
+
 /** Asana 附件上限（官方 100MB） */
 const ASANA_ATTACHMENT_MAX_BYTES = 100 * 1024 * 1024;
 /** 上傳比一般 API 慢，另給較長的 timeout */
@@ -436,23 +448,36 @@ ${flowGateSection}
   // ── update_task_status ────────────────────────────────────
   server.tool(
     'update_task_status',
-    'Update the status of a task. Use this to mark tasks as in_progress, completed, or failed. "completed" is guarded by six gates: (1) 完工閘（實作邏輯對齊，原 gate B）for flow-gated tasks; (2) checklist must exist for tasks with a track; (3) latest AI compliance review (save_compliance_review) must have missing=0; (4) projects with frontendTestCommand/backendTestCommand require a passing "單元測試全數通過" verification report for the task\'s side(s); (5) dev tasks (frontend/backend/fullstack) must have an execution plan or dispatch record (get_execution_plan track / [TRACK] / [DISPATCH] via save_task_dispatch); (6) no verification item may have FAIL as its latest report_verification_result. skipFlowGate=true (with skipReason, only with explicit user approval) overrides all these gates.',
+    'Update the status of a task. Use this to mark tasks as in_progress, completed, or failed. "completed" is guarded by six gates: (1) 完工閘（實作邏輯對齊，原 gate B）for flow-gated tasks; (2) checklist must exist for tasks with a track; (3) latest AI compliance review (save_compliance_review) must have missing=0; (4) projects with frontendTestCommand/backendTestCommand require a passing "單元測試全數通過" verification report for the task\'s side(s); (5) dev tasks (frontend/backend/fullstack) must have an execution plan or dispatch record (get_execution_plan track / [TRACK] / [DISPATCH] via save_task_dispatch); (6) no verification item may have FAIL as its latest report_verification_result. To skip gates (ONLY with explicit user approval, with skipReason, logged as [SKIP]): skipGates=[...] skips only the listed gates (flow/checklist/ai_review/unit/plan/verify) — prefer this; skipFlowGate=true skips ALL failing gates at once.',
     {
       taskId: z.string().describe('The task ID'),
       status: z.enum(['in_progress', 'completed', 'failed']).describe('New task status'),
       summary: z.string().optional().describe('Optional result summary (recommended for completed/failed)'),
-      skipFlowGate: z.boolean().optional().describe('Skip the flow-gate completion check. ONLY with explicit user approval; requires skipReason and is logged as [SKIP].'),
-      skipReason: z.string().optional().describe('Reason for skipping the flow gate (required when skipFlowGate=true)'),
+      skipGates: z.array(z.enum(COMPLETION_GATE_KEYS)).optional().describe('只跳過列出的閘（flow=完工閘, checklist=檢查表, ai_review=AI 規格回對, unit=單元測試, plan=執行計畫, verify=驗收結果）；其他沒過的閘照擋。限使用者明確同意跳過**這幾道**時使用，需 skipReason，記 [SKIP]。'),
+      skipFlowGate: z.boolean().optional().describe('跳過**所有**沒過的閘（舊參數）。使用者只同意跳特定閘時改用 skipGates。限使用者明確同意，需 skipReason，記 [SKIP]。'),
+      skipReason: z.string().optional().describe('Reason the user approved skipping (required with skipGates / skipFlowGate)'),
     },
     { title: 'Update Task Status', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    async ({ taskId, status, summary, skipFlowGate, skipReason }) => {
+    async ({ taskId, status, summary, skipGates, skipFlowGate, skipReason }) => {
       const db = getMcpDb();
+
+      // 跳過紀錄先排隊、真的結案才寫——否則「跳了 A、被 B 擋下」會留下一筆沒結案的 [SKIP]
+      const pendingSkips: Array<{ gate: CompletionGateKey; line: string; apply?: () => void }> = [];
+      const NO_SKIP_REASON = 'Error: 跳過閘門（skipGates / skipFlowGate）需要 skipReason（使用者同意跳過閘門的原因）。';
+      const trySkip = (gate: CompletionGateKey, auditText: string, apply?: () => void): 'skip' | 'block' | 'no_reason' => {
+        if (!skipFlowGate && !skipGates?.includes(gate)) return 'block';
+        if (!skipReason?.trim()) return 'no_reason';
+        pendingSkips.push({ gate, line: `[SKIP] ${auditText}：${skipReason.trim()}`, apply });
+        return 'skip';
+      };
+      const skipHint = (gate: CompletionGateKey) =>
+        `若使用者明確同意跳過**這一道**閘，改用 skipGates=["${gate}"] + skipReason 重新呼叫（會記錄 [SKIP]；其他沒過的閘仍會擋）。`;
 
       // Read → validate → write runs inside an IMMEDIATE transaction so a
       // concurrent process cannot interleave (TOCTOU). Notify HTTP calls stay outside.
       type TxnResult =
         | { kind: 'error'; message: string }
-        | { kind: 'ok'; projectId: string; stoppedAgent: boolean };
+        | { kind: 'ok'; projectId: string; stoppedAgent: boolean; skippedGates: CompletionGateKey[] };
 
       const txn = db.transaction((): TxnResult => {
         const task = db.prepare('SELECT id, project_id, status, label, flow_required FROM tasks WHERE id = ?').get(taskId) as { id: string; project_id: string; status: string; label: string; flow_required: number | null } | undefined;
@@ -479,15 +504,13 @@ ${flowGateSection}
           const flowState = getFlowState(db, taskId);
           const blockers = getCompletionBlockers(flowState);
           if (blockers.length > 0) {
-            if (skipFlowGate) {
-              if (!skipReason || !skipReason.trim()) {
-                return { kind: 'error', message: 'Error: skipFlowGate=true 需要 skipReason（使用者同意跳過閘門的原因）。' };
-              }
+            const sk = trySkip('flow', '使用者跳過 Flow-Gated 閘門檢查', () => {
               mutateFlowState(db, taskId, (s) => {
-                s.skipped = { reason: skipReason.trim(), at: new Date().toISOString() };
+                s.skipped = { reason: skipReason!.trim(), at: new Date().toISOString() };
               });
-              logTaskOutput(db, taskId, task.project_id, `[SKIP] 使用者跳過 Flow-Gated 閘門檢查：${skipReason.trim()}`);
-            } else {
+            });
+            if (sk === 'no_reason') return { kind: 'error', message: NO_SKIP_REASON };
+            if (sk === 'block') {
               const lines = blockers.map(b => `- role=${b.role}: ${b.missing}`).join('\n');
               return {
                 kind: 'error',
@@ -495,7 +518,7 @@ ${flowGateSection}
 ${lines}
 
 請依序補完（save_task_flow → report_flow_check），${GATE_B_LABEL}通過並跑完測試後再結案。
-若使用者明確同意跳過閘門，改用 skipFlowGate=true + skipReason 重新呼叫。`,
+${skipHint('flow')}`,
               };
             }
           }
@@ -519,18 +542,15 @@ ${lines}
           // save_spec_checklist (輕的是工序，不是標準). Legacy tasks (no track) unaffected.
           const gateTrack = getFlowState(db, taskId)?.track;
           if (checklistCount === 0 && gateTrack) {
-            if (skipFlowGate) {
-              if (!skipReason || !skipReason.trim()) {
-                return { kind: 'error', message: 'Error: skipFlowGate=true 需要 skipReason（使用者同意跳過閘門的原因）。' };
-              }
-              logTaskOutput(db, taskId, task.project_id, `[SKIP] 使用者跳過規格回對閘門（未建立檢查表）：${skipReason.trim()}`);
-            } else {
+            const sk = trySkip('checklist', '使用者跳過規格回對閘門（未建立檢查表）');
+            if (sk === 'no_reason') return { kind: 'error', message: NO_SKIP_REASON };
+            if (sk === 'block') {
               return {
                 kind: 'error',
                 message: `Error: 此任務走 ${gateTrack} 軌但尚未建立規格檢查表，不可標記 completed。
 請先呼叫 save_spec_checklist(taskId="${taskId}", items=[...])（${gateTrack === 'light' ? 'light 軌：從原始 BUG 內容抽「修復後預期行為」' : '從 SA/SD 規格逐字抽取'}），
 再執行 AI 規格回對（get_compliance_review_plan → save_compliance_review），missing=0 後結案。
-若使用者明確同意跳過，改用 skipFlowGate=true + skipReason 重新呼叫（會記錄 [SKIP]）。`,
+${skipHint('checklist')}`,
               };
             }
           }
@@ -547,13 +567,10 @@ ${lines}
             ).get(taskId, run.run_at) as { c: number }).c : 0;
 
             const complianceBlocked = !run || run.missing > 0 || staleCount > 0;
-            if (complianceBlocked) {
-              if (skipFlowGate) {
-                if (!skipReason || !skipReason.trim()) {
-                  return { kind: 'error', message: 'Error: skipFlowGate=true 需要 skipReason（使用者同意跳過閘門的原因）。' };
-                }
-                logTaskOutput(db, taskId, task.project_id, `[SKIP] 使用者跳過規格回對閘門（AI 回對）：${skipReason.trim()}`);
-              } else if (run && run.missing === 0 && staleCount > 0) {
+            const sk = complianceBlocked ? trySkip('ai_review', '使用者跳過規格回對閘門（AI 回對）') : 'skip';
+            if (sk === 'no_reason') return { kind: 'error', message: NO_SKIP_REASON };
+            if (sk === 'block') {
+              if (run && run.missing === 0 && staleCount > 0) {
                 return {
                   kind: 'error',
                   message: `Error: 規格檢查表在最後一次 AI 規格回對之後新增了 ${staleCount} 項（尚未驗證），不可標記 completed。
@@ -565,7 +582,7 @@ ${lines}
                   message: `Error: 此任務有 ${checklistCount} 項規格檢查表項目，但尚未執行 AI 規格回對，不可標記 completed。
 請先執行 AI 規格回對：呼叫 get_compliance_review_plan(taskId="${taskId}") 取得派工計畫，由 orchestrator 派**獨立 reviewer** 逐項驗證後 save_compliance_review，missing 為 0 後再結案。
 （run_spec_compliance 只是程式預檢，不解鎖此閘門。）
-若使用者明確同意跳過，改用 skipFlowGate=true + skipReason 重新呼叫（會記錄 [SKIP]）。`,
+${skipHint('ai_review')}`,
                 };
               } else {
                 const missingItems = parseJson<Array<{ content?: string; itemType?: string; note?: string; status?: string }>>(run.results_json, [])
@@ -579,7 +596,7 @@ ${lines}
 ${lines.join('\n')}${more}
 
 修正後**重新執行 AI 規格回對**（get_compliance_review_plan(taskId="${taskId}") → 獨立 reviewer → save_compliance_review），或對有正當理由的項目用 waive_checklist_item(itemId, reason) 豁免後重新回對。
-若使用者明確同意跳過閘門，改用 skipFlowGate=true + skipReason 重新呼叫（會記錄 [SKIP]）。`,
+${skipHint('ai_review')}`,
                 };
               }
             }
@@ -606,19 +623,16 @@ ${lines.join('\n')}${more}
             }
           }
           if (unitFailures.length > 0) {
-            if (skipFlowGate) {
-              if (!skipReason || !skipReason.trim()) {
-                return { kind: 'error', message: 'Error: skipFlowGate=true 需要 skipReason（使用者同意跳過閘門的原因）。' };
-              }
-              logTaskOutput(db, taskId, task.project_id, `[SKIP] 使用者跳過單元測試閘門：${skipReason.trim()}`);
-            } else {
+            const sk = trySkip('unit', '使用者跳過單元測試閘門');
+            if (sk === 'no_reason') return { kind: 'error', message: NO_SKIP_REASON };
+            if (sk === 'block') {
               return {
                 kind: 'error',
                 message: `Error: 單元測試閘門未通過，不可標記 completed。
 ${unitFailures.join('\n')}
 
 （提醒：既有的**無關失敗**不卡你——${UNRELATED_TEST_FAILURE_RULE}，並建議使用者執行 get_test_baseline_plan 做基線修復。）
-若使用者明確同意跳過閘門，改用 skipFlowGate=true + skipReason 重新呼叫（會記錄 [SKIP]）。`,
+${skipHint('unit')}`,
               };
             }
           }
@@ -639,16 +653,13 @@ ${unitFailures.join('\n')}
             "SELECT 1 FROM agent_outputs WHERE task_id = ? AND stream_type = 'system' AND (content LIKE '[TRACK]%' OR content LIKE '[DISPATCH]%') LIMIT 1"
           ).get(taskId);
           if (!hasAuditLine) {
-            if (skipFlowGate) {
-              if (!skipReason || !skipReason.trim()) {
-                return { kind: 'error', message: 'Error: skipFlowGate=true 需要 skipReason（使用者同意跳過閘門的原因）。' };
-              }
-              logTaskOutput(db, taskId, task.project_id, `[SKIP] 使用者跳過執行計畫閘門（無執行計畫/派工記錄）：${skipReason.trim()}`);
-            } else {
+            const sk = trySkip('plan', '使用者跳過執行計畫閘門（無執行計畫/派工記錄）');
+            if (sk === 'no_reason') return { kind: 'error', message: NO_SKIP_REASON };
+            if (sk === 'block') {
               return {
                 kind: 'error',
                 message: `Error: 此任務從未取得執行計畫或派工記錄——開發任務必須先 get_execution_plan(taskId) 取得流程（或由 orchestrator save_task_dispatch 存派工快照）再開工。
-若使用者明確同意跳過閘門，改用 skipFlowGate=true + skipReason 重新呼叫（會記錄 [SKIP]）。`,
+${skipHint('plan')}`,
               };
             }
           }
@@ -666,22 +677,25 @@ ${unitFailures.join('\n')}
           }
           const failedItems = [...latestByItem.entries()].filter(([, passed]) => !passed).map(([item]) => item);
           if (failedItems.length > 0) {
-            if (skipFlowGate) {
-              if (!skipReason || !skipReason.trim()) {
-                return { kind: 'error', message: 'Error: skipFlowGate=true 需要 skipReason（使用者同意跳過閘門的原因）。' };
-              }
-              logTaskOutput(db, taskId, task.project_id, `[SKIP] 使用者跳過驗收結果閘門（有 FAIL 驗收項）：${skipReason.trim()}`);
-            } else {
+            const sk = trySkip('verify', '使用者跳過驗收結果閘門（有 FAIL 驗收項）');
+            if (sk === 'no_reason') return { kind: 'error', message: NO_SKIP_REASON };
+            if (sk === 'block') {
               return {
                 kind: 'error',
                 message: `Error: 驗收結果閘門未通過，不可標記 completed。以下驗收項最新一筆回報為 FAIL：
 ${failedItems.map(i => `- ${i}`).join('\n')}
 
 修復後重跑並用 report_verification_result(taskId="${taskId}", results=[{item, passed:true, note}]) 回報 passed 再結案。
-若使用者明確同意跳過閘門，改用 skipFlowGate=true + skipReason 重新呼叫（會記錄 [SKIP]）。`,
+${skipHint('verify')}`,
               };
             }
           }
+        }
+
+        // 所有閘都過了（或經同意跳過）→ 這時才落地跳過紀錄
+        for (const s of pendingSkips) {
+          s.apply?.();
+          logTaskOutput(db, taskId, task.project_id, s.line);
         }
 
         const sets = [`status = ?`, `updated_at = datetime('now')`];
@@ -704,7 +718,7 @@ ${failedItems.map(i => `- ${i}`).join('\n')}
           stoppedAgent = agentResult.changes > 0;
         }
 
-        return { kind: 'ok', projectId: task.project_id, stoppedAgent };
+        return { kind: 'ok', projectId: task.project_id, stoppedAgent, skippedGates: pendingSkips.map(s => s.gate) };
       });
 
       const result = txn.immediate();
@@ -780,7 +794,17 @@ ${missing.map(i => `- ${i.id}：${i.item}`).join('\n')}
         }
       }
 
-      return { content: [{ type: 'text' as const, text: `Task ${taskId} status updated to "${status}"${notifyWarning}${openGapsReminder}${verificationReminder}` }] };
+      // 明列這次跳過了哪幾道——skipFlowGate=true 會連帶跳掉使用者沒提到的閘，不能讓它無聲發生
+      let skipNotice = '';
+      if (result.skippedGates.length > 0) {
+        const names = result.skippedGates.map(g => COMPLETION_GATE_LABELS[g]).join('、');
+        skipNotice = `\n\n⚠ 本次以 [SKIP] 跳過的閘門：${names}。請向使用者確認這些都在他同意的範圍內。`;
+        if (skipFlowGate && result.skippedGates.length > 1) {
+          skipNotice += `\n（skipFlowGate=true 會跳過**所有**沒過的閘；使用者只同意跳特定閘時，改用 skipGates=[...]。）`;
+        }
+      }
+
+      return { content: [{ type: 'text' as const, text: `Task ${taskId} status updated to "${status}"${notifyWarning}${skipNotice}${openGapsReminder}${verificationReminder}` }] };
     },
   );
 
@@ -858,7 +882,11 @@ ${missing.map(i => `- ${i.id}：${i.item}`).join('\n')}
       if (!resolvedGid && taskId) {
         const row = db.prepare('SELECT source_ref FROM tasks WHERE id = ?').get(taskId) as { source_ref: string | null } | undefined;
         if (!row) return { content: [{ type: 'text' as const, text: `Error: Task "${taskId}" not found` }], isError: true };
-        if (!row.source_ref) return { content: [{ type: 'text' as const, text: `Error: Task "${taskId}" has no Asana sourceRef (not synced from Asana)` }], isError: true };
+        // 派工 prompt 對 bug／light 軌一律叫 agent 先抓留言，並約定「非 Asana 任務會回空」——
+        // 回錯誤會讓 agent 以為環境壞了去排查，所以照約定回空結果
+        if (!row.source_ref) {
+          return { content: [{ type: 'text' as const, text: JSON.stringify({ taskGid: null, count: 0, comments: [], note: '此任務不是從 Asana 同步的，沒有 Asana 留言（屬正常）。' }) }] };
+        }
         resolvedGid = row.source_ref;
       }
       if (!resolvedGid) {

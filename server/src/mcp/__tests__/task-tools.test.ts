@@ -67,6 +67,29 @@ describe('task-tools', () => {
     registerTaskTools(server);
   });
 
+  describe('get_asana_task_comments — 非 Asana 任務', () => {
+    // 派工 prompt（bug／light 軌）一律叫 agent 先抓 Asana 留言，並寫明「非 Asana 任務會回空，屬正常」。
+    // 回錯誤會讓 agent 以為環境壞了去排查（實測 48 次無效呼叫）——照 prompt 的約定回空。
+    it('任務沒有 Asana 來源 → 回空留言（不是錯誤），而且不打 Asana API', async () => {
+      seedProject(testDb);
+      seedTask(testDb);   // source_ref = null
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+      const result = await callTool(server, 'get_asana_task_comments', { taskId: 'task-1' });
+      expect(result.isError).toBeFalsy();
+      const data = JSON.parse(result.content[0].text);
+      expect(data.count).toBe(0);
+      expect(data.comments).toEqual([]);
+      expect(data.note).toContain('不是從 Asana 同步');
+      expect(fetchSpy).not.toHaveBeenCalled();
+      fetchSpy.mockRestore();
+    });
+
+    it('任務不存在 → 仍然是錯誤（那是呼叫端給錯 id，不是「沒有留言」）', async () => {
+      const result = await callTool(server, 'get_asana_task_comments', { taskId: 'no-such' });
+      expect(result.isError).toBe(true);
+    });
+  });
+
   describe('get_task', () => {
     it('returns task details with project info', async () => {
       seedProject(testDb);
@@ -975,6 +998,89 @@ describe('task-tools', () => {
 
       const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
       expect(result.isError).toBeUndefined();
+    });
+  });
+
+  // 一個 skipFlowGate=true 會把所有沒過的閘一起跳掉——實際發生過「使用者只同意跳執行計畫閘，
+  // 單元測試閘也被連帶跳掉」。skipGates 只跳列出的閘，其他沒過的照擋。
+  describe('update_task_status skipGates（只跳指定的閘）', () => {
+    // 同時讓「單元測試閘」與「執行計畫閘」都不過：設了 backendTestCommand 但沒回報單測、也沒有派工記錄
+    function startTwoGateTask() {
+      seedProject(testDb);
+      testDb.prepare("UPDATE projects SET config_json = ? WHERE id = 'proj-1'").run(JSON.stringify({ backendTestCommand: 'mvn test' }));
+      seedTask(testDb, 'task-1', 'proj-1', 'backend');
+      testDb.prepare("UPDATE tasks SET status = 'in_progress' WHERE id = 'task-1'").run();
+    }
+    const skipRows = () => testDb.prepare("SELECT content FROM agent_outputs WHERE task_id = 'task-1' AND content LIKE '[SKIP]%'").all() as Array<{ content: string }>;
+    const statusOf = () => (testDb.prepare("SELECT status FROM tasks WHERE id = 'task-1'").get() as { status: string }).status;
+
+    it('只跳單元測試閘 → 執行計畫閘照擋；任務沒結案，也不留任何 [SKIP]（沒結案就不該有跳過紀錄）', async () => {
+      startTwoGateTask();
+      const result = await callTool(server, 'update_task_status', {
+        taskId: 'task-1', status: 'completed', skipGates: ['unit'], skipReason: '使用者同意只跑相關測試，全綠',
+      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('執行計畫');
+      expect(statusOf()).toBe('in_progress');
+      expect(skipRows()).toEqual([]);
+    });
+
+    it('兩道都列 → 結案；兩道各留一筆 [SKIP]，回應列出跳過了哪些閘', async () => {
+      startTwoGateTask();
+      const result = await callTool(server, 'update_task_status', {
+        taskId: 'task-1', status: 'completed', skipGates: ['unit', 'plan'], skipReason: '使用者同意：口頭派工緊急修復，只跑相關測試',
+      });
+      expect(result.isError).toBeUndefined();
+      expect(statusOf()).toBe('completed');
+      const rows = skipRows().map(r => r.content);
+      expect(rows.some(c => c.includes('[SKIP] 使用者跳過單元測試閘門'))).toBe(true);
+      expect(rows.some(c => c.includes('[SKIP] 使用者跳過執行計畫閘門'))).toBe(true);
+      expect(result.content[0].text).toMatch(/跳過.*單元測試.*執行計畫|跳過.*執行計畫.*單元測試/);
+    });
+
+    it('列了一道其實沒擋的閘 → 不留那道的 [SKIP]（只記真的被跳過的）', async () => {
+      startTwoGateTask();
+      const result = await callTool(server, 'update_task_status', {
+        taskId: 'task-1', status: 'completed', skipGates: ['unit', 'plan', 'verify'], skipReason: '使用者同意：口頭派工緊急修復，只跑相關測試',
+      });
+      expect(result.isError).toBeUndefined();
+      expect(skipRows().some(r => r.content.includes('驗收結果閘門'))).toBe(false);
+    });
+
+    it('skipGates 沒帶 skipReason → 拒絕', async () => {
+      startTwoGateTask();
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed', skipGates: ['unit', 'plan'] });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('skipReason');
+      expect(statusOf()).toBe('in_progress');
+    });
+
+    it('閘門擋下時，訊息教的是 skipGates=["該閘"]，不是全跳的 skipFlowGate', async () => {
+      startTwoGateTask();
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('skipGates=["unit"]');
+    });
+
+    it('舊的 skipFlowGate=true 仍全跳（相容），但回應明列這次連帶跳過的每一道閘', async () => {
+      startTwoGateTask();
+      const result = await callTool(server, 'update_task_status', {
+        taskId: 'task-1', status: 'completed', skipFlowGate: true, skipReason: '使用者同意全部跳過',
+      });
+      expect(result.isError).toBeUndefined();
+      const text = result.content[0].text;
+      expect(text).toContain('單元測試');
+      expect(text).toContain('執行計畫');
+      expect(text).toContain('skipGates');
+    });
+
+    it('不認得的閘名 → 拒絕（參數驗證）', async () => {
+      startTwoGateTask();
+      const result = await callTool(server, 'update_task_status', {
+        taskId: 'task-1', status: 'completed', skipGates: ['everything'], skipReason: '使用者同意',
+      });
+      expect(result.isError).toBe(true);
+      expect(statusOf()).toBe('in_progress');
     });
   });
 

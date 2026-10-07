@@ -130,7 +130,59 @@ describe('AgentManager', () => {
     });
   });
 
+  // 硬閘原本只在 startAgent：rerunAgent／resumeAgent 也會 new 一個 claude 程序，
+  // Web UI 的 agent.command／agent.planAction 還能觸發——閘門必須擋在這兩個入口。
+  describe('rerunAgent / resumeAgent — 同一道 legacy spawn 硬閘', () => {
+    const legacyAgent = { id: 'a-old', projectId: 'proj-1', role: 'frontend', model: 'x', sessionId: 'sess-1', status: 'stopped', currentTaskId: null };
+    afterEach(() => {
+      delete process.env['ALLOW_LEGACY_SPAWN'];
+    });
+
+    it('rerunAgent：未開 ALLOW_LEGACY_SPAWN → 擋下，而且在改任何 DB 狀態之前', async () => {
+      delete process.env['ALLOW_LEGACY_SPAWN'];
+      mockGetAgent.mockReturnValue(legacyAgent);
+      await expect(manager.rerunAgent('a-old', 'x')).rejects.toThrow(/spawn 派工已停用/);
+      expect(mockUpdateAgent).not.toHaveBeenCalled();
+    });
+
+    it('resumeAgent（從 DB 的舊 session 接續）：未開 ALLOW_LEGACY_SPAWN → 擋下，而且在改任何 DB 狀態之前', async () => {
+      delete process.env['ALLOW_LEGACY_SPAWN'];
+      mockGetAgent.mockReturnValue(legacyAgent);
+      await expect(manager.resumeAgent('a-old', 'x')).rejects.toThrow(/spawn 派工已停用/);
+      expect(mockUpdateAgent).not.toHaveBeenCalled();
+    });
+
+    it('開了 ALLOW_LEGACY_SPAWN=1 → 不是被閘門擋（後面因 mock 失敗沒關係）', async () => {
+      process.env['ALLOW_LEGACY_SPAWN'] = '1';
+      mockGetAgent.mockReturnValue(legacyAgent);
+      for (const call of [() => manager.rerunAgent('a-old', 'x'), () => manager.resumeAgent('a-old', 'x')]) {
+        try { await call(); } catch (err) { expect((err as Error).message).not.toMatch(/spawn 派工已停用/); }
+      }
+    });
+  });
+
+  describe('sendInputToAgent — 硬閘未開時不會啟動程序', () => {
+    it('對已停止的舊 agent 送指令：不呼叫 SDK、不改 DB 狀態', async () => {
+      delete process.env['ALLOW_LEGACY_SPAWN'];
+      mockGetAgent.mockReturnValue({
+        id: 'agent-1', role: 'frontend', projectId: 'proj-1',
+        sessionId: 'sess-1', status: 'stopped', taskId: 'task-1',
+      });
+      const { query: sdkQuery } = await import('@anthropic-ai/claude-agent-sdk');
+      const p = manager.sendInputToAgent('agent-1', 'hello').catch(() => false);
+      await vi.advanceTimersByTimeAsync(1600);
+      await p;
+      expect(vi.mocked(sdkQuery)).not.toHaveBeenCalled();
+      expect(mockUpdateAgent).not.toHaveBeenCalled();
+    });
+  });
+
+  // 以下兩組驗的是 legacy spawn 本身的行為（debounce、resume 時清 taskDoneAgents），
+  // 只在開了 ALLOW_LEGACY_SPAWN 時才存在
   describe('sendInputToAgent — debounce', () => {
+    beforeEach(() => { process.env['ALLOW_LEGACY_SPAWN'] = '1'; });
+    afterEach(() => { delete process.env['ALLOW_LEGACY_SPAWN']; });
+
     it('buffers rapid inputs and merges after 1.5s', async () => {
       // Set up a fake agent in the DB so _doSendInput can find session ID
       mockGetAgent.mockReturnValue({
@@ -231,6 +283,9 @@ describe('AgentManager', () => {
   });
 
   describe('taskDoneAgents — completion handling (auto-resume removed)', () => {
+    beforeEach(() => { process.env['ALLOW_LEGACY_SPAWN'] = '1'; });
+    afterEach(() => { delete process.env['ALLOW_LEGACY_SPAWN']; });
+
     it('clears taskDoneAgents when sending input so resumed agent is not immediately stopped', async () => {
       mockGetAgent.mockReturnValue({
         id: 'agent-1', role: 'frontend', projectId: 'proj-1',

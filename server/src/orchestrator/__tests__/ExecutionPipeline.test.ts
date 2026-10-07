@@ -179,6 +179,25 @@ describe('ExecutionPipeline', () => {
     });
   });
 
+  describe('assembleContext() — 專案額外指令的 Axure 路徑代換', () => {
+    const opts = (extraPrompt: string) => ({
+      superpowers: [] as any[], projectId: 'proj-ax', role: 'frontend',
+      taskTitle: 'T', taskDescription: 'd', taskType: 'feature' as any, extraPrompt,
+    });
+
+    it('代換 {AXURE_SNAPSHOTS_PATH}', () => {
+      const prompt = pipeline.assembleContext(opts('原型在 {AXURE_SNAPSHOTS_PATH}'));
+      expect(prompt).not.toContain('{AXURE_SNAPSHOTS_PATH}');
+      expect(prompt).toMatch(/原型在 .*axure-snapshots[\\/]proj-ax/);
+    });
+
+    it('也代換少一個 S 的 {AXURE_SNAPSHOT_PATH}——CLAUDE.md 與實際專案設定都是這樣寫的，沒代換時 agent 拿到的是變數名原文', () => {
+      const prompt = pipeline.assembleContext(opts('原型在 {AXURE_SNAPSHOT_PATH}'));
+      expect(prompt).not.toContain('{AXURE_SNAPSHOT_PATH}');
+      expect(prompt).toMatch(/原型在 .*axure-snapshots[\\/]proj-ax/);
+    });
+  });
+
   describe('resolveWorkingDir()', () => {
     const resolve = (project: any, label: string) => (pipeline as any).resolveWorkingDir(project, label);
 

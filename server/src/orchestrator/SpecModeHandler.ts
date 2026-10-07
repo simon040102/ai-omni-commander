@@ -240,7 +240,7 @@ export class SpecModeHandler {
     // Resolve template variables in extraPrompt
     const resolvedExtraPrompt = extraPrompt?.trim()
       ? extraPrompt.trim().replace(
-          /\{AXURE_SNAPSHOTS_PATH\}/g,
+          /\{AXURE_SNAPSHOTS?_PATH\}/g,
           path.join(getConfig().projectRoot, 'docs', 'axure-snapshots', projectId || ''),
         )
       : '';

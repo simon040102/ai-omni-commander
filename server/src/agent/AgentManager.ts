@@ -107,17 +107,22 @@ export class AgentManager {
 
 
   /** Start an agent for a specific task */
-  async startAgent(config: AgentStartConfig): Promise<string> {
-    // Hard gate: local agent spawning (SDK/PTY) is legacy — execution now goes
-    // through external Claude Code sessions + MCP. Synthetic mcp-{taskId} agents
-    // (mcp/helpers ensureMcpAgent) and recoverRunningAgents (kill-only) never
-    // pass through here and are unaffected.
+  /**
+   * Hard gate: local agent spawning (SDK/PTY) is legacy — execution now goes
+   * through external Claude Code sessions + MCP. Every entry that creates a
+   * claude process must call this first (startAgent / rerunAgent / resumeAgent);
+   * synthetic mcp-{taskId} agents and recoverRunningAgents (kill-only) never spawn.
+   */
+  private assertLegacySpawnAllowed(context: Record<string, unknown>): void {
     const allowLegacySpawn = process.env['ALLOW_LEGACY_SPAWN'];
     if (allowLegacySpawn !== '1' && allowLegacySpawn !== 'true') {
-      logger.error({ role: config.role, projectId: config.projectId, taskId: config.taskId },
-        'Blocked legacy agent spawn (ALLOW_LEGACY_SPAWN is not enabled)');
+      logger.error(context, 'Blocked legacy agent spawn (ALLOW_LEGACY_SPAWN is not enabled)');
       throw new Error('spawn 派工已停用：任務執行請走外部 Claude Code session + MCP（get_execution_plan）。確定要使用 legacy spawn 請設環境變數 ALLOW_LEGACY_SPAWN=1');
     }
+  }
+
+  async startAgent(config: AgentStartConfig): Promise<string> {
+    this.assertLegacySpawnAllowed({ entry: 'startAgent', role: config.role, projectId: config.projectId, taskId: config.taskId });
 
     const roleConfig = getAgentRoleConfig(config.role);
 
@@ -403,6 +408,7 @@ export class AgentManager {
 
   /** Rerun an existing agent with a new prompt (clears old outputs, starts fresh session) */
   async rerunAgent(agentId: string, prompt: string): Promise<void> {
+    this.assertLegacySpawnAllowed({ entry: 'rerunAgent', agentId });
     const agent = getAgent(agentId);
     if (!agent) throw new Error(`Agent ${agentId} not found`);
 
@@ -471,6 +477,7 @@ export class AgentManager {
 
   /** Resume an agent using its Claude session ID */
   async resumeAgent(agentId: string, followUpPrompt?: string): Promise<void> {
+    this.assertLegacySpawnAllowed({ entry: 'resumeAgent', agentId });
     const proc = this.processes.get(agentId);
     logger.info({ agentId, hasProc: !!proc, promptLen: followUpPrompt?.length }, 'resumeAgent called');
 

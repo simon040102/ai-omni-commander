@@ -820,8 +820,9 @@ export class ExecutionPipeline {
 
     // Layer 2.95: Extra prompt (per-role, from project settings)
     if (opts.extraPrompt?.trim()) {
+      // 兩種拼法都認：CLAUDE.md 與既有專案設定寫的是少一個 S 的版本，只認一種時另一種會原文漏給 agent
       const resolved = opts.extraPrompt.trim().replace(
-        /\{AXURE_SNAPSHOTS_PATH\}/g,
+        /\{AXURE_SNAPSHOTS?_PATH\}/g,
         path.join(getConfig().projectRoot, 'docs', 'axure-snapshots', opts.projectId),
       );
       parts.push(`## 專案額外指令\n\n${resolved}`);
