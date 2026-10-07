@@ -14,7 +14,6 @@ import { ContractWatcher } from './eventbus/ContractWatcher.js';
 import { AgentManager } from './agent/AgentManager.js';
 import { SpecModeHandler } from './orchestrator/SpecModeHandler.js';
 import { ExecutionPipeline } from './orchestrator/ExecutionPipeline.js';
-import { MasterOrchestrator } from './orchestrator/MasterOrchestrator.js';
 import { WorkspaceScanner } from './workspace/WorkspaceScanner.js';
 import { OmniWebSocketServer } from './websocket/WebSocketServer.js';
 import { registerHandlers } from './websocket/MessageRouter.js';
@@ -131,7 +130,6 @@ async function main() {
   const svnSpecService = new SvnSpecService(specHandler.getDocumentParser(), svnCacheDir);
   pipeline.setSvnSpecService(svnSpecService);
 
-  const orchestrator = new MasterOrchestrator(specHandler, pipeline);
 
   // v2: Workspace services
   const workspaceScanner = new WorkspaceScanner();
@@ -743,7 +741,7 @@ async function main() {
   asanaSyncService.setDocumentParser(specHandler.getDocumentParser());
 
   // 6. Register WebSocket message handlers
-  registerHandlers(wsServer, orchestrator, agentManager, workspaceScanner, asanaClient, asanaSyncService, svnSpecService, specHandler.getDocumentParser());
+  registerHandlers(wsServer, specHandler, agentManager, asanaClient, asanaSyncService, svnSpecService, specHandler.getDocumentParser());
 
   // ── Spec gaps endpoints (backs the Web UI 待補規格 panel) ──────
   app.get('/api/spec-gaps/:projectId', (req, res) => {

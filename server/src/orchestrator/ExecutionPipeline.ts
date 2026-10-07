@@ -1,9 +1,8 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
-import type { AgentRole, SuperpowersFeature, TaskType, ProjectConfig, TestOptions } from '@omni/shared';
+import type { SuperpowersFeature, TaskType, ProjectConfig, TestOptions } from '@omni/shared';
 import type { AgentManager } from '../agent/AgentManager.js';
-import { FullstackController } from './FullstackController.js';
 import type { EventBus } from '../eventbus/EventBus.js';
 import type { DocumentParser } from '../documents/DocumentParser.js';
 import { type SvnSpecService, extractFunctionCode } from '../svn/SvnSpecService.js';
@@ -11,8 +10,8 @@ import { SpecFetcher } from '../documents/SpecFetcher.js';
 import type { SpecResult } from '../documents/SpecFetcher.js';
 import { SaFlowAnalyzer } from '../documents/SaFlowAnalyzer.js';
 import { ModelRouter } from '../agent/ModelRouter.js';
-import { getProject, updateProject } from '../db/queries/projects.js';
-import { getTask, updateTask } from '../db/queries/tasks.js';
+import { getProject } from '../db/queries/projects.js';
+import { getTask } from '../db/queries/tasks.js';
 import { getConfig } from '../config.js';
 import { getDocumentsForTask } from '../db/queries/taskDocuments.js';
 import { getActiveProjectNotes, type ProjectNote } from '../db/queries/projectNotes.js';
@@ -137,8 +136,8 @@ export class ExecutionPipeline {
 
   /**
    * Auto-fetch spec documents from ALL configured sources (SVN + local spec
-   * folders) for a task. Shared by executeTask / buildExecutionPlan /
-   * preparePromptForRole so the three call sites stay identical.
+   * folders) for a task. Shared by buildExecutionPlan / preparePromptForRole
+   * so both call sites stay identical.
    *
    * 三態聚合（規格不齊全不執行）：
    * - 有檔案 + 有錯誤/警告 → 錯誤降級成警告（文件區塊列出）
@@ -218,175 +217,9 @@ export class ExecutionPipeline {
   }
 
   /**
-   * Execute a specific task from the task list.
-   */
-  async executeTask(taskId: string, model?: string, mockupFiles?: string[], testOptions?: TestOptions, executionRunId?: string): Promise<string> {
-    // Fail fast BEFORE any side effect: the SA-flow analysis below PTY-spawns
-    // claude on cache miss, which must not happen when legacy spawn is disabled
-    // (the startAgent gate alone would fire only after that spawn already ran).
-    const allowLegacySpawn = process.env['ALLOW_LEGACY_SPAWN'];
-    if (allowLegacySpawn !== '1' && allowLegacySpawn !== 'true') {
-      throw new Error('spawn 派工已停用：任務執行請走外部 Claude Code session + MCP（get_execution_plan）。確定要使用 legacy spawn 請設環境變數 ALLOW_LEGACY_SPAWN=1');
-    }
-
-    const task = getTask(taskId);
-    if (!task) throw new Error(`Task ${taskId} not found`);
-
-    // Guard: prevent duplicate spawning if already running
-    if (task.status === 'in_progress' || task.status === 'assigned') {
-      logger.warn({ taskId, status: task.status }, 'Task already running — skipping duplicate spawn');
-      return '';
-    }
-
-    const project = getProject(task.projectId);
-    if (!project) throw new Error(`Project ${task.projectId} not found`);
-
-    updateProject(task.projectId, { status: 'executing' });
-    updateTask(taskId, { status: 'in_progress' });
-
-    // Fullstack: delegate to FullstackController
-    if (task.label === 'fullstack') {
-      const controller = new FullstackController(this.agentManager, this.eventBus, this);
-      await controller.execute(task, project, { model, mockupFiles, testOptions, executionRunId });
-      return '';
-    }
-
-    // Auto-select superpowers based on task type
-    const superpowers = this.selectSuperpowers(task.taskType);
-
-    // Parse project config (needed for SVN auth in spec fetch and auto-fetch)
-    const projectConfig = project.configJson ? JSON.parse(project.configJson) as ProjectConfig : null;
-    const extraPrompt = task.label === 'frontend'
-      ? projectConfig?.frontendExtraPrompt
-      : task.label === 'backend'
-      ? projectConfig?.backendExtraPrompt
-      : undefined;
-    const testCommands = extractTestCommands(projectConfig);
-
-    // Fetch spec content if available (pass svnConfig so SVN https:// URLs get auth)
-    let specResult: SpecResult | null = null;
-    if (task.specUrl) {
-      try {
-        specResult = await this.specFetcher.fetch(task.specUrl, projectConfig?.svnConfig);
-        logger.info({ taskId, specUrl: task.specUrl, type: specResult.type }, 'Fetched spec');
-      } catch (err) {
-        logger.warn({ err, taskId, specUrl: task.specUrl }, 'Failed to fetch spec content');
-      }
-    }
-    // Auto-fetch spec documents from SVN + local spec folders (skip for testing tasks):
-    // Priority 1: use parentName (from Asana parent task, e.g. "OV0101")
-    // Priority 2: extract function code from task title (e.g. "IC01 修改發票查詢" → "IC01")
-    const specFetch = await this.fetchAutoSpecs(task, taskId, projectConfig, task.label);
-
-    // Find task-associated attachments scoped to this execution run
-    const taskAttachments = this.getTaskAttachments(task.projectId, taskId, executionRunId);
-
-    // Get auto-fetched (SVN / folder) documents for this task, filtered by role:
-    // Frontend agent → SA + SD, Backend agent → SD only
-    const allSvnDocs = specFetch.docIds.length > 0
-      ? getDocumentsForTask(taskId).filter(d => d.source === 'svn' || d.source === 'folder')
-      : [];
-    const svnDocuments = task.label === 'backend'
-      ? allSvnDocs.filter(d => d.docType === 'SD')
-      : allSvnDocs;  // frontend / others get SA + SD
-
-    // Find available DB schema files for this project
-    const schemaBasePath = path.join(path.dirname(getConfig().dbPath), 'schemas', task.projectId);
-    const dbSchemaFiles: Array<{ label: string; schemaPath: string; erPath: string }> = [];
-    if (fs.existsSync(schemaBasePath)) {
-      const projectConfig: ProjectConfig = project.configJson ? JSON.parse(project.configJson) : {};
-      const connections = projectConfig.dbConnections ?? [];
-      for (const connDir of fs.readdirSync(schemaBasePath)) {
-        const schemaFile = path.join(schemaBasePath, connDir, 'schema.json');
-        const erFile = path.join(schemaBasePath, connDir, 'er-diagram.mmd');
-        if (fs.existsSync(schemaFile)) {
-          const conn = connections.find((c: { id: string }) => c.id === connDir);
-          dbSchemaFiles.push({
-            label: conn?.label ?? connDir,
-            schemaPath: schemaFile,
-            erPath: fs.existsSync(erFile) ? erFile : '',
-          });
-        }
-      }
-    }
-
-    // Analyze SA flow diagram for frontend tasks
-    let saFlowResult = null;
-    if (task.label === 'frontend') {
-      const saDoc = this.findSaDocument(taskId, task.projectId, allSvnDocs);
-      if (saDoc) {
-        try {
-          saFlowResult = await this.saFlowAnalyzer.analyze({
-            projectId: task.projectId,
-            taskId,
-            saContent: saDoc.content,
-            sourceFilename: saDoc.filename,
-            taskType: task.taskType,
-            taskDescription: task.description || '',
-          });
-          if (saFlowResult) {
-            logger.info({ taskId, filename: saDoc.filename }, 'SA flow diagram ready');
-          }
-        } catch (err) {
-          logger.warn({ err, taskId }, 'SA flow analysis failed, continuing without it');
-        }
-      }
-    }
-
-    // Assemble context
-    const prompt = this.assembleContext({
-      superpowers,
-      projectId: task.projectId,
-      taskId,
-      role: task.label,
-      taskTitle: task.title,
-      taskDescription: task.description || '',
-      taskType: task.taskType,
-      specResult,
-      dbConnectionString: project.dbConnectionString,
-      dbSchemaFiles: dbSchemaFiles.length > 0 ? dbSchemaFiles : undefined,
-      taskAttachments,
-      svnDocuments,
-      mockupFiles,
-      testOptions,
-      extraPrompt,
-      testCommands,
-      hasDbConnections: (projectConfig?.dbConnections?.length ?? 0) > 0,
-      saFlowResult: saFlowResult ?? undefined,
-      svnSpecFetch: { attempted: specFetch.attempted, functionCode: specFetch.functionCode || undefined, error: specFetch.error, warnings: specFetch.warnings },
-    });
-
-    // Resolve working directory
-    const workingDir = this.resolveWorkingDir(project, task.label);
-
-    const agentRole: AgentRole = task.label as AgentRole;
-
-    // Auto-route model based on task characteristics
-    const { model: autoModel, reasoning } = this.modelRouter.selectModel(task);
-    const finalModel = model || autoModel;
-
-    logger.info({
-      taskId, projectId: task.projectId, taskType: task.taskType,
-      role: agentRole, superpowers, model: finalModel, modelReasoning: reasoning,
-    }, 'Executing task');
-
-    const agentId = await this.agentManager.startAgent({
-      projectId: task.projectId,
-      role: agentRole,
-      taskId,
-      prompt,
-      model: finalModel,
-      workingDir,
-      useWorkspaceSkills: true,
-    });
-
-    return agentId;
-  }
-
-  /**
    * Build the full execution plan prompt for a task WITHOUT spawning an agent.
-   * Used by MCP Server to provide execution context to external Claude Code sessions.
-   * Reuses the same assembleContext logic as executeTask.
+   * Used by MCP Server (get_execution_plan → /api/execution-plan) to provide execution
+   * context to external Claude Code sessions.
    */
   async buildExecutionPlan(taskId: string, model?: string, mockupFiles?: string[], testOptions?: TestOptions, executionRunId?: string, track?: ExecutionTrack): Promise<{ prompt: string; workingDir: string; model: string }> {
     const task = getTask(taskId);
@@ -490,7 +323,7 @@ export class ExecutionPipeline {
 
   /**
    * Build the assembled prompt for a task with a given role override.
-   * Used by FullstackController to build FE/BE prompts from a fullstack task.
+   * Used by get_execution_plan when a role is given (e.g. FE/BE prompts for a fullstack task).
    */
   async preparePromptForRole(
     taskId: string,
@@ -603,77 +436,6 @@ export class ExecutionPipeline {
     const finalModel = opts?.model || autoModel;
 
     return { prompt, workingDir, model: finalModel };
-  }
-
-  /**
-   * Execute an ad-hoc requirement (not tied to a task record).
-   * Backward-compatible with v1 execution flow.
-   */
-  async executeAdHoc(
-    projectId: string,
-    requirement: string,
-    model?: string,
-    role?: string,
-  ): Promise<void> {
-    const project = getProject(projectId);
-    if (!project) throw new Error(`Project ${projectId} not found`);
-
-    updateProject(projectId, { status: 'executing' });
-
-    // Classify the requirement to auto-select superpowers
-    const taskType = this.classifyTask(requirement);
-    const superpowers = this.selectSuperpowers(taskType);
-
-    const agentRole: AgentRole = (role || 'backend') as AgentRole;
-
-    const prompt = this.assembleContext({
-      superpowers,
-      projectId,
-      role: agentRole,
-      taskTitle: 'Ad-hoc Task',
-      taskDescription: requirement,
-      taskType,
-      dbConnectionString: project.dbConnectionString,
-    });
-
-    const workingDir = this.resolveWorkingDir(project, agentRole);
-
-    logger.info({
-      projectId, taskType, role: agentRole, superpowers, model,
-    }, 'Executing ad-hoc requirement');
-
-    await this.agentManager.startAgent({
-      projectId,
-      role: agentRole,
-      prompt,
-      model: model || 'sonnet',
-      workingDir,
-      useWorkspaceSkills: true,
-    });
-  }
-
-  /**
-   * Classify a task description into a TaskType.
-   */
-  classifyTask(description: string): TaskType {
-    const lower = description.toLowerCase();
-
-    // Bug indicators
-    if (/\b(bug|fix|error|crash|broken|fail|issue|problem|wrong|incorrect)\b/.test(lower)) {
-      return 'bug';
-    }
-
-    // Refactor indicators
-    if (/\b(refactor|restructure|reorganize|consolidate|simplify|clean\s*up|extract|decouple)\b/.test(lower)) {
-      return 'refactor';
-    }
-
-    // Feature indicators
-    if (/\b(add|create|implement|build|new|feature|support|enable|introduce)\b/.test(lower)) {
-      return 'feature';
-    }
-
-    return 'other';
   }
 
   /**

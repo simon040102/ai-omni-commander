@@ -1,13 +1,11 @@
 import type { WebSocket } from 'ws';
 import type {
   WsMessage, WsCreateProject, WsUploadDocument,
-  WsStartExecution,
   WsAgentAction, WsAgentCommand, WsAgentResume, WsInterventionResolve,
   WsDeleteProject, WsUpdateProject, WsDeleteAgent, WsUpdateAgent, WsAddAgent,
-  WsPlanAction, WsAsanaFetchTasks, WsAsanaFetchMyProjectTasks, WsAsanaFetchProjects, WsAsanaCheckConnection, WsAsanaFetchTaskStories,
+  WsPlanAction, WsAsanaFetchTasks, WsAsanaFetchProjects, WsAsanaCheckConnection,
   WsAsanaSyncNow, WsAsanaUpdateSyncConfig,
   WsTaskCreate, WsTaskDelete, WsTaskUpdate, WsTaskBulkDeleteBySource,
-  WsWorkspaceScan,
   WsSvnBrowse, WsSvnPreview,
   AgentRole,
 } from '@omni/shared';
@@ -18,12 +16,11 @@ import type { SvnSpecService } from '../svn/SvnSpecService.js';
 import { getSvnCredentials, setSvnCredentials, getAsanaPat, setAsanaPat, getGlobalMcpServers, setGlobalMcpServers } from '../db/queries/globalConfig.js';
 import type { McpStdioServerConfig } from '@omni/shared';
 import { getConfig, reloadAsanaPat } from '../config.js';
-import type { MasterOrchestrator } from '../orchestrator/MasterOrchestrator.js';
+import type { SpecModeHandler } from '../orchestrator/SpecModeHandler.js';
 import type { AgentManager } from '../agent/AgentManager.js';
 import type { OmniWebSocketServer } from './WebSocketServer.js';
 import type { AsanaMcpClient } from '../asana/AsanaMcpClient.js';
 import type { AsanaSyncService } from '../asana/AsanaSyncService.js';
-import type { WorkspaceScanner } from '../workspace/WorkspaceScanner.js';
 import { createProject, listProjects, getProject, deleteProject, updateProject } from '../db/queries/projects.js';
 import { getTasksByProject, getDependencies, updateTask, createTask, deleteTask, updateTaskFields, deleteTasksBySource, getTask } from '../db/queries/tasks.js';
 import { getAgentsByProject, deleteAgent, updateAgent as updateAgentDb } from '../db/queries/agents.js';
@@ -33,7 +30,6 @@ import { SessionResolver } from '../agent/SessionResolver.js';
 import type { JsonlAssistantMessage, JsonlUserMessage } from '@omni/shared';
 import { getPlan, getPlansByProject, updatePlanStatus } from '../db/queries/plans.js';
 import { getAgent } from '../db/queries/agents.js';
-import { upsertWorkspaceSkills } from '../db/queries/workspaceSkills.js';
 import { genId } from '../utils/uuid.js';
 import { notifyTaskStatusToast } from '../utils/toastEvents.js';
 import { createChildLogger } from '../utils/logger.js';
@@ -54,9 +50,8 @@ const logger = createChildLogger('MessageRouter');
  */
 export function registerHandlers(
   wsServer: OmniWebSocketServer,
-  orchestrator: MasterOrchestrator,
+  specHandler: SpecModeHandler,
   agentManager: AgentManager,
-  workspaceScanner: WorkspaceScanner,
   asanaClient?: AsanaMcpClient,
   asanaSyncService?: AsanaSyncService,
   svnSpecService?: SvnSpecService,
@@ -104,13 +99,12 @@ export function registerHandlers(
     } as WsMessage);
 
     // Send full project state to the requesting client
-    sendProjectState(wsServer, ws, project.id, orchestrator);
+    sendProjectState(wsServer, ws, project.id, specHandler);
   });
 
   // PROJECT.UPLOAD_DOCUMENT
   wsServer.registerHandler('project.uploadDocument', async (msg: WsMessage) => {
     const { payload } = msg as WsUploadDocument;
-    const specHandler = orchestrator.getSpecHandler();
     await specHandler.uploadDocument(
       payload.projectId, payload.filename, payload.content, payload.fileType,
       payload.docType, payload.taskId, payload.agentId, payload.executionRunId,
@@ -135,20 +129,6 @@ export function registerHandlers(
         })),
       },
     } as WsMessage);
-  });
-
-  // PROJECT.START_EXECUTION
-  wsServer.registerHandler('project.startExecution', async (msg: WsMessage) => {
-    const { payload } = msg as WsStartExecution;
-    await orchestrator.start(payload.projectId, {
-      taskId: payload.taskId,
-      requirement: payload.requirement,
-      model: payload.model,
-      role: payload.role,
-      mockupFiles: payload.mockupFiles,
-      testOptions: payload.testOptions,
-      executionRunId: payload.executionRunId,
-    });
   });
 
   // AGENT.ACTION
@@ -343,7 +323,7 @@ export function registerHandlers(
         if (spPrompt) parts.push(spPrompt);
       }
 
-      const docContext = orchestrator.getSpecHandler().getDocumentContext(payload.projectId, payload.role);
+      const docContext = specHandler.getDocumentContext(payload.projectId, payload.role);
       if (docContext) parts.push(docContext);
 
       // Inject Axure HTML snapshots if requested
@@ -400,7 +380,7 @@ export function registerHandlers(
       });
       logger.info({ agentId, projectId: payload.projectId, role: payload.role }, 'Agent manually added');
 
-      sendProjectState(wsServer, ws, payload.projectId, orchestrator);
+      sendProjectState(wsServer, ws, payload.projectId, specHandler);
     } catch (err) {
       logger.error({ err, projectId: payload.projectId }, 'Failed to add agent');
       wsServer.send(ws, {
@@ -537,24 +517,13 @@ export function registerHandlers(
       payload: { projects: allProjects },
     } as WsMessage);
 
-    sendProjectState(wsServer, ws, payload.projectId, orchestrator);
+    sendProjectState(wsServer, ws, payload.projectId, specHandler);
   });
 
   // PROJECT.GET_STATE
   wsServer.registerHandler('project.getState', (msg: WsMessage, ws: WebSocket) => {
     const { payload } = msg as unknown as { payload: { projectId: string } };
-    sendProjectState(wsServer, ws, payload.projectId, orchestrator);
-  });
-
-  // PROJECTS.LIST
-  wsServer.registerHandler('projects.list', (msg: WsMessage, ws: WebSocket) => {
-    const projects = listProjects();
-    wsServer.send(ws, {
-      type: 'projects.list',
-      id: genId(),
-      timestamp: new Date().toISOString(),
-      payload: { projects },
-    } as WsMessage);
+    sendProjectState(wsServer, ws, payload.projectId, specHandler);
   });
 
   // ============================================
@@ -682,46 +651,6 @@ export function registerHandlers(
       timestamp: new Date().toISOString(),
       payload: { projectId: payload.projectId, tasks },
     } as WsMessage);
-  });
-
-  // ============================================
-  // v2: Workspace Handlers
-  // ============================================
-
-  // WORKSPACE.SCAN
-  wsServer.registerHandler('workspace.scan', (msg: WsMessage, ws: WebSocket) => {
-    const { payload } = msg as WsWorkspaceScan;
-    try {
-      const result = workspaceScanner.scan(payload.path);
-
-      upsertWorkspaceSkills(payload.projectId, payload.workspaceType, {
-        path: payload.path,
-        hasClaudeMd: result.hasClaudeMd,
-        hasClaudeDir: result.hasClaudeDir,
-        skills: result.skills,
-      });
-
-      wsServer.send(ws, {
-        type: 'workspace.scanResult',
-        id: genId(),
-        timestamp: new Date().toISOString(),
-        payload: {
-          projectId: payload.projectId,
-          workspaceType: payload.workspaceType,
-          path: payload.path,
-          hasClaudeMd: result.hasClaudeMd,
-          hasClaudeDir: result.hasClaudeDir,
-          skills: result.skills,
-        },
-      } as WsMessage);
-    } catch (err) {
-      wsServer.send(ws, {
-        type: 'error',
-        id: genId(),
-        timestamp: new Date().toISOString(),
-        payload: { code: 'workspace.scan_failed', message: (err as Error).message },
-      } as WsMessage);
-    }
   });
 
   // ============================================
@@ -1162,42 +1091,6 @@ export function registerHandlers(
     }
   });
 
-  // ASANA.FETCH_MY_PROJECT_TASKS — tasks assigned to me in a specific Asana project
-  wsServer.registerHandler('asana.fetchMyProjectTasks', async (msg: WsMessage, ws: WebSocket) => {
-    const { payload } = msg as WsAsanaFetchMyProjectTasks;
-
-    if (!asanaClient || !asanaClient.isConfigured()) {
-      wsServer.send(ws, {
-        type: 'asana.error',
-        id: genId(),
-        timestamp: new Date().toISOString(),
-        payload: { code: 'ASANA_NOT_CONFIGURED', message: 'Asana not configured' },
-      } as WsMessage);
-      return;
-    }
-
-    try {
-      const tasks = await asanaClient.getMyTasksForProject(payload.projectGid, {
-        includeCompleted: payload.includeCompleted,
-      });
-      logger.info({ projectGid: payload.projectGid, count: tasks.length }, 'Fetched my Asana project tasks');
-      wsServer.send(ws, {
-        type: 'asana.tasks',
-        id: genId(),
-        timestamp: new Date().toISOString(),
-        payload: { tasks },
-      } as WsMessage);
-    } catch (err) {
-      logger.error({ err, projectGid: payload.projectGid }, 'Failed to fetch my Asana project tasks');
-      wsServer.send(ws, {
-        type: 'asana.error',
-        id: genId(),
-        timestamp: new Date().toISOString(),
-        payload: { code: 'ASANA_FETCH_ERROR', message: (err as Error).message },
-      } as WsMessage);
-    }
-  });
-
   wsServer.registerHandler('asana.fetchProjects', async (msg: WsMessage, ws: WebSocket) => {
     const { payload } = msg as WsAsanaFetchProjects;
 
@@ -1226,38 +1119,6 @@ export function registerHandlers(
         id: genId(),
         timestamp: new Date().toISOString(),
         payload: { code: 'ASANA_FETCH_ERROR', message: (err as Error).message },
-      } as WsMessage);
-    }
-  });
-
-  wsServer.registerHandler('asana.fetchTaskStories', async (msg: WsMessage, ws: WebSocket) => {
-    const { payload } = msg as WsAsanaFetchTaskStories;
-
-    if (!asanaClient || !asanaClient.isConfigured()) {
-      wsServer.send(ws, {
-        type: 'asana.error',
-        id: genId(),
-        timestamp: new Date().toISOString(),
-        payload: { code: 'ASANA_NOT_CONFIGURED', message: 'Asana not configured' },
-      } as WsMessage);
-      return;
-    }
-
-    try {
-      const stories = await asanaClient.getTaskStories(payload.taskGid);
-      wsServer.send(ws, {
-        type: 'asana.taskStories',
-        id: genId(),
-        timestamp: new Date().toISOString(),
-        payload: { taskGid: payload.taskGid, stories },
-      } as WsMessage);
-    } catch (err) {
-      logger.error({ err }, 'Failed to fetch Asana task stories');
-      wsServer.send(ws, {
-        type: 'asana.error',
-        id: genId(),
-        timestamp: new Date().toISOString(),
-        payload: { code: 'ASANA_STORIES_ERROR', message: (err as Error).message },
       } as WsMessage);
     }
   });
@@ -1345,7 +1206,7 @@ export function registerHandlers(
     const projects = listProjects();
     for (const p of projects) {
       if (['executing', 'planning'].includes(p.status)) {
-        sendProjectState(wsServer, ws, p.id, orchestrator);
+        sendProjectState(wsServer, ws, p.id, specHandler);
       }
     }
   });
@@ -1355,7 +1216,7 @@ function sendProjectState(
   wsServer: OmniWebSocketServer,
   ws: WebSocket,
   projectId: string,
-  orchestrator?: MasterOrchestrator,
+  specHandler?: SpecModeHandler,
 ): void {
   const project = getProject(projectId);
   if (!project) return;
@@ -1371,8 +1232,8 @@ function sendProjectState(
     payload: { project, tasks, agents, dependencies },
   } as WsMessage);
 
-  if (orchestrator) {
-    const docs = orchestrator.getSpecHandler().getDocumentParser().getDocuments(projectId);
+  if (specHandler) {
+    const docs = specHandler.getDocumentParser().getDocuments(projectId);
     if (docs.length > 0) {
       wsServer.send(ws, {
         type: 'project.documents',

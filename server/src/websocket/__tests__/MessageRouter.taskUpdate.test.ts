@@ -49,14 +49,11 @@ describe('task.update direct-completed [SKIP] audit', () => {
     wsServer = makeFakeWsServer();
 
     // Stubs — task.update touches none of these beyond type requirements
-    const orchestrator = {
-      getSpecHandler: () => ({ getDocumentParser: () => ({ getDocuments: () => [] }) }),
-    };
+    const specHandler = { getDocumentParser: () => ({ getDocuments: () => [] }) };
     const agentManager = {};
-    const workspaceScanner = {};
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    registerHandlers(wsServer as any, orchestrator as any, agentManager as any, workspaceScanner as any);
+    registerHandlers(wsServer as any, specHandler as any, agentManager as any);
 
     const project = createProject({ name: 'P', workingDir: '/tmp/p' });
     projectId = project.id;

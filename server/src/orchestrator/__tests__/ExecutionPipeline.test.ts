@@ -50,47 +50,11 @@ describe('ExecutionPipeline', () => {
   beforeEach(() => {
     testDb = freshDb();
     vi.clearAllMocks();
-    // executeTask 有 legacy spawn 前置閘（預設拒絕）——測試預設放行，閘門行為由專屬測試覆蓋
-    process.env['ALLOW_LEGACY_SPAWN'] = '1';
     pipeline = new ExecutionPipeline(
       mockAgentManager as any,
       mockEventBus as any,
       mockDocumentParser as any,
     );
-  });
-
-  afterEach(() => {
-    delete process.env['ALLOW_LEGACY_SPAWN'];
-  });
-
-  describe('classifyTask()', () => {
-    // Access private method through any cast
-    const classify = (desc: string) => (pipeline as any).classifyTask(desc);
-
-    it('classifies bug-related descriptions', () => {
-      expect(classify('fix login bug')).toBe('bug');
-      expect(classify('Fix the crash on submit')).toBe('bug');
-      expect(classify('debug authentication error')).toBe('bug');
-      expect(classify('hotfix for payment issue')).toBe('bug');
-    });
-
-    it('classifies refactor-related descriptions', () => {
-      expect(classify('refactor auth module')).toBe('refactor');
-      expect(classify('reorganize the utils folder')).toBe('refactor');
-      expect(classify('clean up database queries')).toBe('refactor');
-    });
-
-    it('classifies feature-related descriptions', () => {
-      expect(classify('add user profile page')).toBe('feature');
-      expect(classify('implement dark mode')).toBe('feature');
-      expect(classify('create new endpoint for orders')).toBe('feature');
-      expect(classify('build the notification system')).toBe('feature');
-    });
-
-    it('defaults to other for ambiguous descriptions', () => {
-      expect(classify('update documentation')).toBe('other');
-      expect(classify('misc changes')).toBe('other');
-    });
   });
 
   describe('selectSuperpowers()', () => {
@@ -247,60 +211,6 @@ describe('ExecutionPipeline', () => {
     });
   });
 
-  describe('executeAdHoc()', () => {
-    it('spawns an agent via agentManager', async () => {
-      createProject({ id: 'p-adhoc', name: 'AdHoc', workingDir: '/tmp/adhoc' });
-
-      await pipeline.executeAdHoc('p-adhoc', 'Build a login page');
-
-      expect(mockStartAgent).toHaveBeenCalledTimes(1);
-      const call = mockStartAgent.mock.calls[0][0];
-      expect(call.projectId).toBe('p-adhoc');
-      expect(call.prompt).toContain('Build a login page');
-    });
-
-    it('uses specified model', async () => {
-      createProject({ id: 'p-model', name: 'Model Test', workingDir: '/tmp/model' });
-
-      await pipeline.executeAdHoc('p-model', 'test', 'opus');
-
-      const call = mockStartAgent.mock.calls[0][0];
-      expect(call.model).toBe('opus');
-    });
-  });
-
-  describe('executeTask()', () => {
-    it('creates a task-based execution', async () => {
-      createProject({ id: 'p-task', name: 'Task Test', workingDir: '/tmp/task' });
-
-      // Create a task in the DB
-      testDb.prepare(`
-        INSERT INTO tasks (id, project_id, title, description, label, task_type)
-        VALUES ('t1', 'p-task', 'Fix Login', 'The login form crashes', 'frontend', 'bug')
-      `).run();
-
-      await pipeline.executeTask('t1');
-
-      expect(mockStartAgent).toHaveBeenCalledTimes(1);
-      const call = mockStartAgent.mock.calls[0][0];
-      expect(call.projectId).toBe('p-task');
-      expect(call.taskId).toBe('t1');
-      expect(call.prompt).toContain('Fix Login');
-    });
-
-    it('ALLOW_LEGACY_SPAWN 未設時在任何副作用（含 SA flow spawn）之前就 throw', async () => {
-      delete process.env['ALLOW_LEGACY_SPAWN'];
-      createProject({ id: 'p-gate', name: 'Gate Test', workingDir: '/tmp/gate' });
-      testDb.prepare(`
-        INSERT INTO tasks (id, project_id, title, description, label, task_type)
-        VALUES ('t-gate', 'p-gate', 'Fix Login', 'crash', 'frontend', 'bug')
-      `).run();
-
-      await expect(pipeline.executeTask('t-gate')).rejects.toThrow('spawn 派工已停用');
-      expect(mockStartAgent).not.toHaveBeenCalled();
-    });
-  });
-
   describe('SVN spec fetch handling（規格不齊全不執行）', () => {
     const SVN_CONFIG_JSON = JSON.stringify({
       svnConfig: { frontendSpecUrl: 'https://svn.example.com/specs/fe', username: 'u', password: 'p' },
@@ -362,17 +272,6 @@ describe('ExecutionPipeline', () => {
       expect(plan.prompt).toContain('WA05 查詢作業');
     });
 
-    it('(c) executeTask also carries the banner into the spawned agent prompt', async () => {
-      createSvnProjectAndTask('p-svn-exec', 't-exec');
-      const fetchSpecsForTask = vi.fn().mockRejectedValue(new Error('svn: E175002: connection refused'));
-      pipeline.setSvnSpecService({ fetchSpecsForTask } as any);
-
-      await pipeline.executeTask('t-exec');
-
-      expect(mockStartAgent).toHaveBeenCalledTimes(1);
-      const call = mockStartAgent.mock.calls[0][0];
-      expect(call.prompt.startsWith('⚠ [SPEC_FETCH_ERROR] 規格自動撈取失敗（SVN／規格資料夾）：svn: E175002: connection refused')).toBe(true);
-    });
   });
 
   describe('本地規格資料夾來源（specFolders 三態呈現）', () => {
@@ -622,12 +521,14 @@ describe('ExecutionPipeline', () => {
       }
     });
 
-    it('executeAdHoc（無 taskId）工具呼叫範例省略 taskId 參數', async () => {
+    it('無 taskId 時工具呼叫範例省略 taskId 參數', () => {
       createProject({ id: 'p-adhoc-mandate', name: 'AdHoc Mandate', workingDir: '/tmp/adhoc-mandate' });
 
-      await pipeline.executeAdHoc('p-adhoc-mandate', 'fix the login crash');
-
-      const call = mockStartAgent.mock.calls[0][0];
+      const prompt = pipeline.assembleContext({
+        superpowers: [] as any[], projectId: 'p-adhoc-mandate', role: 'backend',
+        taskTitle: 'Ad-hoc Task', taskDescription: 'fix the login crash', taskType: 'bug' as any,
+      });
+      const call = { prompt };
       expect(call.prompt).toContain('mcp__omni-commander__report_spec_gap(category=..., description=...)');
       expect(call.prompt).toContain('mcp__omni-commander__fetch_task_attachments(projectId="p-adhoc-mandate")');
       expect(call.prompt).not.toContain('taskId="undefined"');
@@ -848,12 +749,14 @@ describe('ExecutionPipeline', () => {
       expect(complianceIdx).toBeGreaterThan(unitIdx);
     });
 
-    it('executeAdHoc（無 taskId）單元測試區塊省略 taskId 參數', async () => {
+    it('無 taskId 時單元測試區塊省略 taskId 參數', () => {
       createProject({ id: 'p-ut-adhoc', name: 'UT AdHoc', workingDir: '/tmp/ut-adhoc' });
 
-      await pipeline.executeAdHoc('p-ut-adhoc', 'add a helper');
-
-      const call = mockStartAgent.mock.calls[0][0];
+      const prompt = pipeline.assembleContext({
+        superpowers: [] as any[], projectId: 'p-ut-adhoc', role: 'backend',
+        taskTitle: 'Ad-hoc Task', taskDescription: 'add a helper', taskType: 'feature' as any,
+      });
+      const call = { prompt };
       expect(call.prompt).toContain('## 單元測試（強制流程 — 先列案例清單，再寫測試）');
       expect(call.prompt).not.toContain('taskId="undefined"');
     });
