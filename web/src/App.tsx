@@ -4,8 +4,6 @@ import type { View } from './components/layout/AppShell';
 import { ProjectList } from './components/home/ProjectList';
 import { Dashboard } from './components/dashboard/Dashboard';
 import { ProjectSetup } from './components/project/ProjectSetup';
-import { EventLog } from './components/events/EventLog';
-import { AgentsView } from './components/agents/AgentsView';
 import { NewTaskView } from './components/task/NewTaskView';
 import { DbExplorer } from './components/db/DbExplorer';
 import { DbSchemaExplorer } from './components/db/DbSchemaExplorer';
@@ -34,10 +32,6 @@ export function App() {
             return <Dashboard onViewChange={onViewChange} />;
           case 'setup':
             return <ProjectSetup onViewChange={onViewChange} />;
-          case 'agents':
-            return <AgentsView onViewChange={onViewChange} />;
-          case 'events':
-            return <EventLog />;
           case 'new-task':
             return <NewTaskView onViewChange={onViewChange} />;
           case 'db-explorer':

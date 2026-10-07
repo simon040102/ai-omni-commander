@@ -18,7 +18,7 @@ function DisconnectBanner() {
   );
 }
 
-export type View = 'home' | 'setup' | 'new-task' | 'tasks' | 'agents' | 'events' | 'db-explorer' | 'internal-db' | 'settings' | 'global-settings' | 'mockup' | 'spec-governance';
+export type View = 'home' | 'setup' | 'new-task' | 'tasks' | 'db-explorer' | 'internal-db' | 'settings' | 'global-settings' | 'mockup' | 'spec-governance';
 
 interface AppShellProps {
   children: (view: View, onViewChange: (v: View) => void) => React.ReactNode;
@@ -26,12 +26,12 @@ interface AppShellProps {
 
 const VIEW_STORAGE_KEY = 'omni_current_view';
 
-/** Views hidden from navigation (MCP 模式下 Agents/Events 已隱藏) — restoring
- *  into them from localStorage would strand the user on an unreachable page. */
-const HIDDEN_VIEWS: readonly View[] = ['agents', 'events'];
+/** 已移除的舊畫面（Agents／Events，legacy spawn 時代）——舊 session 存在 localStorage 的值
+ *  仍可能是它們，還原時導回儀表板（tasks），不要把人丟到首頁或一個不存在的畫面。 */
+const REMOVED_VIEWS: readonly string[] = ['agents', 'events'];
 
 const ALL_VIEWS: readonly View[] = [
-  'home', 'setup', 'new-task', 'tasks', 'agents', 'events', 'db-explorer',
+  'home', 'setup', 'new-task', 'tasks', 'db-explorer',
   'internal-db', 'settings', 'global-settings', 'mockup', 'spec-governance',
 ];
 
@@ -39,8 +39,8 @@ const ALL_VIEWS: readonly View[] = [
  *  to the dashboard (tasks); unknown/corrupted values and nothing persisted →
  *  home. Exported for tests. */
 export function resolveInitialView(saved: string | null): View {
+  if (saved && REMOVED_VIEWS.includes(saved)) return 'tasks';
   if (!saved || !ALL_VIEWS.includes(saved as View)) return 'home';
-  if (HIDDEN_VIEWS.includes(saved as View)) return 'tasks';
   return saved as View;
 }
 
