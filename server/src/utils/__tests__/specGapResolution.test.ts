@@ -9,7 +9,11 @@ import {
   summarizeGapText,
   formatResolutionLine,
   buildResolutionLines,
+  buildRulingsBlock,
 } from '../specGapResolution.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 describe('validateResolutionNote（E1 答案品質）', () => {
   it('rejects missing / empty / whitespace-only note（必填）', () => {
@@ -217,5 +221,71 @@ describe('formatting helpers', () => {
     const limited = buildResolutionLines(gaps, lineLen + 1); // 只夠一行
     expect(limited.lines).toHaveLength(1);
     expect(limited.truncated).toBe(true);
+  });
+});
+
+// ── buildRulingsBlock：派工與回對共用同一份裁決區塊 ──────────────────
+// 原本派工全塞（每則還被截短到 160／400 字）、回對只給前 4000 字（約 10 則）——
+// 兩邊看到的裁決不一樣，回對員判 missing 的東西可能正是照裁決做對的。
+// 新規則：預算內全列；超過就把**全部**裁決全文寫檔，prompt 列放得下的本任務裁決＋檔案指引。
+// 不能無上限塞：回對計畫有 25000 字總上限，裁決段在前面，塞爆會把尾端的檢查表擠掉。
+describe('buildRulingsBlock（派工與回對共用）', () => {
+  const g = (id: string, desc: string, note: string, fromOtherTask = false) => ({
+    id, category: 'other', description: desc, resolutionNote: note, resolvedAt: '2026-09-01 00:00:00',
+    scope: (fromOtherTask ? 'project' : 'task') as 'task' | 'project', fromOtherTask,
+  });
+  let dataDir: string;
+  beforeEach(() => { dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rulings-')); });
+  const opts = (inlineBudget: number) => ({ taskId: 'T1', dataDir, inlineBudget });
+
+  it('預算內 → 全部逐條列出，不寫檔（小專案行為不變）', () => {
+    const r = buildRulingsBlock([g('own', '自己的', '選 A'), g('p1', '全案一', '選 B', true)], opts(5000));
+    expect(r.lines.join('\n')).toContain('選 A');
+    expect(r.lines.join('\n')).toContain('選 B');
+    expect(r.rulingsFile).toBeNull();
+    expect(fs.existsSync(path.join(dataDir, 'rulings'))).toBe(false);
+  });
+
+  it('超出預算 → 全部裁決全文寫進檔案，一則都不少、也不截短；prompt 指出檔案與則數', () => {
+    const longNote = '裁決內容'.repeat(200);   // 800 字，原本會被截到 400
+    const project = Array.from({ length: 30 }, (_, i) => g(`p${i}`, `全案問題 ${i}`, `${longNote}#${i}`, true));
+    const r = buildRulingsBlock([g('own', '自己的問題', '自己的裁決'), ...project], opts(2000));
+
+    const text = r.lines.join('\n');
+    expect(text).toContain('自己的裁決');            // 放得下的本任務裁決照列
+    expect(text).not.toContain('全案問題 0');         // 全案的不逐條塞進 prompt
+    expect(r.rulingsFile).toBeTruthy();
+    expect(text).toContain(r.rulingsFile!);          // 指出檔案位置
+    expect(text).toContain('30');                    // 講清楚還有幾則沒列
+
+    const file = fs.readFileSync(r.rulingsFile!, 'utf8');
+    expect(file).toContain('自己的裁決');            // 檔案是完整清單，本任務的也在
+    for (let i = 0; i < 30; i++) expect(file).toContain(`全案問題 ${i}`);
+    expect(file).toContain(`${longNote}#29`);       // 全文，不截短
+    expect(file).toContain('p7');                   // 帶 gapId，查得回來源
+  });
+
+  it('本任務自己的裁決也超過預算 → 放得下的照列、其餘在檔案（不會無上限撐爆 prompt）', () => {
+    const own = Array.from({ length: 50 }, (_, i) => g(`o${i}`, `自己的 ${i}`, '照做'.repeat(50)));
+    const r = buildRulingsBlock(own, opts(1000));
+    const text = r.lines.join('\n');
+    expect(text.length).toBeLessThan(1000 + 600);   // 預算＋一行指引
+    expect(text).toContain('自己的 0');
+    expect(text).not.toContain('自己的 49');
+    const file = fs.readFileSync(r.rulingsFile!, 'utf8');
+    for (let i = 0; i < 50; i++) expect(file).toContain(`自己的 ${i}`);
+  });
+
+  it('同樣的輸入兩次 → 一樣的輸出（派工與回對看到的一模一樣）', () => {
+    const gaps = [g('own', 'q', 'a'), ...Array.from({ length: 30 }, (_, i) => g(`p${i}`, `q${i}`, 'x'.repeat(200), true))];
+    const a = buildRulingsBlock(gaps, opts(1000));
+    const b = buildRulingsBlock(gaps, opts(1000));
+    expect(a.lines).toEqual(b.lines);
+  });
+
+  it('沒有任何裁決 → 空', () => {
+    const r = buildRulingsBlock([], opts(500));
+    expect(r.lines).toEqual([]);
+    expect(r.rulingsFile).toBeNull();
   });
 });

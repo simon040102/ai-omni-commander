@@ -17,7 +17,7 @@ import { getConfig } from '../config.js';
 import { getDocumentsForTask } from '../db/queries/taskDocuments.js';
 import { getActiveProjectNotes, type ProjectNote } from '../db/queries/projectNotes.js';
 import { getResolvedSpecGapsForTask } from '../db/queries/specGaps.js';
-import { buildResolutionLines, type ResolvedSpecGap } from '../utils/specGapResolution.js';
+import { buildRulingsBlock, type ResolvedSpecGap } from '../utils/specGapResolution.js';
 import { filterSafeSpecFolders } from '../documents/FolderSpecSource.js';
 import { loadSuperpowersPrompt } from '../skills/superpowers/index.js';
 import { createChildLogger } from '../utils/logger.js';
@@ -728,6 +728,8 @@ export class ExecutionPipeline {
      * (git pull skipped/failed, partial source failures rescued by another source).
      */
     svnSpecFetch?: { attempted: boolean; functionCode?: string; error?: string | null; warnings?: string[] };
+    /** 裁決全文檔寫入的 data dir（省略＝DB 所在目錄；測試用來隔離） */
+    dataDir?: string;
   }): string {
     const parts: string[] = [];
 
@@ -799,7 +801,7 @@ export class ExecutionPipeline {
     if (opts.taskId) {
       const resolvedGaps = getResolvedSpecGapsForTask(opts.taskId);
       if (resolvedGaps.length > 0) {
-        parts.push(this.buildSpecResolutionsSection(resolvedGaps));
+        parts.push(this.buildSpecResolutionsSection(resolvedGaps, opts.taskId, opts.dataDir ?? path.dirname(getConfig().dbPath)));
       }
     }
 
@@ -962,8 +964,9 @@ export class ExecutionPipeline {
    * Source of truth is the spec_gaps table (resolve_spec_gap 落地的 resolution_note)；
    * 效力等同規格條文，implementer 必須遵守。
    */
-  private buildSpecResolutionsSection(gaps: ResolvedSpecGap[]): string {
-    const { lines } = buildResolutionLines(gaps);
+  private buildSpecResolutionsSection(gaps: ResolvedSpecGap[], taskId: string, dataDir: string): string {
+    // 與 AI 回對計畫共用 buildRulingsBlock——implementer 與 reviewer 看到的裁決必須一模一樣
+    const { lines } = buildRulingsBlock(gaps, { taskId, dataDir });
     return [
       '## 規格裁決（使用者已拍板——效力等同規格，必須遵守）',
       '',

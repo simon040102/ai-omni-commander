@@ -1,6 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { runMigrations } from '../../db/schema.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 // Create in-memory DB for tests
 let testDb: Database.Database;
@@ -176,6 +179,32 @@ describe('ExecutionPipeline', () => {
       const second = prompt.indexOf('固定三值：草稿/送審/核准');
       expect(first).toBeGreaterThan(-1);
       expect(second).toBeGreaterThan(first);
+    });
+  });
+
+  describe('assembleContext() — 裁決太多時：全文寫檔、prompt 給路徑（與回對計畫共用同一函式）', () => {
+    it('全案裁決超過預算 → 本任務裁決照列、全案的不逐條塞、指出全文檔；檔內一則不少', () => {
+      testDb.prepare(`INSERT INTO projects (id, name, working_dir) VALUES ('proj-1', 'Test', '/tmp')`).run();
+      testDb.prepare(`INSERT INTO tasks (id, project_id, title, label, task_type) VALUES ('task-1', 'proj-1', 'WA05', 'frontend', 'feature')`).run();
+      testDb.prepare(`INSERT INTO tasks (id, project_id, title, label, task_type) VALUES ('task-other', 'proj-1', 'KB01', 'backend', 'feature')`).run();
+      const ins = testDb.prepare(`
+        INSERT INTO spec_gaps (id, task_id, project_id, category, description, status, resolution_note, resolved_at, scope)
+        VALUES (?, ?, 'proj-1', 'other', ?, 'resolved', ?, '2026-09-01 00:00:00', ?)
+      `);
+      ins.run('own-1', 'task-1', '本任務的問題', '本任務的裁決：選 A', 'task');
+      for (let i = 0; i < 40; i++) ins.run(`p-${i}`, 'task-other', `全案問題 ${i}`, `全案裁決 ${i}：${'丙'.repeat(300)}`, 'project');
+
+      const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ep-rulings-'));
+      const prompt = pipeline.assembleContext({
+        superpowers: [] as any[], projectId: 'proj-1', taskId: 'task-1', role: 'frontend',
+        taskTitle: 'WA05', taskDescription: 'd', taskType: 'feature' as any, dataDir,
+      });
+      expect(prompt).toContain('本任務的裁決：選 A');
+      expect(prompt).not.toContain('全案問題 0');
+      const file = path.join(dataDir, 'rulings', 'task-1.md').replace(/\\/g, '/');
+      expect(prompt).toContain(file);
+      const body = fs.readFileSync(file, 'utf8');
+      for (let i = 0; i < 40; i++) expect(body).toContain(`全案問題 ${i}`);
     });
   });
 

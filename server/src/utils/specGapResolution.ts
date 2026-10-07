@@ -11,6 +11,8 @@
  * 本模組不碰 process.cwd()、不自行開連線。
  */
 import type Database from 'better-sqlite3';
+import fs from 'node:fs';
+import path from 'node:path';
 
 // ── E1：resolutionNote 答案品質驗證 ─────────────────────────
 
@@ -188,4 +190,94 @@ export function buildResolutionLines(
     lines.push(line);
   }
   return { lines, truncated };
+}
+
+// ── 派工 prompt 與 AI 回對計畫共用的裁決區塊 ───────────────────
+
+/** 裁決逐條列進 prompt 的字元預算；超過的部分在檔案裡。派工與回對兩處用同一個值。 */
+export const RULINGS_INLINE_BUDGET = 6000;
+
+export interface RulingsBlock {
+  /** 要放進 prompt 的行（放得下的裁決逐條＋沒列出的指引） */
+  lines: string[];
+  /** 全部裁決的全文檔（預算內全列時為 null） */
+  rulingsFile: string | null;
+}
+
+/**
+ * 派工 prompt 與 AI 回對計畫**共用**的裁決區塊——兩邊看到的必須一模一樣。
+ *
+ * 原本兩邊各組各的：派工全塞（每則還被截到 160／400 字），回對只給前 4000 字。
+ * 全案裁決一多（實測某專案 416 則、58 萬字），回對員只看得到約 10 則，會把照裁決
+ * 做對的東西判成 missing；派工那邊則因整份太大被轉存成檔案，而且內容是截短的。
+ *
+ * 規則（排序沿用 listResolvedSpecGaps：本任務的在前、全案的在後）：
+ * - 全部在預算內 → 逐條列，不寫檔（小專案行為不變）。
+ * - 超過 → **全部**裁決全文寫進 `<dataDir>/rulings/<taskId>.md`（一則不少、不截短、帶 gapId）；
+ *   prompt 依序列出放得下的本任務裁決，再加一行「還有幾則沒列、全文在哪、先搜尋再動手／判定」。
+ * - 不能無上限塞：回對計畫有總長上限，裁決段在前面，塞爆會把尾端的檢查表與防線文字擠掉。
+ * - 不做相關性挑選——挑錯就是把一則該照做的裁決藏起來；檔案完整，讓讀的人用關鍵字搜。
+ */
+export function buildRulingsBlock(
+  gaps: ResolvedSpecGap[],
+  opts: { taskId: string; dataDir: string; inlineBudget?: number },
+): RulingsBlock {
+  const all = gaps.map(formatResolutionLine);
+  const budget = opts.inlineBudget ?? RULINGS_INLINE_BUDGET;
+  if (all.reduce((n, l) => n + l.length + 1, 0) <= budget) return { lines: all, rulingsFile: null };
+
+  // 只有本任務自己的裁決才逐條塞——全案的一律在檔案裡（全案的列一半最容易讓人以為看完了）
+  const lines: string[] = [];
+  let used = 0;
+  for (let i = 0; i < gaps.length && !gaps[i]!.fromOtherTask; i++) {
+    if (used + all[i]!.length + 1 > budget) break;
+    lines.push(all[i]!);
+    used += all[i]!.length + 1;
+  }
+  const ownTotal = gaps.filter(gp => !gp.fromOtherTask).length;
+  const ownLeft = ownTotal - lines.length;
+  const projectTotal = gaps.length - ownTotal;
+
+  const rulingsFile = writeRulingsFile(gaps, opts.taskId, opts.dataDir);
+  const parts = [
+    ownLeft > 0 ? `本任務另外 ${ownLeft} 則` : '',
+    projectTotal > 0 ? `全案適用 ${projectTotal} 則（由別支任務裁決、適用本專案每一支任務）` : '',
+  ].filter(Boolean).join('、');
+  lines.push(
+    `- **還有 ${ownLeft + projectTotal} 則裁決沒有逐條列出**：${parts}。全部裁決的全文在：\`${rulingsFile}\`。`
+    + '**動手實作或判定任何一項之前，先用 Grep 在這份檔搜尋相關關鍵字**（功能代碼、欄位名、畫面或訊息文字、API 路徑）；'
+    + '搜到的裁決效力等同規格條文。',
+  );
+  return { lines, rulingsFile };
+}
+
+/** 全部裁決全文寫檔（先寫暫存檔再改名：兩個 process 同時寫也不會讀到半份）。回傳 `/` 分隔的絕對路徑。 */
+function writeRulingsFile(gaps: ResolvedSpecGap[], taskId: string, dataDir: string): string {
+  const dir = path.join(dataDir, 'rulings');
+  fs.mkdirSync(dir, { recursive: true });
+  const target = path.join(dir, `${taskId}.md`);
+  const section = (title: string, list: ResolvedSpecGap[]) => list.length === 0 ? [] : [
+    `## ${title}（${list.length} 則）`,
+    '',
+    ...list.map(gp => [
+      `### ${gp.id}（${gp.category}${gp.resolvedAt ? `，${gp.resolvedAt}` : ''}）`,
+      '',
+      `**問題**：${gp.description.trim()}`,
+      '',
+      `**裁決**：${gp.resolutionNote.trim()}`,
+      '',
+    ].join('\n')),
+  ];
+  const body = [
+    `# 規格裁決全文（任務 ${taskId}，共 ${gaps.length} 則）`,
+    '',
+    '使用者已拍板、效力等同規格條文。每次產生執行計畫或回對計畫時由 DB 重新產生——**不要手改這份檔**，要改請用 resolve_spec_gap(revise=true)。',
+    '',
+    ...section('本任務的裁決', gaps.filter(gp => !gp.fromOtherTask)),
+    ...section('全案適用的裁決（由別支任務裁決）', gaps.filter(gp => gp.fromOtherTask)),
+  ].join('\n');
+  const tmp = `${target}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, body, 'utf8');
+  fs.renameSync(tmp, target);
+  return target.replace(/\\/g, '/');
 }

@@ -20,7 +20,7 @@ import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { getMcpDb } from '../db.js';
 import { notifyWebServer } from '../notify.js';
-import { ensureMcpAgent, parseJson, truncateResponse, CHARACTER_LIMIT } from '../helpers.js';
+import { ensureMcpAgent, parseJson, truncateResponse, CHARACTER_LIMIT, getDataDir } from '../helpers.js';
 import { getFlowState, getFlowsDir } from '../flow-gate.js';
 import {
   runComplianceEngine,
@@ -34,7 +34,7 @@ import {
   validateWaiveReason, validateSupersede,
   WAIVE_REASON_PRECISION_RULE, SUPERSEDE_PRECISION_RULE, MIN_WAIVE_REASON_CHARS,
 } from '../waiver-policy.js';
-import { listResolvedSpecGaps, buildResolutionLines } from '../../utils/specGapResolution.js';
+import { listResolvedSpecGaps, buildRulingsBlock } from '../../utils/specGapResolution.js';
 
 export const CHECKLIST_ITEM_TYPES = ['ui_text', 'api', 'param', 'response_field', 'db_field', 'logic'] as const;
 export const CHECKLIST_SIDES = ['frontend', 'backend', 'both'] as const;
@@ -710,19 +710,21 @@ ${noteLines.join('\n')}${notesTruncated ? '\n（筆記已達大小上限截斷�
       }
 
       // ── 規格裁決（resolve_spec_gap 落地的使用者拍板）——驗證依據之一 ──
-      // 只從 DB 讀（結構性強制：不落地的裁決 reviewer 看不到）。字元預算比照元件知識庫防肥。
-      const RESOLVED_GAPS_CHAR_BUDGET = 4000;
+      // 只從 DB 讀（結構性強制：不落地的裁決 reviewer 看不到）。與派工 prompt 共用 buildRulingsBlock：
+      // implementer 與 reviewer 看到的必須一模一樣。原本這裡只給前 4000 字（約 10 則），
+      // 回對員會把照後面裁決做對的東西判成 missing。
       const resolvedGapsForReview = listResolvedSpecGaps(db, taskId);
       let resolvedGapsSection = '';
       if (resolvedGapsForReview.length > 0) {
-        const { lines: gapLines, truncated: gapsTruncated } = buildResolutionLines(resolvedGapsForReview, RESOLVED_GAPS_CHAR_BUDGET);
+        const { lines: gapLines, rulingsFile } = buildRulingsBlock(resolvedGapsForReview, { taskId, dataDir: getDataDir() });
         if (gapLines.length > 0) {
           resolvedGapsSection = `
 
 ## 規格裁決（驗證依據之一——使用者已拍板，效力等同規格條文）
-${gapLines.join('\n')}${gapsTruncated ? `\n（裁決清單已達大小上限截斷，其餘用 list_spec_gaps(taskId="${taskId}", status="resolved") 查看）` : ''}
+${gapLines.join('\n')}
 
-用法：驗證 logic／實作時，這些裁決**視同規格條文**——規格模糊或沒寫、但裁決有定的，以裁決為準（例如裁決「選 B：刪除前 confirm 彈窗」→ 程式必須是 confirm 彈窗才 matched）；實作與裁決矛盾一律判 missing，並在 note 註明違反哪條裁決。`;
+用法：驗證 logic／實作時，這些裁決**視同規格條文**——規格模糊或沒寫、但裁決有定的，以裁決為準（例如裁決「選 B：刪除前 confirm 彈窗」→ 程式必須是 confirm 彈窗才 matched）；實作與裁決矛盾一律判 missing，並在 note 註明違反哪條裁決。${rulingsFile ? `
+**判 missing 之前，先在裁決全文檔（\`${rulingsFile}\`）搜尋該項的關鍵字**——上面沒列出的裁決可能正好管到這一項；照裁決做對的東西不可判 missing。` : ''}`;
         }
       }
 

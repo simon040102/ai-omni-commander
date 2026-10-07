@@ -1,6 +1,9 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { runMigrations } from '../../db/schema.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 let testDb: Database.Database;
 
@@ -91,6 +94,111 @@ describe('context-tools', () => {
       // nextSteps mentions unresolved deps + gaps
       expect(data.nextSteps).toContain('前置任務未完成');
       expect(data.nextSteps).toContain('規格缺口 1 筆未解決');
+    });
+
+    // ── 防截斷：重要的放前面、大的放後面且有上限 ──
+    // 實測 244 次呼叫有 228 次（93%）被 25000 字上限截斷，被切掉的正是排在最後的
+    // projectNotes 與 nextSteps——接手的人最需要的那兩塊。
+    describe('不讓重要資訊被截掉', () => {
+      it('nextSteps、缺口、裁決排在 recentOutputs 之前', async () => {
+        seed(testDb);
+        addOutput(testDb, 'task-1', '進度');
+        const text = (await callTool(server, 'resume_task', { taskId: 'task-1' })).content[0].text;
+        const at = (k: string) => text.indexOf(`"${k}"`);
+        for (const k of ['nextSteps', 'openSpecGaps', 'resolvedGaps', 'projectNotes', 'dependencies']) {
+          expect(at(k), k).toBeGreaterThan(-1);
+          expect(at(k), k).toBeLessThan(at('recentOutputs'));
+        }
+      });
+
+      it('歷史回報很長 → 每筆截到上限並註明去哪看全文；整份不被截斷、nextSteps 還在', async () => {
+        seed(testDb);
+        for (let i = 0; i < 20; i++) addOutput(testDb, 'task-1', `第 ${i} 筆：${'長'.repeat(5000)}`);
+        const text = (await callTool(server, 'resume_task', { taskId: 'task-1' })).content[0].text;
+        expect(text).not.toContain('[已截斷]');
+        const data = JSON.parse(text);
+        expect(data.nextSteps).toBeTruthy();
+        expect(data.recentOutputs.outputs[19].content.length).toBeLessThan(700);
+        expect(data.recentOutputs.outputs[19].content).toContain('get_task_outputs');
+      });
+
+      it('整份仍超過上限 → 先少帶最舊的歷史回報（有分頁工具可補），不把 JSON 從中間截斷', async () => {
+        seed(testDb);
+        for (let i = 0; i < 20; i++) addOutput(testDb, 'task-1', `第 ${i} 筆：${'長'.repeat(600)}`);
+        const ins = testDb.prepare(`INSERT INTO spec_gaps (id, task_id, project_id, category, description) VALUES (?, 'task-1', 'proj-1', 'other', ?)`);
+        // 前段（缺口）本身放得下、加上歷史回報才超過——這時該少帶的是可分頁補取的歷史回報
+        for (let i = 0; i < 30; i++) ins.run(`open-${i}`, `未決缺口 ${i}：${'缺'.repeat(450)}`);
+        const text = (await callTool(server, 'resume_task', { taskId: 'task-1' })).content[0].text;
+        expect(text).not.toContain('[已截斷]');
+        const data = JSON.parse(text);                       // 仍是完整 JSON
+        expect(data.openSpecGaps).toHaveLength(30);         // 前面重要的一個不少
+        expect(data.recentOutputs.showing).toBeLessThan(20);
+        expect(data.recentOutputs.outputs.at(-1).content).toContain('第 19 筆');   // 留的是最新的
+        expect(data.recentOutputs.note).toContain('get_task_outputs');
+      });
+
+      it('裁決則數不多但每則全文很長 → 以全文大小算預算，照樣寫檔、不被截斷', async () => {
+        // 實測 3 支任務：裁決段在 prompt 預算內（那邊是摘要行），但 resume_task 回的是全文，13k～19k 字
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'resume-rulings-long-'));
+        const saved = process.env['DB_PATH'];
+        process.env['DB_PATH'] = path.join(tmpDir, 'omni.db');
+        try {
+          seed(testDb);
+          const ins = testDb.prepare(`
+            INSERT INTO spec_gaps (id, task_id, project_id, category, description, status, resolution_note, resolved_at)
+            VALUES (?, 'task-1', 'proj-1', 'other', ?, 'resolved', ?, '2026-09-01 00:00:00')
+          `);
+          for (let i = 0; i < 8; i++) ins.run(`own-${i}`, `問題 ${i}：${'問'.repeat(2000)}`, `裁決 ${i}：${'答'.repeat(2000)}`);
+          const text = (await callTool(server, 'resume_task', { taskId: 'task-1' })).content[0].text;
+          const data = JSON.parse(text);
+          expect(data.rulingsFile).toBeTruthy();
+          expect(data.resolvedGaps.length).toBeLessThan(8);
+          expect(data.resolvedGapsTotal).toBe(8);
+          expect(JSON.stringify(data.resolvedGaps).length).toBeLessThan(9000);
+          expect(fs.readFileSync(data.rulingsFile, 'utf8')).toContain('答'.repeat(2000));   // 全文在檔裡
+        } finally {
+          if (saved === undefined) delete process.env['DB_PATH']; else process.env['DB_PATH'] = saved;
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      });
+
+      it('專案筆記很多 → 依預算列出、其餘給則數與 list_project_notes 指引（不是被尾端截掉而無聲消失）', async () => {
+        seed(testDb);
+        const ins = testDb.prepare(`INSERT INTO project_notes (id, project_id, category, content) VALUES (?, 'proj-1', 'x', ?)`);
+        for (let i = 0; i < 80; i++) ins.run(`note-${i}`, `筆記 ${i}：${'註'.repeat(300)}`);
+        const text = (await callTool(server, 'resume_task', { taskId: 'task-1' })).content[0].text;
+        expect(text).not.toContain('[已截斷]');
+        const data = JSON.parse(text);
+        expect(data.projectNotes.length).toBeLessThan(80);
+        expect(data.projectNotesOmitted).toBe(80 - data.projectNotes.length);
+        expect(data.nextSteps).toContain('list_project_notes');
+      });
+
+      it('裁決很多 → 與派工／回對同一套：放得下的列、其餘在全文檔，nextSteps 指出檔案', async () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'resume-rulings-'));
+        const saved = process.env['DB_PATH'];
+        process.env['DB_PATH'] = path.join(tmpDir, 'omni.db');
+        try {
+          seed(testDb);
+          testDb.prepare(`INSERT INTO tasks (id, project_id, title, label, task_type) VALUES ('task-x', 'proj-1', 'KB', 'backend', 'feature')`).run();
+          const ins = testDb.prepare(`
+            INSERT INTO spec_gaps (id, task_id, project_id, category, description, status, resolution_note, resolved_at, scope)
+            VALUES (?, 'task-x', 'proj-1', 'other', ?, 'resolved', ?, '2026-09-01 00:00:00', 'project')
+          `);
+          for (let i = 0; i < 60; i++) ins.run(`p-${i}`, `全案問題 ${i}`, `全案裁決 ${i}：${'丁'.repeat(300)}`);
+          const text = (await callTool(server, 'resume_task', { taskId: 'task-1' })).content[0].text;
+          expect(text).not.toContain('[已截斷]');
+          const data = JSON.parse(text);
+          const file = path.join(tmpDir, 'rulings', 'task-1.md').replace(/\\/g, '/');
+          expect(data.rulingsFile).toBe(file);
+          expect(data.resolvedGapsTotal).toBe(60);
+          expect(data.nextSteps).toContain(file);
+          expect(fs.readFileSync(file, 'utf8')).toContain('全案問題 59');
+        } finally {
+          if (saved === undefined) delete process.env['DB_PATH']; else process.env['DB_PATH'] = saved;
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      });
     });
 
     it('summarizes flow-gate state and points at the missing gate step', async () => {

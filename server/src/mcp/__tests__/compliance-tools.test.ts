@@ -596,26 +596,45 @@ describe('compliance-tools', () => {
       expect(text).toContain('選 B：刪除前 confirm 彈窗');
     });
 
-    it('truncates the 規格裁決 section at the char budget and points at list_spec_gaps', async () => {
-      seedProject(testDb);
-      seedTask(testDb);
-      await callTool(server, 'save_spec_checklist', { taskId: 'task-1', items: [UI_ITEM] });
-      // 20 筆長裁決（每行約 400+ 字元）→ 超過 4000 預算必截斷
-      const insert = testDb.prepare(`
-        INSERT INTO spec_gaps (id, task_id, project_id, category, description, status, resolution_note, resolved_at)
-        VALUES (?, 'task-1', 'proj-1', 'logic_unclear', ?, 'resolved', ?, ?)
-      `);
-      for (let i = 0; i < 20; i++) {
-        insert.run(`gap-${i}`, `問題 ${i}：${'甲'.repeat(120)}`, `裁決 ${i}：${'乙'.repeat(280)}`, `2026-01-01 00:00:${String(i).padStart(2, '0')}`);
-      }
+    // 原本這裡驗「超過 4000 字就截斷、指向 list_spec_gaps」——回對員因此只看得到前十幾則，
+    // 會把照後面的裁決做對的東西判成 missing。改成：放得下的照列、**全部**全文寫檔、指出路徑，
+    // 並要求判 missing 前先搜尋裁決檔。prompt 照樣有上限（裁決段在前，不能把尾端的檢查表擠掉）。
+    describe('裁決超過預算', () => {
+      let tmpDir: string;
+      let saved: string | undefined;
+      beforeEach(() => {
+        tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omni-rulings-'));
+        saved = process.env['DB_PATH'];
+        process.env['DB_PATH'] = path.join(tmpDir, 'omni.db');   // 裁決檔寫進隔離的 data dir
+      });
+      afterEach(() => {
+        if (saved === undefined) delete process.env['DB_PATH']; else process.env['DB_PATH'] = saved;
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      });
 
-      const text = (await callTool(server, 'get_compliance_review_plan', { taskId: 'task-1' })).content[0].text;
-      expect(text).toContain('## 規格裁決（驗證依據之一');
-      expect(text).toContain('裁決清單已達大小上限截斷');
-      expect(text).toContain('list_spec_gaps(taskId="task-1", status="resolved")');
-      // 最早的裁決保留、最晚的被截掉（resolved_at ASC 進預算）
-      expect(text).toContain('裁決 0：');
-      expect(text).not.toContain('裁決 19：');
+      it('放得下的照列、其餘不丟——全部全文寫檔並指出路徑，要求判 missing 前先搜尋', async () => {
+        seedProject(testDb);
+        seedTask(testDb);
+        await callTool(server, 'save_spec_checklist', { taskId: 'task-1', items: [UI_ITEM] });
+        const insert = testDb.prepare(`
+          INSERT INTO spec_gaps (id, task_id, project_id, category, description, status, resolution_note, resolved_at)
+          VALUES (?, 'task-1', 'proj-1', 'logic_unclear', ?, 'resolved', ?, ?)
+        `);
+        for (let i = 0; i < 20; i++) {
+          insert.run(`gap-${i}`, `問題 ${i}：${'甲'.repeat(120)}`, `裁決 ${i}：${'乙'.repeat(280)}`, `2026-01-01 00:00:${String(i).padStart(2, '0')}`);
+        }
+
+        const text = (await callTool(server, 'get_compliance_review_plan', { taskId: 'task-1' })).content[0].text;
+        expect(text).toContain('## 規格裁決（驗證依據之一');
+        expect(text).toContain('裁決 0：');            // 最早的照列
+        expect(text).not.toContain('裁決 19：');        // 放不下的不塞進 prompt……
+        const file = path.join(tmpDir, 'rulings', 'task-1.md').replace(/\\/g, '/');
+        expect(text).toContain(file);                   // ……但指出全文在哪
+        expect(text).toContain('判 missing 之前');       // 而且要求先搜尋再判
+        const body = fs.readFileSync(file, 'utf8');
+        for (let i = 0; i < 20; i++) expect(body).toContain(`裁決 ${i}：`);   // 一則不少
+        expect(body).toContain('乙'.repeat(280));      // 不截短
+      });
     });
 
     it('returns a full dispatch plan: independent reviewer, per-item evidence, logic verification, spec doc paths', async () => {

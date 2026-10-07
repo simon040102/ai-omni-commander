@@ -15,10 +15,17 @@ import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
 import { getMcpDb } from '../db.js';
 import { notifyWebServer } from '../notify.js';
-import { truncateResponse, parseJson } from '../helpers.js';
+import { truncateResponse, parseJson, getDataDir, CHARACTER_LIMIT } from '../helpers.js';
 import { getFlowState, getCompletionBlockers, logTaskOutput, type FlowGateState, type RoleFlowState, type FlowRole } from '../flow-gate.js';
 import { runSpecChangeCheck, type SpecChangeTarget } from '../spec-change.js';
-import { listResolvedSpecGaps, listOtherTaskResolvedGapDigest } from '../../utils/specGapResolution.js';
+import { listResolvedSpecGaps, listOtherTaskResolvedGapDigest, buildRulingsBlock } from '../../utils/specGapResolution.js';
+
+/** resume_task 每筆歷史回報最多帶多少字——全文用 get_task_outputs 分頁取 */
+const RESUME_OUTPUT_EXCERPT_CHARS = 500;
+/** resume_task 專案筆記的字元預算——超過的給則數與 list_project_notes 指引 */
+const RESUME_NOTES_CHAR_BUDGET = 6000;
+/** resume_task 已裁決缺口（全文 JSON）的字元預算——超過的在裁決全文檔 */
+const RESUME_RULINGS_JSON_BUDGET = 8000;
 
 interface TaskRow {
   id: string;
@@ -117,7 +124,14 @@ export function registerContextTools(server: McpServer): void {
         WHERE agent_id = ? AND content NOT LIKE '[DISPATCH]%' ORDER BY id DESC LIMIT ?
       `).all(agentId, limit) as Array<{ stream_type: string; content: string; timestamp: string }>)
         .reverse()
-        .map(r => ({ type: r.stream_type, content: r.content, timestamp: r.timestamp }));
+        .map(r => ({
+          type: r.stream_type,
+          // 每筆截到上限：原本全文照塞，20 筆長回報就把整份撐過截斷上限，排在後面的 nextSteps 被切掉
+          content: r.content.length > RESUME_OUTPUT_EXCERPT_CHARS
+            ? `${r.content.slice(0, RESUME_OUTPUT_EXCERPT_CHARS)}…（共 ${r.content.length} 字，全文用 get_task_outputs(taskId="${taskId}") 查）`
+            : r.content,
+          timestamp: r.timestamp,
+        }));
 
       // ── open spec gaps ──
       const openGaps = db.prepare(`
@@ -129,6 +143,24 @@ export function registerContextTools(server: McpServer): void {
       // 來源 SQL 與派工 prompt / AI 回對計畫共用（utils/specGapResolution），
       // 讓接手 session 看到「已裁決了什麼」，不需依賴前一個 session 的對話。
       const resolvedGaps = listResolvedSpecGaps(db, taskId);
+      // 這裡回的是**全文**（派工與回對那邊是摘要行），所以預算以全文大小算。超過就寫同一份
+      // 全文檔（與派工、AI 回對同一個路徑、同樣內容），只列放得下的本任務裁決。
+      const gapObj = (g: typeof resolvedGaps[number]) => ({ id: g.id, category: g.category, description: g.description, resolutionNote: g.resolutionNote, resolvedAt: g.resolvedAt, scope: g.scope, fromOtherTask: g.fromOtherTask });
+      let rulingsFile: string | null = null;
+      let shownResolvedGaps = resolvedGaps;
+      if (JSON.stringify(resolvedGaps.map(gapObj)).length > RESUME_RULINGS_JSON_BUDGET) {
+        rulingsFile = buildRulingsBlock(resolvedGaps, { taskId, dataDir: getDataDir(), inlineBudget: 0 }).rulingsFile;
+        shownResolvedGaps = [];
+        let used = 0;
+        for (const g of resolvedGaps) {
+          if (g.fromOtherTask) break;   // 全案的一律在檔案裡——列一半最容易讓人以為看完了
+          const size = JSON.stringify(gapObj(g)).length;
+          if (used + size > RESUME_RULINGS_JSON_BUDGET) break;
+          shownResolvedGaps.push(g);
+          used += size;
+        }
+      }
+      const rulings = { rulingsFile };
 
       // ── 同專案、掛在別支任務、且**沒有**標成全案適用的已裁決缺口 ──
       // 這不是裁決、不注入，只是線索：裁決是「誰遇到誰開」的，管到別人卻沒標範圍的，
@@ -172,6 +204,15 @@ export function registerContextTools(server: McpServer): void {
         SELECT id, category, content, created_at FROM project_notes
         WHERE project_id = ? AND active = 1 ORDER BY created_at ASC
       `).all(task.project_id) as Array<{ id: string; category: string | null; content: string; created_at: string }>);
+      // 筆記有預算：原本全塞、排在最後，一超過截斷上限就整段無聲消失
+      const shownNotes: typeof notes = [];
+      let notesUsed = 0;
+      for (const n of notes) {
+        if (notesUsed + n.content.length > RESUME_NOTES_CHAR_BUDGET) break;
+        shownNotes.push(n);
+        notesUsed += n.content.length;
+      }
+      const notesOmitted = notes.length - shownNotes.length;
 
       // ── nextSteps guidance ──
       const steps: string[] = [];
@@ -183,7 +224,12 @@ export function registerContextTools(server: McpServer): void {
         steps.push(`規格缺口 ${openGaps.length} 筆未解決 → 先與使用者確認補規格（拍板後 resolve_spec_gap(gapId, resolutionNote=具體裁決) 落地），不要對缺口部分自行編造`);
       }
       if (resolvedGaps.length > 0) {
-        steps.push(`已有 ${resolvedGaps.length} 筆規格裁決（見 resolvedGaps）——使用者已拍板，效力等同規格，實作與 AI 回對必須遵守，不可用對話轉述替代`);
+        steps.push(rulings.rulingsFile
+          ? `已有 ${resolvedGaps.length} 筆規格裁決——resolvedGaps 只列了 ${shownResolvedGaps.length} 筆，**全部全文在 ${rulings.rulingsFile}**（與派工、AI 回對同一份）；動手前先用 Grep 在這份檔搜相關關鍵字。使用者已拍板，效力等同規格，不可用對話轉述替代`
+          : `已有 ${resolvedGaps.length} 筆規格裁決（見 resolvedGaps）——使用者已拍板，效力等同規格，實作與 AI 回對必須遵守，不可用對話轉述替代`);
+      }
+      if (notesOmitted > 0) {
+        steps.push(`專案經驗筆記共 ${notes.length} 則，projectNotes 只列了前 ${shownNotes.length} 則——其餘用 list_project_notes(projectId="${task.project_id}") 查看`);
       }
       if (otherTaskGapHints.length > 0) {
         steps.push(`同專案另有 ${otherTaskGapHints.length} 筆已裁決缺口掛在**別支任務**底下、且未標成全案適用（見 otherTaskGapHints）——`
@@ -233,25 +279,41 @@ export function registerContextTools(server: McpServer): void {
           frontendPath: project.frontend_path,
           backendPath: project.backend_path,
         } : null,
+        // 排序原則：回應超過截斷上限時被切掉的是尾端——接手最需要的（下一步、缺口、裁決、
+        // 依賴、筆記）放前面；大而可分頁補取的（派工快照、歷史回報）放最後。
+        nextSteps: steps.join('\n'),
         flowGate,
-        // lastDispatch 放在 recentOutputs 之前：回應超過截斷上限時被切掉的是尾端，
-        // 派工快照（中斷復原的關鍵資料）必須排在歷史敘事前面才不會被截掉。
-        ...(lastDispatch ? { lastDispatch } : {}),
-        recentOutputs: { total: outputsTotal, showing: recentOutputs.length, outputs: recentOutputs },
         openSpecGaps: openGaps.map(g => ({ id: g.id, category: g.category, description: g.description, createdAt: g.created_at })),
         // 使用者已拍板的規格裁決——效力等同規格條文，實作/驗證必須遵守（resolve_spec_gap 落地）
-        resolvedGaps: resolvedGaps.map(g => ({ id: g.id, category: g.category, description: g.description, resolutionNote: g.resolutionNote, resolvedAt: g.resolvedAt, scope: g.scope, fromOtherTask: g.fromOtherTask })),
+        resolvedGaps: shownResolvedGaps.map(gapObj),
+        resolvedGapsTotal: resolvedGaps.length,
+        ...(rulings.rulingsFile ? { rulingsFile: rulings.rulingsFile } : {}),
         otherTaskGapHints,
-        lastVerification: lastVerification ? { content: lastVerification.content, timestamp: lastVerification.timestamp } : null,
         dependencies: dependencies.map(d => ({ taskId: d.id, title: d.title, status: d.status })),
-        projectNotes: notes.map(n => ({ id: n.id, category: n.category, content: n.content })),
-        nextSteps: steps.join('\n'),
+        lastVerification: lastVerification ? { content: lastVerification.content, timestamp: lastVerification.timestamp } : null,
+        projectNotes: shownNotes.map(n => ({ id: n.id, category: n.category, content: n.content })),
+        projectNotesOmitted: notesOmitted,
+        // lastDispatch 仍排在 recentOutputs 之前：派工快照是中斷復原的關鍵資料
+        ...(lastDispatch ? { lastDispatch } : {}),
+        recentOutputs: { total: outputsTotal, showing: recentOutputs.length, outputs: recentOutputs } as
+          { total: number; showing: number; outputs: typeof recentOutputs; note?: string },
       };
+
+      // 仍超過上限 → 先少帶最舊的歷史回報（唯一有分頁工具可補的區塊），而不是把 JSON 從中間截斷、
+      // 連帶把後面的欄位一起切掉。真的砍到沒有還超過，才退回 truncateResponse。
+      // 不縮排：縮排空白不帶資訊，卻佔掉一大塊截斷上限。
+      let text = JSON.stringify(result);
+      while (text.length > CHARACTER_LIMIT && result.recentOutputs.outputs.length > 0) {
+        result.recentOutputs.outputs.shift();
+        result.recentOutputs.showing = result.recentOutputs.outputs.length;
+        result.recentOutputs.note = `為了不超過回應上限，只帶最近 ${result.recentOutputs.showing} 筆；更早的用 get_task_outputs(taskId="${taskId}", limit, offset) 分頁取得。`;
+        text = JSON.stringify(result);
+      }
 
       return {
         content: [{
           type: 'text' as const,
-          text: truncateResponse(JSON.stringify(result, null, 2), '歷史回報過多——用 get_task_outputs(taskId, limit, offset) 分頁取得其餘紀錄。'),
+          text: truncateResponse(text, '歷史回報過多——用 get_task_outputs(taskId, limit, offset) 分頁取得其餘紀錄。'),
         }],
       };
     },
