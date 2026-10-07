@@ -1,6 +1,5 @@
 import type { DocType, Workspace, AgentRole, SuperpowersConfig, SuperpowersFeature, TestOptions } from '@omni/shared';
 import type { AgentManager } from '../agent/AgentManager.js';
-import type { TaskDispatcher } from './TaskDispatcher.js';
 import type { ContextSync } from '../eventbus/ContextSync.js';
 import type { EventBus } from '../eventbus/EventBus.js';
 import { DocumentParser, type ParsedDocument } from '../documents/DocumentParser.js';
@@ -33,7 +32,6 @@ export class SpecModeHandler {
 
   constructor(
     private agentManager: AgentManager,
-    private dispatcher: TaskDispatcher,
     private contextSync: ContextSync,
     private eventBus: EventBus,
   ) {

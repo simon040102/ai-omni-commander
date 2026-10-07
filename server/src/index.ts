@@ -12,7 +12,6 @@ import { EventBus } from './eventbus/EventBus.js';
 import { ContextSync } from './eventbus/ContextSync.js';
 import { ContractWatcher } from './eventbus/ContractWatcher.js';
 import { AgentManager } from './agent/AgentManager.js';
-import { TaskDispatcher } from './orchestrator/TaskDispatcher.js';
 import { SpecModeHandler } from './orchestrator/SpecModeHandler.js';
 import { ExecutionPipeline } from './orchestrator/ExecutionPipeline.js';
 import { MasterOrchestrator } from './orchestrator/MasterOrchestrator.js';
@@ -22,7 +21,6 @@ import { registerHandlers } from './websocket/MessageRouter.js';
 import { AsanaMcpClient } from './asana/AsanaMcpClient.js';
 import { AsanaSyncService } from './asana/AsanaSyncService.js';
 import { TaskClassifier } from './orchestrator/TaskClassifier.js';
-import { RetryHandler } from './review/RetryHandler.js';
 import { SvnSpecService } from './svn/SvnSpecService.js';
 import { taskFunctionCode } from './utils/taskFunctionCode.js';
 import { validateResolutionNote } from './utils/specGapResolution.js';
@@ -123,23 +121,8 @@ async function main() {
   await contextSync.init();
 
   const agentManager = new AgentManager(eventBus, contextSync);
-  const dispatcher = new TaskDispatcher(eventBus, contextSync);
 
-  // Wire dispatcher to agent manager
-  dispatcher.onDispatch(async (taskId, role, prompt) => {
-    const task = db.prepare('SELECT project_id FROM tasks WHERE id = ?').get(taskId) as { project_id: string } | undefined;
-    if (!task) return;
-    // fullstack label is handled by ExecutionPipeline.executeTask → FullstackController
-    if (role === 'fullstack') return;
-    await agentManager.startAgent({
-      projectId: task.project_id,
-      role: role as import('@omni/shared').AgentRole,
-      taskId,
-      prompt,
-    });
-  });
-
-  const specHandler = new SpecModeHandler(agentManager, dispatcher, contextSync, eventBus);
+  const specHandler = new SpecModeHandler(agentManager, contextSync, eventBus);
   const specCacheDir = path.join(path.dirname(config.dbPath), 'spec-cache');
   const pipeline = new ExecutionPipeline(agentManager, eventBus, specHandler.getDocumentParser(), specCacheDir);
 
@@ -152,10 +135,6 @@ async function main() {
 
   // v2: Workspace services
   const workspaceScanner = new WorkspaceScanner();
-
-  // v3: Auto-retry
-  // Note: separate review agent (CodeReviewAgent/ReviewTrigger) replaced by self-review in AgentManager.handleAgentComplete
-  const _retryHandler = new RetryHandler(eventBus, pipeline);
 
   // Load Asana PAT from DB, or persist ENV value to DB for portability
   {
