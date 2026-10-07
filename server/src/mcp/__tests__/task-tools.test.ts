@@ -20,7 +20,7 @@ vi.mock('../svn-status.js', () => ({
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { registerTaskTools } from '../tools/task-tools.js';
-import { registerVerificationTools, UNRELATED_TEST_FAILURE_RULE } from '../tools/verification-tools.js';
+import { registerVerificationTools, UNRELATED_TEST_FAILURE_RULE, TEST_SCOPE_NOTE_RULE } from '../tools/verification-tools.js';
 import { isSvnCliAvailable, fetchRemoteLastModified } from '../svn-status.js';
 import { callTool } from './test-helpers.js';
 
@@ -874,6 +874,8 @@ describe('task-tools', () => {
       expect(result.content[0].text).toContain('get_test_baseline_plan');
       // G4 第三處（閘門錯誤訊息）與常數全文同步（task-tools 直接插值 UNRELATED_TEST_FAILURE_RULE）
       expect(result.content[0].text).toContain(UNRELATED_TEST_FAILURE_RULE);
+      // 擋下時直接告訴 agent「只跑相關測試也能過、但要標範圍」——否則它會改去求跳過整道閘
+      expect(result.content[0].text).toContain(TEST_SCOPE_NOTE_RULE);
 
       const status = (testDb.prepare("SELECT status FROM tasks WHERE id = 'task-1'").get() as { status: string }).status;
       expect(status).toBe('in_progress');
@@ -1074,6 +1076,73 @@ describe('task-tools', () => {
       expect(text).toContain('skipGates');
     });
 
+    // ── 一次列出全部沒過的閘＋擋下留紀錄 ──
+    // 原本遇到第一道沒過就 return，agent 修完一道再呼叫才看到下一道；擋下也不留紀錄，
+    // 量不出各閘每月擋了多少次。判斷條件不變。
+    const blockRows = () => testDb.prepare("SELECT content FROM agent_outputs WHERE task_id = 'task-1' AND content LIKE '[GATE_BLOCK]%'").all() as Array<{ content: string }>;
+
+    it('兩道都沒過 → 一次列出兩道（不用來回呼叫才看到下一道）', async () => {
+      startTwoGateTask();
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      expect(result.isError).toBe(true);
+      const text = result.content[0].text;
+      expect(text).toContain('2 道閘');
+      expect(text).toContain('單元測試閘門未通過');
+      expect(text).toContain('從未取得執行計畫');
+      // 照建議修復順序：先補流程紀錄（執行計畫）、再測試
+      expect(text.indexOf('從未取得執行計畫')).toBeLessThan(text.indexOf('單元測試閘門未通過'));
+      expect(statusOf()).toBe('in_progress');
+    });
+
+    it('只有一道沒過 → 訊息維持原樣（不加多閘標題）', async () => {
+      startTwoGateTask();
+      seedDispatch(testDb);   // 補上派工記錄，只剩單元測試閘
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text.startsWith('Error: 單元測試閘門未通過')).toBe(true);
+    });
+
+    it('擋下時寫一筆 [GATE_BLOCK]，列出被擋的閘；同一組閘短時間內重複擋不重寫', async () => {
+      startTwoGateTask();
+      await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      const rows = blockRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].content).toContain('unit');
+      expect(rows[0].content).toContain('plan');
+    });
+
+    it('被擋的閘組合變了 → 再寫一筆', async () => {
+      startTwoGateTask();
+      await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      seedDispatch(testDb);
+      await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      const rows = blockRows();
+      expect(rows).toHaveLength(2);
+      expect(rows[1].content).toContain('unit');
+      expect(rows[1].content).not.toContain('plan');
+    });
+
+    it('跳過一道、另一道擋下 → [GATE_BLOCK] 只記真的擋下的那道，不記 [SKIP]', async () => {
+      startTwoGateTask();
+      await callTool(server, 'update_task_status', {
+        taskId: 'task-1', status: 'completed', skipGates: ['unit'], skipReason: '使用者同意只跑相關測試，全綠',
+      });
+      const rows = blockRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].content).toContain('plan');
+      expect(rows[0].content).not.toMatch(/\bunit\b/);
+      expect(skipRows()).toEqual([]);
+    });
+
+    it('全部通過結案 → 不寫 [GATE_BLOCK]', async () => {
+      startTwoGateTask();
+      await callTool(server, 'update_task_status', {
+        taskId: 'task-1', status: 'completed', skipGates: ['unit', 'plan'], skipReason: '使用者同意：口頭派工緊急修復，只跑相關測試',
+      });
+      expect(blockRows()).toEqual([]);
+    });
+
     it('不認得的閘名 → 拒絕（參數驗證）', async () => {
       startTwoGateTask();
       const result = await callTool(server, 'update_task_status', {
@@ -1081,6 +1150,106 @@ describe('task-tools', () => {
       });
       expect(result.isError).toBe(true);
       expect(statusOf()).toBe('in_progress');
+    });
+  });
+
+  // 實測 9–10 月 26 張任務跳過執行計畫閘，全是同一型：一張報表拆成幾張子任務，工作都在
+  // 其中一張做完並走完閘門，其餘子任務沒東西可驗、只能跳閘。coveredBy 是這種情況的正式出口：
+  // 把證據接到那張真的走完閘門的任務上，而不是靠一句「無程式變更」。只解開執行計畫閘。
+  describe('update_task_status coveredBy（已由別張任務涵蓋）', () => {
+    function seedCompletedCover(id = 'task-cover', projectId = 'proj-1', extraOutput?: string) {
+      seedTask(testDb, id, projectId, 'backend');
+      testDb.prepare("UPDATE tasks SET status = 'completed' WHERE id = ?").run(id);
+      if (extraOutput) {
+        testDb.prepare(`INSERT OR IGNORE INTO agents (id, project_id, role, status, model) VALUES (?, ?, 'backend', 'stopped', 'external')`).run(`mcp-${id}`, projectId);
+        testDb.prepare(`INSERT INTO agent_outputs (agent_id, task_id, stream_type, content) VALUES (?, ?, 'system', ?)`).run(`mcp-${id}`, id, extraOutput);
+      }
+    }
+    function startSubTask(configJson: string | null = null) {
+      seedProject(testDb);
+      if (configJson) testDb.prepare("UPDATE projects SET config_json = ? WHERE id = 'proj-1'").run(configJson);
+      seedTask(testDb, 'task-1', 'proj-1', 'frontend');   // 沒有執行計畫、沒有派工記錄
+      testDb.prepare("UPDATE tasks SET status = 'in_progress' WHERE id = 'task-1'").run();
+    }
+    const close = (args: Record<string, unknown>) =>
+      callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed', ...args });
+    const outputs = (prefix: string) =>
+      testDb.prepare("SELECT content FROM agent_outputs WHERE task_id = 'task-1' AND content LIKE ?").all(`${prefix}%`) as Array<{ content: string }>;
+    const NOTE = '使用者同意：本子任務無程式變更，前後端都在 task-cover 做完並驗過';
+
+    it('涵蓋任務已乾淨結案 → 可結案；留 [COVERED_BY]、不留 [SKIP]', async () => {
+      startSubTask();
+      seedCompletedCover();
+      const result = await close({ coveredBy: 'task-cover', coverageNote: NOTE });
+      expect(result.isError).toBeUndefined();
+      expect(outputs('[COVERED_BY]')).toHaveLength(1);
+      expect(outputs('[COVERED_BY]')[0].content).toContain('task-cover');
+      expect(outputs('[SKIP]')).toEqual([]);
+      expect(result.content[0].text).toContain('task-cover');
+    });
+
+    it('涵蓋＋同時跳過另一道閘 → 回應兩件事都講（不互相蓋掉）', async () => {
+      startSubTask(JSON.stringify({ frontendTestCommand: 'pnpm vitest run' }));
+      seedCompletedCover();
+      const result = await close({ coveredBy: 'task-cover', coverageNote: NOTE, skipGates: ['unit'], skipReason: '使用者同意：無程式變更，沒有可跑的相關測試' });
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).toContain('已由 task-cover 涵蓋');
+      expect(result.content[0].text).toContain('跳過的閘門：單元測試');
+    });
+
+    it('沒寫 coverageNote → 拒絕', async () => {
+      startSubTask();
+      seedCompletedCover();
+      const result = await close({ coveredBy: 'task-cover' });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('coverageNote');
+    });
+
+    it('涵蓋任務還沒結案 → 拒絕', async () => {
+      startSubTask();
+      seedTask(testDb, 'task-cover', 'proj-1', 'backend');
+      const result = await close({ coveredBy: 'task-cover', coverageNote: NOTE });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('尚未結案');
+    });
+
+    it('涵蓋任務自己是跳過閘門才結案的 → 拒絕（不能拿沒驗完的任務當證據）', async () => {
+      startSubTask();
+      seedCompletedCover('task-cover', 'proj-1', '[SKIP] 使用者跳過單元測試閘門：趕時間');
+      const result = await close({ coveredBy: 'task-cover', coverageNote: NOTE });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('[SKIP]');
+    });
+
+    it('涵蓋任務自己也是「被涵蓋」結案的 → 拒絕（不准串鏈）', async () => {
+      startSubTask();
+      seedCompletedCover('task-cover', 'proj-1', '[COVERED_BY] task-x：…');
+      const result = await close({ coveredBy: 'task-cover', coverageNote: NOTE });
+      expect(result.isError).toBe(true);
+    });
+
+    it('涵蓋任務在別的專案 → 拒絕', async () => {
+      startSubTask();
+      seedProject(testDb, 'proj-2');
+      seedCompletedCover('task-cover', 'proj-2');
+      const result = await close({ coveredBy: 'task-cover', coverageNote: NOTE });
+      expect(result.isError).toBe(true);
+    });
+
+    it('指向自己 → 拒絕', async () => {
+      startSubTask();
+      const result = await close({ coveredBy: 'task-1', coverageNote: NOTE });
+      expect(result.isError).toBe(true);
+    });
+
+    it('只解開執行計畫閘：專案有設單元測試指令時，單元測試閘照擋，也不留 [COVERED_BY]', async () => {
+      startSubTask(JSON.stringify({ frontendTestCommand: 'pnpm vitest run' }));
+      seedCompletedCover();
+      const result = await close({ coveredBy: 'task-cover', coverageNote: NOTE });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('單元測試閘門');
+      expect(result.content[0].text).not.toContain('從未取得執行計畫');
+      expect(outputs('[COVERED_BY]')).toEqual([]);
     });
   });
 
@@ -1204,6 +1373,63 @@ describe('task-tools', () => {
       registerVerificationTools(server);
     });
 
+    // ── 「不適用」第三態 ──
+    // 實測 9–10 月約 1/4 的 PASS 其實寫著「N/A／不適用」，統計分不出真的驗過的有多少。
+    // N/A 只是分開記錄，不打開任何後門：不能當單元測試通過、不能蓋掉先前的 FAIL。
+    const reportRaw = (results: unknown[]) => callTool(server, 'report_verification_result', { taskId: 'task-1', results });
+
+    it('回報 N/A：記成 [N/A]、摘要分開計、不出現「未通過」警告', async () => {
+      startTask('backend');
+      const r = await reportRaw([
+        { item: 'be-api-smoke', passed: true, note: 'curl 200' },
+        { item: 'be-ddl-match', notApplicable: true, note: '本任務沒有動到任何資料表' },
+      ]);
+      expect(r.isError).toBeUndefined();
+      expect(r.content[0].text).toContain('1/1 通過');
+      expect(r.content[0].text).toContain('不適用 1 項');
+      expect(r.content[0].text).not.toContain('未通過');
+      const row = testDb.prepare("SELECT content FROM agent_outputs WHERE task_id = 'task-1' AND content LIKE '[VERIFICATION]%'").get() as { content: string };
+      expect(row.content).toContain('- [N/A] be-ddl-match — 本任務沒有動到任何資料表');
+    });
+
+    it('N/A 沒寫理由 → 拒絕（不適用一定要說為什麼）', async () => {
+      startTask('backend');
+      const r = await reportRaw([{ item: 'be-ddl-match', notApplicable: true }]);
+      expect(r.isError).toBe(true);
+      expect(r.content[0].text).toContain('理由');
+    });
+
+    it('既沒給 passed 也沒標 N/A → 拒絕', async () => {
+      startTask('backend');
+      const r = await reportRaw([{ item: 'be-ddl-match', note: 'x' }]);
+      expect(r.isError).toBe(true);
+    });
+
+    it('N/A 項不擋結案，也算「已回報」（不出現在未回報提醒）', async () => {
+      startTask('backend');
+      await reportRaw([{ item: 'be-ddl-match', notApplicable: true, note: '沒動資料表' }]);
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).not.toContain('- be-ddl-match：');
+    });
+
+    it('先 FAIL 後改報 N/A → 仍然擋（N/A 不能拿來蓋掉失敗）', async () => {
+      startTask('backend');
+      await report([{ item: 'be-ddl-match', passed: false, note: '欄位缺 MODIFY_DATE' }]);
+      await reportRaw([{ item: 'be-ddl-match', notApplicable: true, note: '改說不適用' }]);
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('be-ddl-match');
+    });
+
+    it('單元測試項報 N/A → 單元測試閘照擋（N/A 不能當作測試通過）', async () => {
+      startTask('backend', JSON.stringify({ backendTestCommand: 'mvn test' }));
+      await reportRaw([{ item: 'be-unit-tests', notApplicable: true, note: '說沒有可測的' }]);
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('單元測試閘門');
+    });
+
     it('任一驗收項最新一筆為 FAIL → 擋，訊息列出 FAIL 項並指引重新回報', async () => {
       startTask('backend');
       await report([
@@ -1253,6 +1479,32 @@ describe('task-tools', () => {
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('單元測試閘門');
       expect(result.content[0].text).not.toContain('驗收結果閘門'); // 專屬閘門先擋，不重複報
+    });
+
+    it('單測項 FAIL＋使用者只同意跳單元測試閘 → 可結案，不必再多列 verify（同一個 FAIL 歸單元測試閘管）', async () => {
+      startTask('backend', JSON.stringify({ backendTestCommand: 'mvn test' }));
+      await report([{ item: 'be-unit-tests', passed: false, note: '3 個既有失敗' }]);
+
+      const result = await callTool(server, 'update_task_status', {
+        taskId: 'task-1', status: 'completed', skipGates: ['unit'], skipReason: '使用者同意：3 個失敗皆為既有問題，另開基線修復',
+      });
+      expect(result.isError).toBeUndefined();
+      const skips = testDb.prepare("SELECT content FROM agent_outputs WHERE task_id = 'task-1' AND content LIKE '[SKIP]%'").all() as Array<{ content: string }>;
+      expect(skips.map(s => s.content).some(c => c.includes('驗收結果閘門'))).toBe(false);
+    });
+
+    it('單測項 FAIL＋另一個驗收項也 FAIL → 兩道都擋（單測歸單測閘、其他歸驗收閘）', async () => {
+      startTask('backend', JSON.stringify({ backendTestCommand: 'mvn test' }));
+      await report([
+        { item: 'be-unit-tests', passed: false, note: '3 個失敗' },
+        { item: 'be-ddl-match', passed: false, note: '欄位缺 MODIFY_DATE' },
+      ]);
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      expect(result.isError).toBe(true);
+      const text = result.content[0].text;
+      expect(text).toContain('單元測試閘門');
+      expect(text).toContain('驗收結果閘門');
+      expect(text).toContain('be-ddl-match');
     });
 
     it('單測項 PASS 但其他驗收項 FAIL → 由驗收結果閘門擋', async () => {

@@ -37,6 +37,14 @@ export const UNRELATED_TEST_FAILURE_RULE =
   '自己任務相關的測試全綠即可回報 passed=true，note 必列無關失敗清單';
 
 /**
+ * 測試範圍標記。「只跑相關測試」本來就被上一條允許，但沒寫出來時 agent 會改去求
+ * 跳過整道閘（實測 10 月 6 張任務如此）。寫明的同時要求標範圍——只跑部分測試漏掉
+ * 別處回歸的機會較大，要能量出「跑全套」的比例有沒有在下降。只是要求，閘門不檢查。
+ */
+export const TEST_SCOPE_NOTE_RULE =
+  '跑不了全套（機器負載、時間不夠）時，跑本任務相關的測試全綠也可回報 passed=true；不論哪種，note 開頭都要標明範圍「[全套]」或「[相關]」，並寫實際執行的指令與結果（例：[相關] pnpm vitest run src/dm07 → 49 passed）';
+
+/**
  * 判 FAIL 前的環境／程式歸因規則。驗收 FAIL 會擋結案（第六道閘門），
  * 但實務上大量「測不過」源自環境（schema 未同步、設定缺漏、服務註冊殘留、
  * session 過期），與受測程式無關——直接記 FAIL 會把環境債掛在任務頭上。
@@ -119,7 +127,7 @@ function unitTestItem(req: RequiredUnitTestItem): VerificationItem {
   return {
     id: req.id,
     item: unitTestItemText(req.command),
-    how: `在 ${req.side} workspace 執行 \`${req.command}\`，確認全數通過。單元測試只驗邏輯，不驗 SQL 和欄位名——API 煙霧測試照舊執行，是補強不是取代。跑全套撞到既有的**無關失敗**（非本任務造成）→ 不可順手修：${UNRELATED_TEST_FAILURE_RULE}，並建議使用者執行 get_test_baseline_plan 做基線修復`,
+    how: `在 ${req.side} workspace 執行 \`${req.command}\`，確認全數通過。單元測試只驗邏輯，不驗 SQL 和欄位名——API 煙霧測試照舊執行，是補強不是取代。跑全套撞到既有的**無關失敗**（非本任務造成）→ 不可順手修：${UNRELATED_TEST_FAILURE_RULE}，並建議使用者執行 get_test_baseline_plan 做基線修復。${TEST_SCOPE_NOTE_RULE}`,
   };
 }
 
@@ -155,6 +163,29 @@ export function listVerificationEntries(
     }
   }
   return entries;
+}
+
+/**
+ * 此任務回報過的驗收項（PASS／FAIL／N/A 都算）——只給「未回報提醒」用。
+ * 閘門判定一律走 listVerificationEntries（只認 PASS/FAIL）：N/A 不能當通過、也不能蓋掉 FAIL。
+ */
+export function listReportedVerificationItems(
+  db: ReturnType<typeof getMcpDb>,
+  taskId: string,
+): Set<string> {
+  const rows = db.prepare(`
+    SELECT content FROM agent_outputs
+    WHERE task_id = ? AND stream_type = 'system' AND content LIKE '[VERIFICATION]%'
+  `).all(taskId) as Array<{ content: string }>;
+  const items = new Set<string>();
+  for (const row of rows) {
+    for (const line of row.content.split('\n')) {
+      const m = /^- \[(PASS|FAIL|N\/A)\] (.*)$/.exec(line);
+      const itemField = m ? (m[2] ?? '').split(' — ')[0]!.trim() : '';
+      if (itemField) items.add(itemField);
+    }
+  }
+  return items;
 }
 
 /**
@@ -391,8 +422,9 @@ ${fixerPrompts.join('\n\n---\n\n')}`;
       taskId: z.string().describe('任務 ID'),
       results: z.array(z.object({
         item: z.string().describe('驗收項目（get_verification_plan 回傳的 id 或 item 文字）'),
-        passed: z.boolean().describe('是否通過'),
-        note: z.string().optional().describe('補充說明（失敗原因 / N/A 原因 / 實測結果）'),
+        passed: z.boolean().optional().describe('是否通過（標 notApplicable 時可省略）'),
+        notApplicable: z.boolean().optional().describe('此項不適用本任務（例：沒動資料表的任務做 DDL 比對）。必須在 note 寫理由。不擋結案、但**不能當作通過**：不能滿足單元測試閘，也不會蓋掉先前的 FAIL。不要把不適用的項目報成 passed=true'),
+        note: z.string().optional().describe('補充說明（失敗原因 / 不適用理由 / 實測結果）'),
       })).min(1).describe('各驗收項目的結果'),
     },
     { title: 'Report Verification Result', readOnlyHint: false, destructiveHint: false, openWorldHint: false },
@@ -403,9 +435,20 @@ ${fixerPrompts.join('\n\n---\n\n')}`;
         return { content: [{ type: 'text' as const, text: `Error: Task "${taskId}" not found` }], isError: true };
       }
 
-      const passedCount = results.filter(r => r.passed).length;
-      const summary = `驗收：${passedCount}/${results.length} 通過`;
-      const lines = results.map(r => `- [${r.passed ? 'PASS' : 'FAIL'}] ${r.item}${r.note ? ` — ${r.note}` : ''}`);
+      const invalid = results.filter(r => !r.notApplicable && r.passed === undefined).map(r => r.item);
+      if (invalid.length > 0) {
+        return { content: [{ type: 'text' as const, text: `Error: 以下項目沒有給 passed，也沒有標 notApplicable：${invalid.join('、')}` }], isError: true };
+      }
+      const naWithoutReason = results.filter(r => r.notApplicable && !r.note?.trim()).map(r => r.item);
+      if (naWithoutReason.length > 0) {
+        return { content: [{ type: 'text' as const, text: `Error: 標「不適用」必須在 note 寫理由（為什麼這項不適用本任務）：${naWithoutReason.join('、')}` }], isError: true };
+      }
+
+      const naCount = results.filter(r => r.notApplicable).length;
+      const judged = results.filter(r => !r.notApplicable);
+      const passedCount = judged.filter(r => r.passed).length;
+      const summary = `驗收：${passedCount}/${judged.length} 通過${naCount ? `（不適用 ${naCount} 項）` : ''}`;
+      const lines = results.map(r => `- [${r.notApplicable ? 'N/A' : r.passed ? 'PASS' : 'FAIL'}] ${r.item}${r.note ? ` — ${r.note}` : ''}`);
       const outputText = `[VERIFICATION] ${summary}\n${lines.join('\n')}`;
 
       // Store in agent_outputs under the synthetic mcp-{taskId} agent (same channel as report_output)
@@ -433,9 +476,11 @@ ${fixerPrompts.join('\n\n---\n\n')}`;
         data: { taskId, projectId: task.project_id, milestone: summary, details: lines.join('\n') },
       });
 
-      const failWarning = passedCount < results.length
-        ? `\n⚠ 有 ${results.length - passedCount} 項未通過——請修復後重新驗收，未全數通過不要標記 completed。`
-        : '\n全部通過。可以 update_task_status(taskId, "completed", summary) 結案。';
+      const failWarning = passedCount < judged.length
+        ? `\n⚠ 有 ${judged.length - passedCount} 項未通過——請修復後重新驗收，未全數通過不要標記 completed。`
+        : judged.length === 0
+          ? '\n（這次回報的都標為不適用，沒有實際判定的項目。）'
+          : '\n全部通過。可以 update_task_status(taskId, "completed", summary) 結案。';
       const notifyWarning = notifyOk ? '' : ' (warning: Web UI notification failed)';
 
       return { content: [{ type: 'text' as const, text: `${summary}${notifyWarning}${failWarning}` }] };

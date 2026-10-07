@@ -23,6 +23,7 @@ import {
   findLatestUnitTestVerification,
   listVerificationEntries,
   UNRELATED_TEST_FAILURE_RULE,
+  TEST_SCOPE_NOTE_RULE,
   NO_INSTALL_GUARD_RULE,
 } from '../tools/verification-tools.js';
 import { notifyWebServer } from '../notify.js';
@@ -185,6 +186,18 @@ describe('verification-tools', () => {
         expect(unit.how).toContain(UNRELATED_TEST_FAILURE_RULE);
         expect(unit.how).toContain('get_test_baseline_plan');
         expect(unit.how).toContain('不可順手修');
+      });
+
+      // 「只跑相關測試也算過」本來就合法，但沒寫出來——實測有 agent 為此跳過整道閘。
+      // 寫明的同時要求標範圍，否則之後量不出「跑全套」的比例在不在下降。
+      it('unit test item how-text 寫明只跑相關測試的做法，並要求 note 標範圍', async () => {
+        seedTask(testDb, 'frontend', 'task-1', TEST_CMD_CONFIG);
+        const result = await callTool(server, 'get_verification_plan', { taskId: 'task-1' });
+        const plan = JSON.parse(result.content[0].text);
+        const unit = plan.items.find((i: any) => i.id === 'fe-unit-tests');
+        expect(unit.how).toContain(TEST_SCOPE_NOTE_RULE);
+        expect(TEST_SCOPE_NOTE_RULE).toContain('[全套]');
+        expect(TEST_SCOPE_NOTE_RULE).toContain('[相關]');
       });
 
       it('plan unit items always mirror getRequiredUnitTestItems（共用 helper，兩處行為一致）', async () => {
