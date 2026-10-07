@@ -255,7 +255,7 @@ MCP Server（stdio，由 Claude Code 經 .mcp.json spawn）與 Web Server（Expr
   ```
 - 新增程式碼時**嚴禁**在 MCP process 內用 `process.cwd()` 解析路徑，一律走 `getDataDir()` / `resolveFromRepoRoot()`
 
-### MCP Tools (55 total)
+### MCP Tools (59 total)
 
 完整用法見各工具 description 與 server instructions（連線時自動注入）。分組一覽：
 
@@ -269,6 +269,8 @@ MCP Server（stdio，由 Claude Code 經 .mcp.json spawn）與 Web Server（Expr
 - **流程圖（Flow-Gated）**：`save_task_flow`, `report_flow_check`, `get_task_flows`, `save_sa_flow`
 - **回報**：`report_output`, `report_milestone`
 - **Asana / 其他**：`sync_asana_tasks`, `list_asana_projects`, `get_asana_task_comments`, `get_skill_gen_plan`, `query_external_db`, `health_check`
+- **自我觀察（唯讀，不碰閘門）**：`analyze_harness`（讀回對/缺口/筆記 trace，找**機制本身**哪裡失靈；所有統計按月切——總數會把已修好的舊帳和還在壞的混成一個數字）, `get_attention_summary`（「該注意什麼」：卡著工作的缺口／帶著缺口結案／失敗任務的缺口／停滯／逾期，**依要做什麼分組、不依資料來源分組**；什麼都沒有就明說沒有）。純函式在 `mcp/harness-analysis.ts`、`mcp/attention.ts`
+- **每日「該注意什麼」推送（Web Server 排程，非 MCP tool）**：`utils/attentionDigest.ts`，每 15 分鐘檢查、每天過了 `ATTENTION_DIGEST_HOUR`（預設 9，本地時間）跑一次，**只推比上次多出來的**（快照存 `data/attention/state.json`）；有新變化才寫 `data/attention/YYYY-MM-DD.md` + Windows 氣泡通知，沒有就安靜（不推「一切正常」）。第一次執行只建立基線。唯讀、best-effort（失敗只 log），不改任務/缺口、不回寫 Asana。`ATTENTION_DIGEST=0` 關閉
 
 特殊行為註記（行為規則）：
 - **`update_task_status` 完成閘門（六道）**：`completed` 受以下閘門管制——(1) **完工閘（實作邏輯對齊，原閘門 B）**（flow-gated 任務）；(2) **檢查表存在**（有軌道的任務必須有規格檢查表）；(3) **AI 規格回對**（最新 ai_review run missing=0，含 staleness 防護）；(4) **單元測試**（專案有設 `frontendTestCommand`/`backendTestCommand` 時，對應 side 的「單元測試全數通過」驗收項最新一筆回報必須 passed=true；既有測試不是全綠先用 `get_test_baseline_plan` 修基線）；(5) **執行計畫/派工記錄**（frontend/backend/fullstack 任務必須有 `get_execution_plan` 的 track、`[TRACK]` 稽核行或 `save_task_dispatch` 的 `[DISPATCH]` 快照其一）；(6) **驗收 FAIL 擋結案**（任何驗收項最新一筆 `report_verification_result` 為 FAIL 即拒絕，從未回報的項目不擋——改由下述**覆蓋提醒**負責可見性）。`skipFlowGate=true` + `skipReason` 可覆寫全部閘門，**限使用者明確同意**，會記 `[SKIP]` 供稽核。開工閘（規格理解確認，原閘門 A）在寫 code 前由 `report_flow_check(gate="A")` 把關

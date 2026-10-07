@@ -6,6 +6,7 @@ import express from 'express';
 import { getConfig, reloadAsanaPat } from './config.js';
 import { getDb } from './db/connection.js';
 import { backupDatabase } from './db/backup.js';
+import { runAttentionDigest } from './utils/attentionDigest.js';
 import { getProject } from './db/queries/projects.js';
 import { EventBus } from './eventbus/EventBus.js';
 import { ContextSync } from './eventbus/ContextSync.js';
@@ -98,6 +99,20 @@ async function main() {
     void backupDatabase(db, path.dirname(config.dbPath));
   }, BACKUP_INTERVAL_MS);
   backupTimer.unref();
+
+  // 1d. 每日「該注意什麼」推送：每 15 分鐘看一次，每天過了 ATTENTION_DIGEST_HOUR（預設 9 點）
+  // 跑一次，只有新變化才寫 data/attention/YYYY-MM-DD.md + Windows 通知。唯讀、best-effort。
+  // ATTENTION_DIGEST=0 關閉。
+  let attentionTimer: NodeJS.Timeout | undefined;
+  let attentionKickoff: NodeJS.Timeout | undefined;
+  if (process.env['ATTENTION_DIGEST'] !== '0') {
+    const hour = Number(process.env['ATTENTION_DIGEST_HOUR'] ?? 9);
+    const tick = () => runAttentionDigest({ db, dataDir: path.dirname(config.dbPath), hour: Number.isFinite(hour) ? hour : 9 });
+    attentionKickoff = setTimeout(tick, 60_000);   // 啟動後一分鐘先看一次（不擠啟動時間）
+    attentionKickoff.unref();
+    attentionTimer = setInterval(tick, 15 * 60_000);
+    attentionTimer.unref();
+  }
 
   // Migrate existing project paths to recent_paths (one-time on startup)
   migrateProjectPathsToRecent();
@@ -1135,6 +1150,8 @@ async function main() {
   const shutdown = async () => {
     logger.info('Shutting down...');
     clearInterval(backupTimer);
+    if (attentionTimer) clearInterval(attentionTimer);
+    if (attentionKickoff) clearTimeout(attentionKickoff);
     asanaSyncService.stopAll();
     // Kill agent processes without touching DB status here — on next startup,
     // recoverRunningAgents() kills any leftover PIDs and marks these agents as
