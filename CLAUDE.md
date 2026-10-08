@@ -155,25 +155,12 @@ subagent 的 prompt 必須包含：
 ```
 這確保 subagent 會使用 workspace 自己的 CLAUDE.md 和 .claude/skills/，而不是只用 OmniCommander 的規則。
 
-#### 4. 注入專案 Extra Prompt（強制）
-每次派 subagent 前，**必須**先讀取專案的 `config_json`，檢查是否有 `frontendExtraPrompt` 或 `backendExtraPrompt`。如果有，**必須**原封不動加入 subagent prompt 中。
+#### 4. 專案 Extra Prompt（已由 get_execution_plan 自動注入——不要再手動加）
+專案設定的 `frontendExtraPrompt`／`backendExtraPrompt` 由 `get_execution_plan` 依角色**原封不動**注入派工 prompt 的「## 專案額外指令」段（`{AXURE_SNAPSHOTS_PATH}`／`{AXURE_SNAPSHOT_PATH}` 兩種拼法都會代換成實際路徑）。orchestrator **不要再手動加一次**——同一段會在 prompt 裡出現兩次。
 
-```python
-# 虛擬碼
-project = get_project(projectId)
-config = JSON.parse(project.config_json)
-
-if task.label == 'frontend' and config.frontendExtraPrompt:
-    prompt += f"\n## 專案額外指示（來自專案設定，必須遵守）\n{config.frontendExtraPrompt}\n"
-
-if task.label == 'backend' and config.backendExtraPrompt:
-    prompt += f"\n## 專案額外指示（來自專案設定，必須遵守）\n{config.backendExtraPrompt}\n"
-```
-
-**注意事項：**
-- `{AXURE_SNAPSHOT_PATH}` 變數要替換成實際的 Axure snapshot 路徑
-- 不要修改 extraPrompt 的內容，原封不動傳給 subagent
-- 這個步驟適用於所有專案，不只特定專案
+- 依任務 label 選：frontend → frontendExtraPrompt、backend → backendExtraPrompt
+- **fullstack 任務**：不帶 role 取 plan 時兩邊都不會注入（不知道該用哪一份）——一律用 `role="frontend"`／`role="backend"` 各取一份 plan 分別派工
+- 不是經由 get_execution_plan 派工的例外情況（沒有 plan 可用）才需要自己讀 `get_project` 的 config_json 原封不動帶入
 
 ### 執行時
 - 不確定做哪個任務時，可用 `next_task(projectId)` 取得推薦

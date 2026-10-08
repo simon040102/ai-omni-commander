@@ -126,65 +126,18 @@ Workspace：D:\fork\ofeinvoice_ui
 
 根據任務來源決定流程：
 - **Asana 已存在的任務**（已有 taskId）→ 直接用現有 taskId
-- **使用者口述的新任務**（沒有 taskId）→ 先 `create_task(projectId, title, label, taskType, description, prompt)`，用回傳的 taskId
+- **使用者口述的新任務**（沒有 taskId）→ 先 `create_task(projectId, title, label, taskType, description)`，用回傳的 taskId
 
-1. （如果是新任務）`create_task(projectId, title, label, taskType, description, prompt)`
+1. **`get_execution_plan(taskId)`**（fullstack 任務用 `role="frontend"`／`role="backend"` 各取一份）——**不可跳過**：
+   plan 裡已自動注入規格文件路徑、規格裁決、專案經驗筆記、專案額外指令、單元測試／驗收／規格回對規範與狀態回報指示，
+   bug／feature／refactor 也帶了對應的 Superpowers 方法論；而且沒有取過 plan 的開發任務，結案時會被「執行計畫閘」擋下。
 2. `update_task_status(taskId, "in_progress")`
-3. Agent tool → 派 subagent
-
-Subagent prompt 組裝：
-```
-你是 {project.name} 專案的開發 agent。
-
-## 開發方法論（Superpowers）
-本次任務類型為 {taskType}，請使用以下開發方法：
-- bug → 使用 /systematic-debugging skill（先分析根因再修復，不要直接猜測修改）
-- feature → 使用 /brainstorming skill 探索需求 + /test-driven-development skill 寫測試先行
-- refactor → 使用 /brainstorming skill 評估重構方案
-- 所有任務 → 完成前使用 /verification-before-completion skill 確認品質
-在開發過程中主動觸發對應的 skill。
-
-## 規格文件閱讀（強制，寫 code 之前必須完成）
-1. 用 Read tool **完整讀取** SA 文件 — 逐項讀每個欄位名稱、按鈕文字、訊息文字、操作流程
-2. 用 Read tool **完整讀取** SD 文件 — 逐個 API 讀 path、method、參數名和型別、response
-3. 如果有 Axure HTML — 用 Read tool 讀取，對照 SA 確認 UI
-4. 讀完後用 report_output 摘要你理解的重點（欄位清單、API 清單、特殊邏輯）
-5. 開發過程中遇到文字、欄位名、API 路徑，**回頭查規格確認，不要憑印象寫**
-
-## Workspace 規範（最優先！開始開發前必須先完成）
-1. 用 Read tool 讀取 {workspacePath}/CLAUDE.md — 了解專案架構、命名規範、開發規則
-2. 用 Bash 執行 ls {workspacePath}/.claude/skills/ — 列出所有可用 skill
-3. 讀取與本次任務相關的 skill（如有 coding-standards、api-patterns、component-guidelines 等）
-4. **嚴格遵循 CLAUDE.md 和 skills 裡的所有規則進行開發**
-
-## 任務
-{task.title}
-
-## 目標
-{任務描述 + 使用者口述內容}
-
-## UI 規格（Axure 原型）
-{列出 Axure HTML 檔案路徑，請 subagent 用 Read tool 讀取}
-
-## 技術規格
-{SA/SD 文件內容摘要，或檔案路徑}
-
-## 額外參考文件
-{使用者提供的文件內容}
-
-## 專案額外指示（來自專案設定，必須遵守）
-{從 project.config_json 的 frontendExtraPrompt 或 backendExtraPrompt 取得，原封不動貼上。{AXURE_SNAPSHOT_PATH} 替換成實際路徑。}
-
-## Workspace
-cwd: {frontendPath 或 backendPath}
-
-## 進度回報
-- 每完成一步：mcp__omni-commander__report_output(taskId="{taskId}", content="...")
-- 重要節點：mcp__omni-commander__report_milestone(taskId="{taskId}", content="...")
-- 全部完成：mcp__omni-commander__update_task_status(taskId="{taskId}", status="completed", summary="...")
-```
-
-4. 回覆使用者：「任務已啟動，可以在 Web UI 的 Agents 頁面看到即時進度。」
+3. Agent tool 派 subagent，cwd＝plan 回傳的 workingDir，模型照 plan 回傳的 model（規則見 CLAUDE.md「派工模型政策」）。prompt＝**plan 回傳的 prompt 原文**，前面再加：
+   - CLAUDE.md「#3 讀取 Workspace 規範」那四步（plan 只寫了一句「檢查有無 CLAUDE.md」，這四步比較完整）
+   - taskType 是 other 時，plan 不帶方法論段——照 CLAUDE.md「#1 注入 Superpowers 方法論」補上 /verification-before-completion
+   - State 6 使用者額外提供的文件——**只放完整路徑**，讓 subagent 自己用 Read tool 讀；**嚴禁把規格內容摘要進 prompt**（摘要會打錯字、漏細節，subagent 會照錯的做）
+   - **不要**再手動加專案額外指令（plan 已注入，重複會出現兩次）
+4. 回覆使用者：「任務已啟動。」任務狀態、新開的規格缺口、檢查表會即時反映在 Web UI；subagent 用 report_output 回報的文字內容用 get_task_outputs(taskId)／resume_task(taskId) 查看。
 
 ---
 
@@ -192,9 +145,9 @@ cwd: {frontendPath 或 backendPath}
 
 1. **不要急著執行** — 每一步都等使用者確認
 2. **資訊不完整就問** — 不猜測專案、不猜測任務類型
-3. **收集完才執行** — SVN 文件 + Axure + 使用者文件全部到手後才組裝 prompt
-4. **prompt 要完整** — subagent 拿到的 prompt 必須包含所有上下文，不能依賴外部知識
-5. **回報進度** — 透過 MCP 回報到 Web UI，使用者在終端機和 Web UI 都能追蹤
+3. **收集完才執行** — SVN 文件 + Axure + 使用者文件全部到手後才派工
+4. **prompt 以 get_execution_plan 為準** — 不要自己重組；只在前面補 Workspace 規範與使用者額外文件的路徑
+5. **回報進度** — subagent 透過 MCP 回報；狀態與規格缺口在 Web UI 看得到，回報全文用 get_task_outputs 查
 
 ---
 
