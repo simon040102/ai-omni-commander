@@ -132,3 +132,25 @@ export function truncateResponse(text: string, note?: string): string {
   const suffix = `\n\n[已截斷] 完整內容共 ${text.length} 字元，僅顯示前 ${CHARACTER_LIMIT} 字元。${note ? `\n${note}` : ''}`;
   return text.slice(0, CHARACTER_LIMIT) + suffix;
 }
+
+/** JSON 序列化時略過 null／undefined 欄位（不帶資訊、只佔回應上限）。不縮排。 */
+export function compactJson(value: unknown): string {
+  return JSON.stringify(value, (_k, v) => (v === null ? undefined : v));
+}
+
+/**
+ * 清單型工具的「放得下多少就帶多少」：從整頁開始，超過回應上限就從尾端少帶幾筆，
+ * 直到整份 JSON 放得下為止——寧可少帶並告訴呼叫端下一頁從哪裡取，也不要從中間截斷 JSON
+ * （截斷後連前面的欄位都解析不了）。至少保留 1 筆。
+ */
+export function fitListToLimit<T>(items: T[], render: (shown: T[]) => string, limit = CHARACTER_LIMIT): { text: string; shown: number } {
+  let shown = items.length;
+  let text = render(items);
+  while (text.length > limit && shown > 1) {
+    // 依超出比例估算要砍多少，至少砍 1 筆，避免一筆一筆試
+    const ratio = limit / text.length;
+    shown = Math.max(1, Math.min(shown - 1, Math.floor(shown * ratio * 0.95)));
+    text = render(items.slice(0, shown));
+  }
+  return { text, shown };
+}

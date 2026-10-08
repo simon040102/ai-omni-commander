@@ -122,6 +122,58 @@ describe('spec-gap-tools', () => {
       const resolvedOnly = JSON.parse((await callTool(server, 'list_spec_gaps', { taskId: 'task-1', status: 'resolved' })).content[0].text);
       expect(resolvedOnly.total).toBe(0);
     });
+
+    // 實測 105 次超過輸出上限（中位數 27.5 萬字）：原本固定 LIMIT 200、縮排 JSON、沒有任何上限保護，
+    // 而且超過 200 筆的部分無聲截掉。改成分頁、明說還有多少、絕不從中間截斷 JSON。
+    describe('分頁與大小', () => {
+      function seedMany(n: number, descLen = 20) {
+        seed(testDb);
+        const ins = testDb.prepare(`INSERT INTO spec_gaps (id, task_id, project_id, category, description, created_at) VALUES (?, 'task-1', 'proj-1', 'other', ?, ?)`);
+        for (let i = 0; i < n; i++) ins.run(`g-${String(i).padStart(3, '0')}`, `缺口 ${i}：${'述'.repeat(descLen)}`, `2026-01-01 00:${String(Math.floor(i / 60)).padStart(2, '0')}:${String(i % 60).padStart(2, '0')}`);
+      }
+      const list = async (args: Record<string, unknown>) => JSON.parse((await callTool(server, 'list_spec_gaps', { projectId: 'proj-1', ...args })).content[0].text);
+
+      it('預設一頁 50 筆，明說總數與下一頁怎麼取', async () => {
+        seedMany(120);
+        const p1 = await list({});
+        expect(p1.total).toBe(120);
+        expect(p1.count).toBe(50);
+        expect(p1.nextOffset).toBe(50);
+        const p3 = await list({ offset: 100 });
+        expect(p3.count).toBe(20);
+        expect(p3.nextOffset).toBeUndefined();
+      });
+
+      it('翻完所有頁拿到的就是全部，不重複、不漏', async () => {
+        seedMany(120);
+        const ids = new Set<string>();
+        for (let off = 0; off !== undefined && off < 1000;) {
+          const p = await list({ offset: off, limit: 50 });
+          p.gaps.forEach((g: { id: string }) => ids.add(g.id));
+          off = p.nextOffset;
+          if (off === undefined) break;
+        }
+        expect(ids.size).toBe(120);
+      });
+
+      it('值為 null 的欄位不回（未裁決的缺口沒有 resolutionNote／resolvedAt）', async () => {
+        seedMany(1);
+        const p = await list({});
+        expect(p.gaps[0]).not.toHaveProperty('resolutionNote');
+        expect(p.gaps[0]).not.toHaveProperty('resolvedAt');
+        expect(p.gaps[0].description).toContain('缺口 0');
+      });
+
+      it('一頁內容太大 → 少帶幾筆並給 nextOffset，回應仍是完整 JSON（不從中間截斷）', async () => {
+        seedMany(60, 1500);   // 每筆約 1.5k 字，50 筆會超過回應上限
+        const text = (await callTool(server, 'list_spec_gaps', { projectId: 'proj-1' })).content[0].text;
+        expect(text).not.toContain('[已截斷]');
+        const p = JSON.parse(text);
+        expect(p.count).toBeLessThan(50);
+        expect(p.nextOffset).toBe(p.count);
+        expect(p.note).toContain('offset');
+      });
+    });
   });
 
   describe('resolve_spec_gap', () => {

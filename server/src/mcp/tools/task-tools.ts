@@ -15,7 +15,7 @@ import {
   detectSpecDocuments, getCompletionBlockers, logTaskOutput,
   type ExecutionTrack,
 } from '../flow-gate.js';
-import { parseJson, getAsanaPat, ASANA_API_BASE, ASANA_FETCH_TIMEOUT_MS } from '../helpers.js';
+import { parseJson, getAsanaPat, ASANA_API_BASE, ASANA_FETCH_TIMEOUT_MS, fitListToLimit } from '../helpers.js';
 import { detectLabel, detectTaskType } from '../../utils/taskClassification.js';
 import { normalizeDueDate, localTodayYmd, isOverdue } from '../../utils/dueDate.js';
 import { readImageSize, mimeTypeForImage, type ImageSize } from '../../utils/imageSize.js';
@@ -24,6 +24,9 @@ import { runSpecChangeCheck, type SpecChangeTarget } from '../spec-change.js';
 import { parseTestCommands, getRequiredUnitTestItems, findLatestUnitTestVerification, listVerificationEntries, getVerificationItems, listReportedVerificationItems, unitTestItemText, UNRELATED_TEST_FAILURE_RULE, TEST_SCOPE_NOTE_RULE } from './verification-tools.js';
 import { getStalledHours, DEFAULT_STALE_THRESHOLD_HOURS } from '../stale-tasks.js';
 import { summarizeGapText } from '../../utils/specGapResolution.js';
+
+/** list_pending_tasks 描述摘錄的長度——清單用來挑任務，詳情走 get_task */
+const LIST_DESCRIPTION_EXCERPT = 200;
 
 /** update_task_status 完成閘門的代號（skipGates 用）。順序同閘門判斷順序。 */
 const COMPLETION_GATE_KEYS = ['flow', 'checklist', 'ai_review', 'unit', 'plan', 'verify'] as const;
@@ -207,9 +210,10 @@ export function registerTaskTools(server: McpServer): void {
       limit: z.number().int().positive().optional().describe('Max tasks to return (default: 100)'),
       offset: z.number().int().min(0).optional().describe('Number of tasks to skip for pagination (default: 0)'),
       staleThresholdHours: z.number().int().positive().optional().describe(`Threshold (hours) for flagging an in_progress task as stalled (default: ${DEFAULT_STALE_THRESHOLD_HOURS}). Each in_progress task in the response carries stalledHours + stalled.`),
+      fullDescription: z.boolean().optional().describe('回完整描述（預設只帶前 200 字摘錄＋descriptionLength；挑任務用摘錄就夠，詳情用 get_task）'),
     },
     { title: 'List Pending Tasks', readOnlyHint: true, openWorldHint: false },
-    async ({ projectId, taskType, label, keyword, section, tag, statuses, limit, offset, staleThresholdHours }) => {
+    async ({ projectId, taskType, label, keyword, section, tag, statuses, limit, offset, staleThresholdHours, fullDescription }) => {
       const db = getMcpDb();
       const statusList = statuses && statuses.length > 0 ? statuses : ['pending', 'queued', 'assigned'];
       const placeholders = statusList.map(() => '?').join(',');
@@ -263,8 +267,14 @@ export function registerTaskTools(server: McpServer): void {
       const tasks = rows.map(r => {
         const { due_date, ...rest } = r as { due_date?: string | null } & Record<string, unknown>;
         const dueDate = (due_date as string | null) ?? null;
+        // 清單是拿來挑任務的——描述預設只帶摘錄（實測預設 100 筆完整描述 25 次超過輸出上限）
+        const desc = typeof rest['description'] === 'string' ? rest['description'] as string : null;
+        const descFields = desc && !fullDescription && desc.length > LIST_DESCRIPTION_EXCERPT
+          ? { description: `${desc.slice(0, LIST_DESCRIPTION_EXCERPT)}…`, descriptionLength: desc.length }
+          : { description: desc };
         const base = {
           ...rest,
+          ...descFields,
           tags: parseJson<string[]>(r['tags'], []),
           custom_fields: parseJson<Record<string, string>>(r['custom_fields'], {}),
           dueDate,
@@ -277,20 +287,23 @@ export function registerTaskTools(server: McpServer): void {
         return base;
       });
 
-      return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify({
-            projectId,
-            total,
-            count: tasks.length,
-            offset: effOffset,
-            hasMore: effOffset + tasks.length < total,
-            staleThresholdHours: threshold,
-            tasks,
-          }, null, 2),
-        }],
-      };
+      const anyExcerpt = tasks.some(t => 'descriptionLength' in t);
+      const { text } = fitListToLimit(tasks, shown => {
+        const next = effOffset + shown.length;
+        const hasMore = next < total;
+        return JSON.stringify({
+          projectId,
+          total,
+          count: shown.length,
+          offset: effOffset,
+          hasMore,
+          ...(hasMore ? { nextOffset: next } : {}),
+          staleThresholdHours: threshold,
+          ...(anyExcerpt ? { note: `描述只帶前 ${LIST_DESCRIPTION_EXCERPT} 字（descriptionLength 是原長度）；完整描述用 get_task(taskId) 或 fullDescription=true` } : {}),
+          tasks: shown,
+        });
+      });
+      return { content: [{ type: 'text' as const, text }] };
     },
   );
 

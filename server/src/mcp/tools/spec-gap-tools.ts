@@ -11,7 +11,7 @@ import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
 import { getMcpDb } from '../db.js';
 import { notifyWebServer } from '../notify.js';
-import { ensureMcpAgent } from '../helpers.js';
+import { ensureMcpAgent, compactJson, fitListToLimit } from '../helpers.js';
 import { validateResolutionNote, RESOLUTION_NOTE_MIN_LENGTH } from '../../utils/specGapResolution.js';
 
 export const SPEC_GAP_CATEGORIES = ['sa_missing', 'sd_missing', 'field_undefined', 'api_undefined', 'logic_unclear', 'other', 'spec_changed', 'sa_sd_mismatch', 'spec_internal_conflict', 'ambiguous_spec'] as const;
@@ -93,9 +93,11 @@ export function registerSpecGapTools(server: McpServer): void {
       projectId: z.string().optional().describe('專案 ID（列出整個專案的缺口）'),
       taskId: z.string().optional().describe('任務 ID（只列出此任務的缺口）'),
       status: z.enum(['open', 'resolved']).optional().describe('過濾狀態（不給則回全部）'),
+      limit: z.number().int().min(1).max(200).optional().describe('一頁幾筆（預設 50）'),
+      offset: z.number().int().min(0).optional().describe('從第幾筆開始（翻頁用；回應的 nextOffset 就是下一頁的值）'),
     },
     { title: 'List Spec Gaps', readOnlyHint: true, openWorldHint: false },
-    async ({ projectId, taskId, status }) => {
+    async ({ projectId, taskId, status, limit, offset }) => {
       const db = getMcpDb();
 
       if (!projectId && !taskId) {
@@ -114,9 +116,9 @@ export function registerSpecGapTools(server: McpServer): void {
         SELECT g.*, t.title as task_title
         FROM spec_gaps g LEFT JOIN tasks t ON t.id = g.task_id
         ${where}
-        ORDER BY g.created_at DESC
-        LIMIT 200
-      `).all(...params) as Array<SpecGapRow & { task_title: string | null }>;
+        ORDER BY g.created_at DESC, g.id DESC
+        LIMIT ? OFFSET ?
+      `).all(...params, limit ?? 50, offset ?? 0) as Array<SpecGapRow & { task_title: string | null }>;
 
       const gaps = rows.map(r => ({
         id: r.id,
@@ -131,12 +133,17 @@ export function registerSpecGapTools(server: McpServer): void {
         resolvedAt: r.resolved_at,
       }));
 
-      return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify({ total, count: gaps.length, gaps }, null, 2),
-        }],
-      };
+      // 分頁＋放得下多少帶多少：原本固定 LIMIT 200、縮排 JSON，實測 105 次超過輸出上限，超過 200 筆的還無聲截掉
+      const start = offset ?? 0;
+      const { text } = fitListToLimit(gaps, shown => {
+        const next = start + shown.length;
+        const more = next < total;
+        return compactJson({
+          total, offset: start, count: shown.length, gaps: shown,
+          ...(more ? { nextOffset: next, note: `還有 ${total - next} 筆，用 offset=${next} 取下一頁` } : {}),
+        });
+      });
+      return { content: [{ type: 'text' as const, text }] };
     },
   );
 

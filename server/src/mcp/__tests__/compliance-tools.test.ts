@@ -210,6 +210,27 @@ describe('compliance-tools', () => {
       expect(data.latestRun).toBeNull();
     });
 
+    // 每一項原本都帶 waived:false、superseded:false 與五個 null 的 superseded* 欄位，加上縮排——
+    // 歷史上回傳量最大的工具。預設值不回（缺省＝false／沒有），資訊不少、量減半。
+    it('項目只帶有意義的欄位：沒豁免／沒被取代就不回那些欄位；回應不縮排', async () => {
+      seedProject(testDb);
+      seedTask(testDb);
+      await callTool(server, 'save_spec_checklist', { taskId: 'task-1', items: [UI_ITEM, MISSING_ITEM] });
+      const row = testDb.prepare("SELECT id FROM spec_checklist_items WHERE content = '不存在的文字'").get() as { id: string };
+      await callTool(server, 'waive_checklist_item', { itemId: row.id, reason: '規格 v0.3 已刪除此訊息，畫面不再顯示這段文字（使用者 10/8 確認）' });
+
+      const text = (await callTool(server, 'get_spec_checklist', { taskId: 'task-1' })).content[0].text;
+      expect(text).not.toContain('\n  ');
+      const data = JSON.parse(text);
+      const plain = data.items.find((i: { content: string }) => i.content !== '不存在的文字');
+      for (const k of ['waived', 'waiveReason', 'superseded', 'supersededSpecRef', 'supersededText', 'supersededNote', 'supersededAt']) {
+        expect(plain, k).not.toHaveProperty(k);
+      }
+      const waived = data.items.find((i: { content: string }) => i.content === '不存在的文字');
+      expect(waived.waived).toBe(true);
+      expect(waived.waiveReason).toContain('規格 v0.3');
+    });
+
     it('includes the latest run summary after run_spec_compliance', async () => {
       seedProject(testDb);
       seedTask(testDb);

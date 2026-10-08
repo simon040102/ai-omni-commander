@@ -103,21 +103,27 @@ const MAX_REVIEW_RESULTS = 500;
 export const UI_TEXT_EXTRACTION_RULE =
   '**行為敘述句（「點擊X後…」「當…時…」）與元件動態組字的完整 label 禁止存 ui_text——存 logic**；ui_text 只放程式中應存在的字面文字（按鈕字、標題、訊息、i18n 值）';
 
+/**
+ * 只帶有意義的欄位：沒豁免就不回 waived／waiveReason、沒被取代就不回 superseded*、null 的不回。
+ * 原本每一項都帶 waived:false、superseded:false 和五個 null 欄位，是歷史上回傳量最大的工具。
+ */
 function rowToItem(r: ChecklistRow): Record<string, unknown> {
+  const detail = parseJson<Record<string, unknown> | null>(r.detail_json, null);
   return {
     id: r.id,
     itemType: r.item_type,
     content: r.content,
     side: r.side ?? 'both',
-    detail: parseJson<Record<string, unknown> | null>(r.detail_json, null),
-    sourceRef: r.source_ref,
-    waived: r.waived === 1,
-    waiveReason: r.waive_reason,
-    superseded: r.superseded === 1,
-    supersededSpecRef: r.superseded_spec_ref,
-    supersededText: r.superseded_text,
-    supersededNote: r.superseded_note,
-    supersededAt: r.superseded_at,
+    ...(detail ? { detail } : {}),
+    ...(r.source_ref ? { sourceRef: r.source_ref } : {}),
+    ...(r.waived === 1 ? { waived: true, waiveReason: r.waive_reason } : {}),
+    ...(r.superseded === 1 ? {
+      superseded: true,
+      supersededSpecRef: r.superseded_spec_ref,
+      supersededText: r.superseded_text,
+      supersededNote: r.superseded_note,
+      supersededAt: r.superseded_at,
+    } : {}),
     createdAt: r.created_at,
   };
 }
@@ -273,7 +279,7 @@ ${JSON.stringify(created, null, 2)}`, '（created 清單被截斷——用 get_s
   // ── get_spec_checklist ────────────────────────────────────
   server.tool(
     'get_spec_checklist',
-    '取得任務的規格檢查表（含 waived 項目）與最新一次 run_spec_compliance 的比對摘要（無 run 則為 null）。**檢查表可能很大，回應分頁：用 limit/offset 逐頁取，直到 hasMore=false 才算看完全部項目**（AI 規格回對必須看過每一項，含 logic 類）。',
+    '取得任務的規格檢查表（含 waived 項目）與最新一次 run_spec_compliance 的比對摘要（無 run 則為 null）。項目欄位缺省＝沒有：沒有 waived 欄位就是未豁免、沒有 superseded 欄位就是未被取代。**檢查表可能很大，回應分頁：用 limit/offset 逐頁取，直到 hasMore=false 才算看完全部項目**（AI 規格回對必須看過每一項，含 logic 類）。',
     {
       taskId: z.string().describe('任務 ID'),
       limit: z.number().int().positive().max(200).optional().describe('每頁最多幾項（預設 50、上限 200）'),
@@ -319,7 +325,7 @@ ${JSON.stringify(created, null, 2)}`, '（created 清單被截斷——用 get_s
             waived: run.waived,
             superseded: run.superseded ?? 0,
           } : null,
-        }, null, 2);
+        });
       };
 
       let pageRows = rows;

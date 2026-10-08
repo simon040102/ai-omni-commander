@@ -152,6 +152,42 @@ describe('task-tools', () => {
       expect(JSON.parse(pct.content[0].text).count).toBe(0);
     });
 
+    // 實測 25 次超過輸出上限：預設回 100 筆、每筆完整描述、縮排 JSON。清單是拿來挑任務的，
+    // 詳情本來就該 get_task——描述預設只帶摘錄，要全文另外開。
+    describe('大小', () => {
+      function seedLong(n: number, descLen: number) {
+        seedProject(testDb);
+        const ins = testDb.prepare(`INSERT INTO tasks (id, project_id, title, description, label, task_type) VALUES (?, 'proj-1', ?, ?, 'backend', 'feature')`);
+        for (let i = 0; i < n; i++) ins.run(`t-${i}`, `任務 ${i}`, `描述 ${i}：${'說'.repeat(descLen)}`);
+      }
+
+      it('描述預設只帶前 200 字，並告訴你原本多長、全文去哪看', async () => {
+        seedLong(1, 1000);
+        const data = JSON.parse((await callTool(server, 'list_pending_tasks', { projectId: 'proj-1' })).content[0].text);
+        const t = data.tasks[0];
+        expect(t.description.length).toBeLessThanOrEqual(201);
+        expect(t.descriptionLength).toBe(`描述 0：${'說'.repeat(1000)}`.length);
+        expect(data.note ?? '').toContain('get_task');
+      });
+
+      it('fullDescription=true → 回完整描述', async () => {
+        seedLong(1, 1000);
+        const data = JSON.parse((await callTool(server, 'list_pending_tasks', { projectId: 'proj-1', fullDescription: true })).content[0].text);
+        expect(data.tasks[0].description).toBe(`描述 0：${'說'.repeat(1000)}`);
+        expect(data.tasks[0]).not.toHaveProperty('descriptionLength');
+      });
+
+      it('整頁仍太大 → 少帶幾筆並給 nextOffset，回應是完整 JSON（不從中間截斷）', async () => {
+        seedLong(100, 3000);
+        const text = (await callTool(server, 'list_pending_tasks', { projectId: 'proj-1', fullDescription: true })).content[0].text;
+        expect(text).not.toContain('[已截斷]');
+        const data = JSON.parse(text);
+        expect(data.count).toBeLessThan(100);
+        expect(data.hasMore).toBe(true);
+        expect(data.nextOffset).toBe(data.count);
+      });
+    });
+
     it('supports limit/offset pagination with total and hasMore (A15)', async () => {
       seedProject(testDb);
       seedTask(testDb, 'task-1');
