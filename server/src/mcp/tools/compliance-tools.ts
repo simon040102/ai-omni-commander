@@ -873,7 +873,7 @@ ${missingLines.join('\n')}${staleBlock}${deltaTruncated ? '\n（清單已達大�
       const commonSteps = `${reverseScanStep}${contractReverseStep}${dbSchemaStep}
 5. **判定標準（寧嚴勿鬆）**：每項判 matched 或 missing——
    - matched **必須附 evidence**（file + line，相對於上列任一 root 的路徑，或該 root 之下的絕對路徑）與一句說明（note）${specEvidenceHint}
-   - **每筆 evidence 會被程式驗證**（檔案存在、行號有效、該行 ±${RELEVANCE_WINDOW} 行內確實含該文字/路徑/識別字）——引用不精確會整批退回，請引用實際包含該文字/路徑/識別字的行（如文字在 i18n 檔就引 i18n 檔）
+   - **每筆 evidence 會被程式驗證**（檔案存在、行號有效、該行 ±${RELEVANCE_WINDOW} 行內確實含該文字/路徑/識別字）——引用不精確會整批退回，請引用實際包含該文字/路徑/識別字的行（如文字在 i18n 檔就引 i18n 檔）。項目多時可先帶 validateOnly=true 分批試跑（一次列出所有問題、不寫入、不算數），全部通過後再一次正式提交
    - 找不到、不確定、規格與程式碼有出入 → 一律 missing，可用 note 說明疑點
 6. **一次寫回**：全部判完後呼叫 save_compliance_review(taskId="${taskId}", results=[{itemId, status, evidence: [{file, line}], note}, ...])，**必須涵蓋所有未豁免項目**。
 7. **嚴禁**只看 implementer 的回報、verification report、commit message 或任何摘要就下判定——**必須自己用 Read/Grep 開檔案核對**。
@@ -981,7 +981,7 @@ ${forbiddenSection}`;
   // ── save_compliance_review ────────────────────────────────
   server.tool(
     'save_compliance_review',
-    '寫回「AI 規格回對」結果（由獨立 AI 審查 agent 呼叫，見 get_compliance_review_plan）。results 必須涵蓋該任務**所有未豁免**的檢查表項目（缺項會被拒）；matched 項目必附 evidence（file+line）。**每筆 evidence 會被程式驗證**（檔案存在、行號有效、該行附近確實含該文字/路徑/識別字；logic 只驗檔案+行號）——引用不精確會整批退回。**增量重審**：重審時可帶 carryForward=true 只提交本次 AI 實際重判的項目——上輪 ai_review run 中 matched 且本次未提交的項目，工具會程式重驗其原證據，通過即自動沿用（結果標 carriedForward）；重驗失敗會回 revalidationFailed 清單整批拒收，把那些項目納入重判後重新提交。涵蓋驗證不變：「本次提交 + 沿用通過」聯集仍必須涵蓋所有未豁免項目。寫入後成為完成閘門的依據：最新 ai_review run 的 missing=0 才可標 completed；與最新程式預檢（engine run）判定相反的項目會標 engineStatus 並在回應列出（抽查優先靶點）。',
+    '寫回「AI 規格回對」結果（由獨立 AI 審查 agent 呼叫，見 get_compliance_review_plan）。results 必須涵蓋該任務**所有未豁免**的檢查表項目（缺項會被拒）；matched 項目必附 evidence（file+line）。**每筆 evidence 會被程式驗證**（檔案存在、行號有效、該行附近確實含該文字/路徑/識別字；logic 只驗檔案+行號）——引用不精確會整批退回；可先帶 validateOnly=true 試跑，一次列出所有問題且不寫入。**增量重審**：重審時可帶 carryForward=true 只提交本次 AI 實際重判的項目——上輪 ai_review run 中 matched 且本次未提交的項目，工具會程式重驗其原證據，通過即自動沿用（結果標 carriedForward）；重驗失敗會回 revalidationFailed 清單整批拒收，把那些項目納入重判後重新提交。涵蓋驗證不變：「本次提交 + 沿用通過」聯集仍必須涵蓋所有未豁免項目。寫入後成為完成閘門的依據：最新 ai_review run 的 missing=0 才可標 completed；與最新程式預檢（engine run）判定相反的項目會標 engineStatus 並在回應列出（抽查優先靶點）。',
     {
       taskId: z.string().describe('任務 ID'),
       carryForward: z.boolean().optional().describe('true=增量重審模式：只提交本次 AI 重判的項目（上輪 missing、上輪回對後新增、**所有 logic 項——logic 不沿用每輪必重判**、以及重看後有疑慮的項），其餘上輪 matched 的字面項（ui_text/api/param/response_field/db_field）由工具程式重驗原證據後自動沿用。需要已存在前一輪 ai_review run；上輪 run 之後檢查表被整份取代（[CHECKLIST_REPLACE]）則拒絕。預設 false=全量提交'),
@@ -994,10 +994,14 @@ ${forbiddenSection}`;
         })).optional().describe('證據（matched 必填至少一筆）'),
         note: z.string().optional().describe('一句說明（matched 建議附；missing 可說明疑點）'),
       })).min(1).max(MAX_REVIEW_RESULTS).describe(`逐項判定結果（一次最多 ${MAX_REVIEW_RESULTS} 項）`),
+      validateOnly: z.boolean().optional().describe('true=試跑：跑完全部驗證（itemId、重複、matched 缺證據、證據程式驗證、carryForward 重驗）並一次列出所有問題，但不寫入任何東西、不算數（閘門看不到）。可只送部分項目分批試跑——正式提交仍必須一次涵蓋全部未豁免項目。預設 false=正式提交'),
     },
     { title: 'Save Compliance Review', readOnlyHint: false, destructiveHint: false, openWorldHint: false },
-    async ({ taskId, results, carryForward }) => {
+    async ({ taskId, results, carryForward, validateOnly }) => {
       const db = getMcpDb();
+      // 試跑：每道檢查的錯誤訊息與正式提交相同，只是收集起來繼續驗（正式提交照舊遇錯即拒），
+      // 最後一次回報、不寫入。省下「改一處 → 整批重送 → 又被下一道檢查擋」的來回。
+      const problems: string[] = [];
       // zod 已限制上限，這裡再防呆一次（涵蓋不經 zod 的呼叫路徑）
       if (results.length > MAX_REVIEW_RESULTS) {
         return { content: [{ type: 'text' as const, text: `Error: 一次最多 ${MAX_REVIEW_RESULTS} 項（收到 ${results.length}）。` }], isError: true };
@@ -1017,20 +1021,20 @@ ${forbiddenSection}`;
       // 所有 itemId 必須屬於該 task
       const unknownIds = results.filter(r => !rowById.has(r.itemId)).map(r => r.itemId);
       if (unknownIds.length > 0) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: `Error: 以下 itemId 不屬於任務 ${taskId} 的檢查表：${unknownIds.slice(0, 20).join(', ')}${unknownIds.length > 20 ? ` …（共 ${unknownIds.length} 個）` : ''}。用 get_spec_checklist(taskId="${taskId}") 取得正確的 itemId。`,
-          }],
-          isError: true,
-        };
+        const text = `Error: 以下 itemId 不屬於任務 ${taskId} 的檢查表：${unknownIds.slice(0, 20).join(', ')}${unknownIds.length > 20 ? ` …（共 ${unknownIds.length} 個）` : ''}。用 get_spec_checklist(taskId="${taskId}") 取得正確的 itemId。`;
+        if (!validateOnly) return { content: [{ type: 'text' as const, text }], isError: true };
+        problems.push(text);
+        // 試跑繼續驗其餘項目；正式提交走到這裡時已無未知 id，不受影響
+        results = results.filter(r => rowById.has(r.itemId));
       }
 
       // 同一 itemId 不可重複判定（避免涵蓋檢查被灌水）
       const seen = new Set<string>();
       const dupIds = results.filter(r => (seen.has(r.itemId) ? true : (seen.add(r.itemId), false))).map(r => r.itemId);
       if (dupIds.length > 0) {
-        return { content: [{ type: 'text' as const, text: `Error: results 中有重複的 itemId：${[...new Set(dupIds)].slice(0, 20).join(', ')}。每個項目只能判定一次。` }], isError: true };
+        const text = `Error: results 中有重複的 itemId：${[...new Set(dupIds)].slice(0, 20).join(', ')}。每個項目只能判定一次。`;
+        if (!validateOnly) return { content: [{ type: 'text' as const, text }], isError: true };
+        problems.push(text);
       }
 
       // workspace roots 依 task.label 解析（同 run_spec_compliance 的規則）——
@@ -1122,25 +1126,22 @@ ${forbiddenSection}`;
           };
         });
         const carryFailures = validateReviewEvidence(carryCheckInputs, roots);
+        const failedIds = new Set(carryFailures.map(f => f.itemId));
         if (carryFailures.length > 0) {
-          const failedIds = [...new Set(carryFailures.map(f => f.itemId))];
           const lines = carryFailures.slice(0, 20).map(f => {
             const row = rowById.get(f.itemId);
             return `- ${f.itemId}（[${row?.item_type ?? '?'}] ${row?.content ?? ''}）: ${f.file}:${f.line} — ${f.reason}`;
           });
           const more = carryFailures.length > 20 ? `\n（其餘 ${carryFailures.length - 20} 筆略）` : '';
-          return {
-            content: [{
-              type: 'text' as const,
-              text: `Error: carryForward 證據重驗失敗，整批拒收（未寫入 run）。revalidationFailed ${failedIds.length} 項——上輪證據已失效（程式碼變更/行號位移），**不得沿用**：
+          const text = `Error: carryForward 證據重驗失敗，整批拒收（未寫入 run）。revalidationFailed ${failedIds.size} 項——上輪證據已失效（程式碼變更/行號位移），**不得沿用**：
 ${lines.join('\n')}${more}
 
-請把以上項目納入本次 AI 重判（自己開檔重新驗證，matched 附新證據、找不到判 missing），連同原提交項一併重新呼叫 save_compliance_review(carryForward=true)。`,
-            }],
-            isError: true,
-          };
+請把以上項目納入本次 AI 重判（自己開檔重新驗證，matched 附新證據、找不到判 missing），連同原提交項一併重新呼叫 save_compliance_review(carryForward=true)。`;
+          if (!validateOnly) return { content: [{ type: 'text' as const, text }], isError: true };
+          problems.push(text);
         }
-        for (const p of candidates) {
+        // 試跑時重驗失敗的項目不沿用（正式提交走到這裡 failedIds 必為空）
+        for (const p of candidates.filter(c => !failedIds.has(c.itemId))) {
           const row = rowById.get(p.itemId)!;
           carriedItems.push({
             itemId: p.itemId,
@@ -1164,32 +1165,31 @@ ${lines.join('\n')}${more}
         const carryHint = carryForward
           ? '\n（carryForward 只沿用「上輪 matched 且證據仍有效」的項目——上輪 missing、上輪回對後新增的項目必須本次提交判定。）'
           : '';
-        return {
-          content: [{
-            type: 'text' as const,
-            text: `Error: AI 回對必須涵蓋所有未豁免的檢查表項目，以下 ${uncovered.length} 項未判定：
+        // 試跑允許分批送，涵蓋不足只提示、不算問題（正式提交照樣拒）
+        if (!validateOnly) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: `Error: AI 回對必須涵蓋所有未豁免的檢查表項目，以下 ${uncovered.length} 項未判定：
 ${lines.join('\n')}${more}
 
 逐項驗證後重新呼叫 save_compliance_review（涵蓋全部未判定項目）。${carryHint}`,
-          }],
-          isError: true,
-        };
+            }],
+            isError: true,
+          };
+        }
       }
 
       // matched 必附 evidence
       const noEvidence = results.filter(r => r.status === 'matched' && (!r.evidence || r.evidence.length === 0));
       if (noEvidence.length > 0) {
         const lines = noEvidence.slice(0, 20).map(r => `- ${r.itemId}: ${rowById.get(r.itemId)?.content ?? ''}`);
-        return {
-          content: [{
-            type: 'text' as const,
-            text: `Error: 以下 ${noEvidence.length} 項判定 matched 但沒有 evidence（file + line）——matched 必須附上程式碼證據：
+        const text = `Error: 以下 ${noEvidence.length} 項判定 matched 但沒有 evidence（file + line）——matched 必須附上程式碼證據：
 ${lines.join('\n')}${noEvidence.length > 20 ? `\n（其餘 ${noEvidence.length - 20} 項略）` : ''}
 
-補上證據後重新呼叫；找不到證據就判 missing（寧嚴勿鬆）。`,
-          }],
-          isError: true,
-        };
+補上證據後重新呼叫；找不到證據就判 missing（寧嚴勿鬆）。`;
+        if (!validateOnly) return { content: [{ type: 'text' as const, text }], isError: true };
+        problems.push(text);
       }
 
       // ── N1：程式驗證 matched 證據（AI 判定、程式驗證判定依據）──
@@ -1199,8 +1199,9 @@ ${lines.join('\n')}${noEvidence.length > 20 ? `\n（其餘 ${noEvidence.length -
       if (!hasRoots) {
         evidenceNote = '\n（注意：證據未經程式驗證——workspace 未設定或路徑不存在）';
       } else {
+        // 缺證據的 matched 項已在上方拒絕（試跑時已列入 problems），這裡只驗有證據的
         const checkInputs: EvidenceCheckInput[] = results
-          .filter(r => r.status === 'matched' && rowById.get(r.itemId)!.waived === 0)
+          .filter(r => r.status === 'matched' && r.evidence && r.evidence.length > 0 && rowById.get(r.itemId)!.waived === 0)
           .map(r => {
             const row = rowById.get(r.itemId)!;
             return {
@@ -1219,19 +1220,41 @@ ${lines.join('\n')}${noEvidence.length > 20 ? `\n（其餘 ${noEvidence.length -
             return `- ${f.itemId}（[${row?.item_type ?? '?'}] ${row?.content ?? ''}）: ${f.file}:${f.line} — ${f.reason}`;
           });
           const more = failures.length > 20 ? `\n（其餘 ${failures.length - 20} 筆略）` : '';
-          return {
-            content: [{
-              type: 'text' as const,
-              text: `Error: ${failures.length} 筆 matched 證據未通過程式驗證，整批拒收（未寫入 run）：
+          const text = `Error: ${failures.length} 筆 matched 證據未通過程式驗證，整批拒收（未寫入 run）：
 ${lines.join('\n')}${more}
 
 請引用實際包含該文字/路徑/識別字的行（如文字在 i18n 檔就引 i18n 檔、API path 引呼叫處或 handler 定義行附近）；確實找不到證據就判 missing（寧嚴勿鬆）。修正證據後重新呼叫 save_compliance_review。${specRoots.length > 0
               ? `\n可引用的 root：${[roots.frontend, roots.backend].filter(Boolean).join('、') || '（無 workspace）'}${[roots.frontend, roots.backend].some(Boolean) ? '、' : ''}規格來源 ${specRoots.join('、')}`
-              : '\n（此專案未登記規格資料夾——交付物是規格文件的任務請先用 update_project 設定 config_json.specFolders 指向規格位置，證據才引用得到）'}`,
+              : '\n（此專案未登記規格資料夾——交付物是規格文件的任務請先用 update_project 設定 config_json.specFolders 指向規格位置，證據才引用得到）'}`;
+          if (!validateOnly) return { content: [{ type: 'text' as const, text }], isError: true };
+          problems.push(text);
+        }
+      }
+
+      // ── 試跑到此為止：回報全部問題，不寫 run、不寫 agent_outputs、不通知 ──
+      if (validateOnly) {
+        const coverage = uncovered.length > 0
+          ? `尚未涵蓋 ${uncovered.length} 項（正式提交時必須一次涵蓋全部未豁免項目，否則會被拒）`
+          : '已涵蓋全部未豁免項目';
+        const carried = carriedItems.length > 0 ? `；沿用上輪 ${carriedItems.length} 項（證據重驗通過）` : '';
+        if (problems.length > 0) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: `試跑（validateOnly）：發現 ${problems.length} 類問題，未寫入任何東西。本次送 ${results.length} 項，${coverage}${carried}。修正以下全部問題後再正式提交：
+
+${problems.join('\n\n---\n\n')}`,
             }],
             isError: true,
           };
         }
+        return {
+          content: [{
+            type: 'text' as const,
+            text: `試跑（validateOnly）通過：送出的 ${results.length} 項全部通過驗證，未寫入任何東西（不算數，完成閘門看不到）。${coverage}${carried}。${evidenceNote}
+正式提交請拿掉 validateOnly，results 一次涵蓋全部未豁免項目。`,
+          }],
+        };
       }
 
       // ── N3：引擎 × AI 分歧偵測（對照最新 source='engine' 的 run；無 engine run 則跳過）──

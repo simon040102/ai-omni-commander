@@ -1375,6 +1375,90 @@ describe('compliance-tools', () => {
       });
     });
 
+    describe('validateOnly 試跑（只驗不寫）', () => {
+      function counts(taskId = 'task-1') {
+        const runs = (testDb.prepare('SELECT COUNT(*) as c FROM spec_compliance_runs WHERE task_id = ?').get(taskId) as { c: number }).c;
+        const outs = (testDb.prepare("SELECT COUNT(*) as c FROM agent_outputs WHERE task_id = ? AND content LIKE '[SPEC_REVIEW]%'").get(taskId) as { c: number }).c;
+        return { runs, outs };
+      }
+
+      it('一次列出所有問題（不存在的 itemId、重複、缺證據、證據驗證失敗），不寫任何東西', async () => {
+        const rows = await seedChecklist([
+          UI_ITEM,
+          { itemType: 'ui_text', content: '窗口測試目標文字', side: 'frontend' },
+          { itemType: 'logic', content: '依建立日期倒序', side: 'frontend' },
+        ]);
+        const result = await callTool(server, 'save_compliance_review', {
+          taskId: 'task-1',
+          validateOnly: true,
+          results: [
+            { itemId: 'no-such-id', status: 'missing' },
+            { itemId: rows[0].id, status: 'matched', evidence: [{ file: 'src/Nope.tsx', line: 1 }] },
+            { itemId: rows[1].id, status: 'matched' },
+            { itemId: rows[2].id, status: 'missing' },
+            { itemId: rows[2].id, status: 'missing' },
+          ],
+        });
+        const text = result.content[0].text as string;
+        expect(result.isError).toBe(true);
+        expect(text).toContain('試跑');
+        expect(text).toContain('no-such-id');
+        expect(text).toContain('重複');
+        expect(text).toContain('沒有 evidence');
+        expect(text).toContain('src/Nope.tsx:1');
+        expect(text).toContain('檔案不存在');
+        expect(counts()).toEqual({ runs: 0, outs: 0 });
+      });
+
+      it('只送部分項目：證據都通過 → 回報通過＋尚未涵蓋幾項，不寫 run', async () => {
+        const rows = await seedChecklist();
+        const result = await callTool(server, 'save_compliance_review', {
+          taskId: 'task-1',
+          validateOnly: true,
+          results: [{ itemId: rows[0].id, status: 'matched', evidence: [{ file: 'src/Index.tsx', line: 1 }] }],
+        });
+        const text = result.content[0].text as string;
+        expect(result.isError).toBeUndefined();
+        expect(text).toContain('試跑');
+        expect(text).toContain('未寫入');
+        expect(text).toContain('尚未涵蓋 1 項');
+        expect(counts()).toEqual({ runs: 0, outs: 0 });
+      });
+
+      it('全部涵蓋且通過 → 說明正式提交會通過；正式提交規則不變（缺項照樣拒）', async () => {
+        const rows = await seedChecklist();
+        const full = [
+          { itemId: rows[0].id, status: 'matched' as const, evidence: [{ file: 'src/Index.tsx', line: 1 }] },
+          { itemId: rows[1].id, status: 'missing' as const },
+        ];
+        const dry = await callTool(server, 'save_compliance_review', { taskId: 'task-1', validateOnly: true, results: full });
+        expect(dry.isError).toBeUndefined();
+        expect(dry.content[0].text).toContain('已涵蓋全部');
+        expect(counts()).toEqual({ runs: 0, outs: 0 });
+
+        // 正式提交只送一項 → 照樣因缺項被拒
+        const partial = await callTool(server, 'save_compliance_review', { taskId: 'task-1', results: [full[0]] });
+        expect(partial.isError).toBe(true);
+        expect(partial.content[0].text).toContain('未判定');
+        expect(counts().runs).toBe(0);
+
+        const real = await callTool(server, 'save_compliance_review', { taskId: 'task-1', results: full });
+        expect(real.isError).toBeUndefined();
+        expect(counts()).toEqual({ runs: 1, outs: 1 });
+      });
+
+      it('試跑結果不算數：完成閘門仍看不到 ai_review run', async () => {
+        const rows = await seedChecklist([UI_ITEM]);
+        await callTool(server, 'save_compliance_review', {
+          taskId: 'task-1',
+          validateOnly: true,
+          results: [{ itemId: rows[0].id, status: 'matched', evidence: [{ file: 'src/Index.tsx', line: 1 }] }],
+        });
+        const n = (testDb.prepare("SELECT COUNT(*) as c FROM spec_compliance_runs WHERE task_id = 'task-1' AND source = 'ai_review'").get() as { c: number }).c;
+        expect(n).toBe(0);
+      });
+    });
+
     describe('carryForward 增量回對 (S1)', () => {
       function aiRuns(taskId = 'task-1') {
         return testDb.prepare(
@@ -1441,6 +1525,20 @@ describe('compliance-tools', () => {
             ['// 文字已被移除', ...Array.from({ length: 25 }, (_, i) => `const y_${i} = ${i};`)].join('\n'),
             'utf-8',
           );
+
+          // 試跑：沿用重驗失敗與本次證據失敗一次列出，不寫 run
+          const dry = await callTool(server, 'save_compliance_review', {
+            taskId: 'task-1',
+            carryForward: true,
+            validateOnly: true,
+            results: [{ itemId: rows[1].id, status: 'matched', evidence: [{ file: 'src/Nope.tsx', line: 1 }] }],
+          });
+          expect(dry.isError).toBe(true);
+          expect(dry.content[0].text).toContain('revalidationFailed');
+          expect(dry.content[0].text).toContain('src/Mutable.tsx:1');
+          expect(dry.content[0].text).toContain('src/Nope.tsx:1');
+          expect(dry.content[0].text).toContain('2 類問題');
+          expect(aiRuns()).toHaveLength(1);
 
           // 第二輪（增量）：只提交 L——M 的沿用重驗必須失敗且整批拒收
           const result = await callTool(server, 'save_compliance_review', {
