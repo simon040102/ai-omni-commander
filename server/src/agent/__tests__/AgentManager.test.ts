@@ -1,380 +1,85 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import Database from 'better-sqlite3';
+import { runMigrations } from '../../db/schema.js';
 
 /**
- * Tests for AgentManager debounce and taskDoneAgents behavior.
- * Uses heavy mocking since AgentManager has many dependencies (DB, EventBus, SDK).
+ * AgentManager 只剩兩件事（legacy spawn 引擎已移除，任務一律由外部 Claude Code session + MCP 執行）：
+ * 啟動時清理上次殘留的非 MCP agent、Web UI 的停止鈕。兩者都只改 DB 狀態、發事件，不碰任何程序。
  */
-
-// --- Mock DB queries ---
-const mockGetAgent = vi.fn().mockReturnValue(null);
-const mockUpdateAgent = vi.fn();
-const mockCreateAgent = vi.fn();
-const mockGetAgentsByProject = vi.fn().mockReturnValue([]);
-const mockGetAgentsByRole = vi.fn().mockReturnValue([]);
-const mockGetRunningAgents = vi.fn().mockReturnValue([]);
-
-vi.mock('../../db/queries/agents.js', () => ({
-  getAgent: (...args: unknown[]) => mockGetAgent(...args),
-  updateAgent: (...args: unknown[]) => mockUpdateAgent(...args),
-  createAgent: (...args: unknown[]) => mockCreateAgent(...args),
-  getAgentsByProject: (...args: unknown[]) => mockGetAgentsByProject(...args),
-  getAgentsByRole: (...args: unknown[]) => mockGetAgentsByRole(...args),
-  getRunningAgents: (...args: unknown[]) => mockGetRunningAgents(...args),
-}));
-
-vi.mock('../../db/queries/projects.js', () => ({
-  getProject: vi.fn().mockReturnValue({ id: 'proj-1', mode: 'spec', status: 'executing' }),
-  updateProject: vi.fn(),
-}));
-
-vi.mock('../../db/queries/tasks.js', () => ({
-  getTask: vi.fn().mockReturnValue(null),
-  updateTask: vi.fn(),
-}));
-
-vi.mock('../../db/queries/events.js', () => ({
-  logAgentOutput: vi.fn(),
-  createIntervention: vi.fn(),
-  clearAgentOutputs: vi.fn(),
-  getAgentOutputs: vi.fn().mockReturnValue([]),
-}));
-
-vi.mock('../../db/queries/plans.js', () => ({
-  createPlan: vi.fn(),
-}));
-
-vi.mock('../../db/queries/globalConfig.js', () => ({
-  getGlobalMcpServers: vi.fn().mockReturnValue([]),
-}));
-
-vi.mock('../../config.js', () => ({
-  getConfig: vi.fn().mockReturnValue({
-    claudePath: 'claude',
-    dbPath: ':memory:',
-    aiContextDir: '/tmp',
-    port: 3457,
-    agentMaxRuntimeMs: 2 * 60 * 60 * 1000,
-  }),
-}));
-
-// Mock SDK query — factory cannot reference top-level vars (hoisting)
-vi.mock('@anthropic-ai/claude-agent-sdk', () => {
-  function makeMockQuery() {
-    const q = {
-      close: vi.fn(),
-      return: vi.fn().mockResolvedValue({ value: undefined, done: true }),
-      throw: vi.fn(),
-      interrupt: vi.fn(),
-      next: vi.fn().mockResolvedValue({ value: undefined, done: true }),
-      [Symbol.asyncIterator]() { return q; },
-    };
-    return q;
-  }
-  return {
-    query: vi.fn().mockImplementation(() => makeMockQuery()),
-  };
-});
+let testDb: Database.Database;
+vi.mock('../../db/connection.js', () => ({ getDb: () => testDb }));
 
 import { AgentManager } from '../AgentManager.js';
-import { EventBus } from '../../eventbus/EventBus.js';
+import { EventTypes } from '@omni/shared';
 
-// Minimal ContextSync mock
-const mockContextSync = {
-  init: vi.fn(),
-  writeContract: vi.fn(),
-  writeSchema: vi.fn(),
-} as any;
+function seed() {
+  testDb.prepare(`INSERT INTO projects (id, name, working_dir) VALUES ('p1', 'P', '/tmp')`).run();
+  testDb.prepare(`INSERT INTO tasks (id, project_id, title, label, task_type, status) VALUES ('t-legacy', 'p1', 'T', 'backend', 'feature', 'in_progress')`).run();
+  testDb.prepare(`INSERT INTO tasks (id, project_id, title, label, task_type, status) VALUES ('t-mcp', 'p1', 'T2', 'backend', 'feature', 'in_progress')`).run();
+  testDb.prepare(`INSERT INTO agents (id, project_id, role, status, model, current_task_id, pid) VALUES ('a-legacy', 'p1', 'backend', 'running', 'sonnet', 't-legacy', 999999)`).run();
+  testDb.prepare(`INSERT INTO agents (id, project_id, role, status, model, current_task_id) VALUES ('mcp-t-mcp', 'p1', 'backend', 'running', 'external', 't-mcp')`).run();
+}
+const agentStatus = (id: string) => (testDb.prepare('SELECT status FROM agents WHERE id = ?').get(id) as { status: string }).status;
+const taskStatus = (id: string) => (testDb.prepare('SELECT status FROM tasks WHERE id = ?').get(id) as { status: string }).status;
 
 describe('AgentManager', () => {
+  let emit: ReturnType<typeof vi.fn>;
   let manager: AgentManager;
-  let eventBus: EventBus;
 
   beforeEach(() => {
-    vi.clearAllMocks();
-    vi.useFakeTimers();
-    eventBus = new EventBus();
-    manager = new AgentManager(eventBus, mockContextSync);
+    testDb = new Database(':memory:');
+    testDb.pragma('foreign_keys = ON');
+    runMigrations(testDb);
+    seed();
+    emit = vi.fn().mockResolvedValue(undefined);
+    manager = new AgentManager({ emit } as any);
   });
 
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  describe('startAgent — legacy spawn hard gate', () => {
-    afterEach(() => {
-      delete process.env['ALLOW_LEGACY_SPAWN'];
-    });
-
-    it('throws when ALLOW_LEGACY_SPAWN is not set (spawn disabled by default)', async () => {
-      delete process.env['ALLOW_LEGACY_SPAWN'];
-      await expect(manager.startAgent({ projectId: 'proj-1', role: 'frontend', prompt: 'x' } as any))
-        .rejects.toThrow(/spawn 派工已停用/);
-      // Gate fires before any DB writes
-      expect(mockCreateAgent).not.toHaveBeenCalled();
-    });
-
-    it('throws for values other than 1/true', async () => {
-      process.env['ALLOW_LEGACY_SPAWN'] = 'yes';
-      await expect(manager.startAgent({ projectId: 'proj-1', role: 'frontend', prompt: 'x' } as any))
-        .rejects.toThrow(/spawn 派工已停用/);
-    });
-
-    it('passes the gate when ALLOW_LEGACY_SPAWN=1 (fails later on mocks, not on the gate)', async () => {
-      process.env['ALLOW_LEGACY_SPAWN'] = '1';
-      try {
-        await manager.startAgent({ projectId: 'proj-1', role: 'frontend', prompt: 'x' } as any);
-      } catch (err) {
-        // With heavy mocking startAgent may fail deeper in — but never on the gate
-        expect((err as Error).message).not.toMatch(/spawn 派工已停用/);
-      }
-    });
-  });
-
-  // 硬閘原本只在 startAgent：rerunAgent／resumeAgent 也會 new 一個 claude 程序，
-  // Web UI 的 agent.command／agent.planAction 還能觸發——閘門必須擋在這兩個入口。
-  describe('rerunAgent / resumeAgent — 同一道 legacy spawn 硬閘', () => {
-    const legacyAgent = { id: 'a-old', projectId: 'proj-1', role: 'frontend', model: 'x', sessionId: 'sess-1', status: 'stopped', currentTaskId: null };
-    afterEach(() => {
-      delete process.env['ALLOW_LEGACY_SPAWN'];
-    });
-
-    it('rerunAgent：未開 ALLOW_LEGACY_SPAWN → 擋下，而且在改任何 DB 狀態之前', async () => {
-      delete process.env['ALLOW_LEGACY_SPAWN'];
-      mockGetAgent.mockReturnValue(legacyAgent);
-      await expect(manager.rerunAgent('a-old', 'x')).rejects.toThrow(/spawn 派工已停用/);
-      expect(mockUpdateAgent).not.toHaveBeenCalled();
-    });
-
-    it('resumeAgent（從 DB 的舊 session 接續）：未開 ALLOW_LEGACY_SPAWN → 擋下，而且在改任何 DB 狀態之前', async () => {
-      delete process.env['ALLOW_LEGACY_SPAWN'];
-      mockGetAgent.mockReturnValue(legacyAgent);
-      await expect(manager.resumeAgent('a-old', 'x')).rejects.toThrow(/spawn 派工已停用/);
-      expect(mockUpdateAgent).not.toHaveBeenCalled();
-    });
-
-    it('開了 ALLOW_LEGACY_SPAWN=1 → 不是被閘門擋（後面因 mock 失敗沒關係）', async () => {
-      process.env['ALLOW_LEGACY_SPAWN'] = '1';
-      mockGetAgent.mockReturnValue(legacyAgent);
-      for (const call of [() => manager.rerunAgent('a-old', 'x'), () => manager.resumeAgent('a-old', 'x')]) {
-        try { await call(); } catch (err) { expect((err as Error).message).not.toMatch(/spawn 派工已停用/); }
-      }
-    });
-  });
-
-  describe('sendInputToAgent — 硬閘未開時不會啟動程序', () => {
-    it('對已停止的舊 agent 送指令：不呼叫 SDK、不改 DB 狀態', async () => {
-      delete process.env['ALLOW_LEGACY_SPAWN'];
-      mockGetAgent.mockReturnValue({
-        id: 'agent-1', role: 'frontend', projectId: 'proj-1',
-        sessionId: 'sess-1', status: 'stopped', taskId: 'task-1',
-      });
-      const { query: sdkQuery } = await import('@anthropic-ai/claude-agent-sdk');
-      const p = manager.sendInputToAgent('agent-1', 'hello').catch(() => false);
-      await vi.advanceTimersByTimeAsync(1600);
-      await p;
-      expect(vi.mocked(sdkQuery)).not.toHaveBeenCalled();
-      expect(mockUpdateAgent).not.toHaveBeenCalled();
-    });
-  });
-
-  // 以下兩組驗的是 legacy spawn 本身的行為（debounce、resume 時清 taskDoneAgents），
-  // 只在開了 ALLOW_LEGACY_SPAWN 時才存在
-  describe('sendInputToAgent — debounce', () => {
-    beforeEach(() => { process.env['ALLOW_LEGACY_SPAWN'] = '1'; });
-    afterEach(() => { delete process.env['ALLOW_LEGACY_SPAWN']; });
-
-    it('buffers rapid inputs and merges after 1.5s', async () => {
-      // Set up a fake agent in the DB so _doSendInput can find session ID
-      mockGetAgent.mockReturnValue({
-        id: 'agent-1', role: 'frontend', projectId: 'proj-1',
-        sessionId: 'sess-1', status: 'stopped', taskId: 'task-1',
-      });
-
-      // Send 3 inputs rapidly
-      const p1 = manager.sendInputToAgent('agent-1', 'fix button color');
-      const p2 = manager.sendInputToAgent('agent-1', 'also fix header');
-      const p3 = manager.sendInputToAgent('agent-1', 'and footer too');
-
-      // Before debounce fires, nothing should have happened
-      // (no SDK query calls yet from _doSendInput)
-
-      // Advance past debounce
-      await vi.advanceTimersByTimeAsync(1600);
-
-      // All 3 promises should resolve
-      const results = await Promise.all([p1, p2, p3]);
-      expect(results).toEqual([true, true, true]);
-
-      // Check that _doSendInput was called with merged text
-      // The SDK query should have been called with the merged prompt
-      const { query: sdkQuery } = await import('@anthropic-ai/claude-agent-sdk');
-      const mockQuery = vi.mocked(sdkQuery);
-      expect(mockQuery).toHaveBeenCalledTimes(1);
-    });
-
-    it('does not merge inputs separated by more than 1.5s', async () => {
-      mockGetAgent.mockReturnValue({
-        id: 'agent-1', role: 'frontend', projectId: 'proj-1',
-        sessionId: 'sess-1', status: 'stopped', taskId: 'task-1',
-      });
-
-      const { query: sdkQuery } = await import('@anthropic-ai/claude-agent-sdk');
-      const mockQuery = vi.mocked(sdkQuery);
-
-      // First input
-      const p1 = manager.sendInputToAgent('agent-1', 'first message');
-      await vi.advanceTimersByTimeAsync(1600);
-      await p1;
-
-      const callCount1 = mockQuery.mock.calls.length;
-
-      // Second input after debounce window
-      const p2 = manager.sendInputToAgent('agent-1', 'second message');
-      await vi.advanceTimersByTimeAsync(1600);
-      await p2;
-
-      // Should have been 2 separate calls
-      expect(mockQuery.mock.calls.length).toBe(callCount1 + 1);
-    });
-
-    it('different agents have independent debounce timers', async () => {
-      mockGetAgent.mockImplementation((id: string) => ({
-        id, role: 'frontend', projectId: 'proj-1',
-        sessionId: `sess-${id}`, status: 'stopped', taskId: 'task-1',
+  describe('recoverRunningAgents（啟動時清理上次殘留）', () => {
+    it('非 MCP 的 running agent → 標 error、它的進行中任務退回 pending、發 [RECOVERY] 輸出', async () => {
+      await manager.recoverRunningAgents();
+      expect(agentStatus('a-legacy')).toBe('error');
+      expect(taskStatus('t-legacy')).toBe('pending');
+      expect(emit).toHaveBeenCalledWith(expect.objectContaining({
+        type: EventTypes.AGENT_OUTPUT,
+        payload: expect.objectContaining({ agentId: 'a-legacy', content: expect.stringContaining('[RECOVERY]') }),
       }));
-
-      const p1 = manager.sendInputToAgent('agent-1', 'msg for agent 1');
-      const p2 = manager.sendInputToAgent('agent-2', 'msg for agent 2');
-
-      await vi.advanceTimersByTimeAsync(1600);
-      await Promise.all([p1, p2]);
-
-      const { query: sdkQuery } = await import('@anthropic-ai/claude-agent-sdk');
-      const mockQuery = vi.mocked(sdkQuery);
-      // Both agents should have gotten their own query
-      expect(mockQuery.mock.calls.length).toBeGreaterThanOrEqual(2);
     });
 
-    it('returns false when agent has no session ID', async () => {
-      mockGetAgent.mockReturnValue({
-        id: 'agent-1', role: 'frontend', projectId: 'proj-1',
-        sessionId: null, status: 'stopped', taskId: null,
-      });
-
-      const p = manager.sendInputToAgent('agent-1', 'hello');
-      await vi.advanceTimersByTimeAsync(1600);
-      const result = await p;
-
-      expect(result).toBe(false);
+    it('MCP 合成 agent（mcp-*）不動——外部 session 可能還在跑，退回 pending 會打斷它', async () => {
+      await manager.recoverRunningAgents();
+      expect(agentStatus('mcp-t-mcp')).toBe('running');
+      expect(taskStatus('t-mcp')).toBe('in_progress');
     });
 
-    it('returns false for axure agents that are not running', async () => {
-      mockGetAgent.mockReturnValue({
-        id: 'agent-1', role: 'axure', projectId: 'proj-1',
-        sessionId: 'sess-1', status: 'stopped', taskId: null,
-      });
-
-      const p = manager.sendInputToAgent('agent-1', 'hello');
-      await vi.advanceTimersByTimeAsync(1600);
-      const result = await p;
-
-      expect(result).toBe(false);
+    it('不再依 DB 裡的舊 PID 去 kill 程序（PID 可能已被別的程序重用）', async () => {
+      const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+      await manager.recoverRunningAgents();
+      expect(kill).not.toHaveBeenCalled();
+      kill.mockRestore();
     });
   });
 
-  describe('taskDoneAgents — completion handling (auto-resume removed)', () => {
-    beforeEach(() => { process.env['ALLOW_LEGACY_SPAWN'] = '1'; });
-    afterEach(() => { delete process.env['ALLOW_LEGACY_SPAWN']; });
-
-    it('clears taskDoneAgents when sending input so resumed agent is not immediately stopped', async () => {
-      mockGetAgent.mockReturnValue({
-        id: 'agent-1', role: 'frontend', projectId: 'proj-1',
-        sessionId: 'sess-1', status: 'stopped', taskId: 'task-1',
-      });
-
-      // Simulate that agent previously completed via [TASK_COMPLETE]
-      // Access private field for testing
-      (manager as any).taskDoneAgents.add('agent-1');
-
-      const p = manager.sendInputToAgent('agent-1', 'hello chat');
-      await vi.advanceTimersByTimeAsync(1600);
-      const result = await p;
-
-      // Input was delivered by resuming the session
-      expect(result).toBe(true);
-
-      // taskDoneAgents is cleared (PTY mode needs this so old [TASK_COMPLETE] in JSONL
-      // doesn't re-trigger stop after resume)
-      expect((manager as any).taskDoneAgents.has('agent-1')).toBe(false);
-
-      // Auto-resume was removed from AgentManager — no counter state should exist
-      expect((manager as any).autoResumeCount).toBeUndefined();
+  describe('stopAgent（Web UI 停止鈕）', () => {
+    it('agent 標 stopped、清掉目前任務；進行中任務退回 pending；發 AGENT_STOPPED', async () => {
+      await manager.stopAgent('a-legacy');
+      const row = testDb.prepare('SELECT status, current_task_id, pid FROM agents WHERE id = ?').get('a-legacy') as Record<string, unknown>;
+      expect(row).toMatchObject({ status: 'stopped', current_task_id: null, pid: null });
+      expect(taskStatus('t-legacy')).toBe('pending');
+      expect(emit).toHaveBeenCalledWith(expect.objectContaining({ type: EventTypes.AGENT_STOPPED, payload: { agentId: 'a-legacy' } }));
     });
 
-    it('handleAgentComplete marks task completed for taskDone agents without resuming', async () => {
-      // Access private method for testing
-      const handleComplete = (manager as any).handleAgentComplete.bind(manager);
-
-      // Mark agent as task-done
-      (manager as any).taskDoneAgents.add('agent-1');
-
-      mockGetAgent.mockReturnValue({
-        id: 'agent-1', role: 'frontend', projectId: 'proj-1',
-        sessionId: 'sess-1', status: 'running', taskId: 'task-1',
-      });
-
-      // Spy on resumeAgent to ensure it's NOT called (auto-resume was removed)
-      const resumeSpy = vi.spyOn(manager as any, 'resumeAgent').mockResolvedValue(undefined);
-
-      await handleComplete('agent-1', 'proj-1', 'task-1', {
-        is_error: false,
-        subtype: 'success',
-        cost_usd: 0.01,
-        num_turns: 1,
-        duration_ms: 5000,
-      });
-
-      // Should NOT have resumed
-      expect(resumeSpy).not.toHaveBeenCalled();
-
-      // Task should be marked completed since [TASK_COMPLETE] was signaled
-      const { updateTask } = await import('../../db/queries/tasks.js');
-      expect(vi.mocked(updateTask)).toHaveBeenCalledWith(
-        'task-1',
-        expect.objectContaining({ status: 'completed' }),
-      );
+    it('任務已不是進行中 → 不改任務狀態', async () => {
+      testDb.prepare(`UPDATE tasks SET status = 'completed' WHERE id = 't-legacy'`).run();
+      await manager.stopAgent('a-legacy');
+      expect(taskStatus('t-legacy')).toBe('completed');
     });
 
-    it('handleAgentComplete marks task failed (not resumed) when agent exits without [TASK_COMPLETE]', async () => {
-      const handleComplete = (manager as any).handleAgentComplete.bind(manager);
-
-      // Agent is NOT in taskDoneAgents (never signaled [TASK_COMPLETE])
-      expect((manager as any).taskDoneAgents.has('agent-1')).toBe(false);
-
-      mockGetAgent.mockReturnValue({
-        id: 'agent-1', role: 'frontend', projectId: 'proj-1',
-        sessionId: 'sess-1', status: 'running', taskId: 'task-1',
-      });
-
-      const resumeSpy = vi.spyOn(manager as any, 'resumeAgent').mockResolvedValue(undefined);
-
-      await handleComplete('agent-1', 'proj-1', 'task-1', {
-        is_error: false,
-        subtype: 'success',
-        cost_usd: 0.01,
-        num_turns: 1,
-        duration_ms: 5000,
-      });
-
-      // Auto-resume was removed — completion never triggers a resume
-      expect(resumeSpy).not.toHaveBeenCalled();
-
-      // Exiting without [TASK_COMPLETE] marks the task failed (even with exit success)
-      const { updateTask } = await import('../../db/queries/tasks.js');
-      expect(vi.mocked(updateTask)).toHaveBeenCalledWith(
-        'task-1',
-        expect.objectContaining({ status: 'failed' }),
-      );
+    it('不依 PID kill 程序', async () => {
+      const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+      await manager.stopAgent('a-legacy');
+      expect(kill).not.toHaveBeenCalled();
+      kill.mockRestore();
     });
   });
 });

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { runMigrations } from '../../db/schema.js';
 import fs from 'node:fs';
@@ -11,18 +11,6 @@ let testDb: Database.Database;
 vi.mock('../../db/connection.js', () => ({
   getDb: () => testDb,
 }));
-
-// Mock AgentManager
-const mockStartAgent = vi.fn().mockResolvedValue('agent-123');
-const mockAgentManager = {
-  startAgent: mockStartAgent,
-};
-
-// Mock EventBus
-const mockEventBus = {
-  emit: vi.fn(),
-  on: vi.fn(),
-};
 
 // Mock DocumentParser
 const mockDocumentParser = {
@@ -50,11 +38,7 @@ describe('ExecutionPipeline', () => {
   beforeEach(() => {
     testDb = freshDb();
     vi.clearAllMocks();
-    pipeline = new ExecutionPipeline(
-      mockAgentManager as any,
-      mockEventBus as any,
-      mockDocumentParser as any,
-    );
+    pipeline = new ExecutionPipeline(mockDocumentParser as any);
   });
 
   describe('selectSuperpowers()', () => {

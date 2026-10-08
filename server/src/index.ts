@@ -9,8 +9,6 @@ import { backupDatabase } from './db/backup.js';
 import { runAttentionDigest } from './utils/attentionDigest.js';
 import { getProject } from './db/queries/projects.js';
 import { EventBus } from './eventbus/EventBus.js';
-import { ContextSync } from './eventbus/ContextSync.js';
-import { ContractWatcher } from './eventbus/ContractWatcher.js';
 import { AgentManager } from './agent/AgentManager.js';
 import { SpecModeHandler } from './orchestrator/SpecModeHandler.js';
 import { ExecutionPipeline } from './orchestrator/ExecutionPipeline.js';
@@ -24,7 +22,6 @@ import { SvnSpecService } from './svn/SvnSpecService.js';
 import { taskFunctionCode } from './utils/taskFunctionCode.js';
 import { validateResolutionNote } from './utils/specGapResolution.js';
 import { SaFlowAnalyzer } from './documents/SaFlowAnalyzer.js';
-import { listProjects } from './db/queries/projects.js';
 import { getTask } from './db/queries/tasks.js';
 import { getRecentPaths, addRecentPath, removeRecentPath, clearRecentPaths, migrateProjectPathsToRecent } from './db/queries/recentPaths.js';
 import { getAllProjectNotes, createProjectNote, archiveProjectNote } from './db/queries/projectNotes.js';
@@ -37,7 +34,7 @@ import { handleMcpEventToast } from './utils/toastEvents.js';
 import { maskProjectConfig, maskConnectionString } from './mcp/helpers.js';
 import { logger } from './utils/logger.js';
 import type { WsMessage } from '@omni/shared';
-import { EventTypes, CURRENT_MODELS, LEGACY_MODELS } from '@omni/shared';
+import { CURRENT_MODELS, LEGACY_MODELS } from '@omni/shared';
 
 /** 定期資料庫備份間隔（24h）。啟動時備份一次，之後每隔此間隔再備份一次。 */
 const BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
@@ -116,14 +113,12 @@ async function main() {
 
   // 2. Create core services
   const eventBus = new EventBus();
-  const contextSync = new ContextSync(config.aiContextDir);
-  await contextSync.init();
 
-  const agentManager = new AgentManager(eventBus, contextSync);
+  const agentManager = new AgentManager(eventBus);
 
-  const specHandler = new SpecModeHandler(agentManager, contextSync, eventBus);
+  const specHandler = new SpecModeHandler();
   const specCacheDir = path.join(path.dirname(config.dbPath), 'spec-cache');
-  const pipeline = new ExecutionPipeline(agentManager, eventBus, specHandler.getDocumentParser(), specCacheDir);
+  const pipeline = new ExecutionPipeline(specHandler.getDocumentParser(), specCacheDir);
 
   // SVN Spec Service: auto-fetch spec documents from SVN
   const svnCacheDir = path.join(path.dirname(config.dbPath), 'svn-cache');
@@ -173,9 +168,7 @@ async function main() {
     res.json({
       ok: true,
       status: 'ok',
-      mode: config.agentBackend,
       uptime: process.uptime(),
-      activeAgents: agentManager.getActiveAgents().length,
       projectRoot: config.projectRoot.replace(/\\/g, '/'),
     });
   });
@@ -1040,7 +1033,7 @@ async function main() {
     res.status(500).json({ error: 'Internal server error' });
   });
 
-  // 6. Wire EventBus to WebSocket broadcast
+  // 6. Wire EventBus to WebSocket broadcast（發送者只剩 AgentManager 的 agent.* 事件）
   eventBus.on('agent.*', (event) => {
     wsServer.broadcast({
       type: `agent.${event.type.split('.')[1]}`,
@@ -1049,68 +1042,6 @@ async function main() {
       payload: event.payload,
     } as WsMessage);
   });
-
-  eventBus.on('task.*', (event) => {
-    wsServer.broadcast({
-      type: `task.${event.type.split('.')[1]}`,
-      id: genId(),
-      timestamp: event.timestamp,
-      payload: event.payload,
-    } as WsMessage);
-  });
-
-  eventBus.on('project.*', (event) => {
-    // Broadcast project phase changes (e.g. executing → completed)
-    if (event.type === EventTypes.PROJECT_PHASE_CHANGED) {
-      const allProjects = listProjects();
-      wsServer.broadcast({
-        type: 'projects.list',
-        id: genId(),
-        timestamp: event.timestamp,
-        payload: { projects: allProjects },
-      } as WsMessage);
-    }
-  });
-
-  eventBus.on('review.*', (event) => {
-    wsServer.broadcast({
-      type: event.type,
-      id: genId(),
-      timestamp: event.timestamp,
-      payload: event.payload,
-    } as WsMessage);
-  });
-
-  eventBus.on('contract.*', (event) => {
-    wsServer.broadcast({
-      type: 'eventbus.notification',
-      id: genId(),
-      timestamp: event.timestamp,
-      payload: {
-        eventType: event.type,
-        source: event.source || '',
-        target: event.target || '',
-        data: event.payload,
-      },
-    } as WsMessage);
-  });
-
-  eventBus.on('intervention.*', (event) => {
-    wsServer.broadcast({
-      type: 'intervention.request',
-      id: genId(),
-      timestamp: event.timestamp,
-      payload: event.payload,
-    } as WsMessage);
-  });
-
-  // 7. Start contract watcher (uses a default project ID for now)
-  // In production, each project gets its own watcher
-  const contractWatcher = new ContractWatcher(config.aiContextDir, eventBus, 'default');
-  contractWatcher.start();
-
-  // 8. Log agent backend mode
-  logger.info({ agentBackend: config.agentBackend }, 'Agent backend mode');
 
   // 8b. Recover agents that were running before server shutdown/crash
   await agentManager.recoverRunningAgents();
@@ -1130,11 +1061,6 @@ async function main() {
     if (attentionTimer) clearInterval(attentionTimer);
     if (attentionKickoff) clearTimeout(attentionKickoff);
     asanaSyncService.stopAll();
-    // Kill agent processes without touching DB status here — on next startup,
-    // recoverRunningAgents() kills any leftover PIDs and marks these agents as
-    // 'error' / resets their tasks to 'pending' (no auto-resume).
-    await agentManager.killAllProcessesForShutdown();
-    await contractWatcher.stop();
     await asanaClient.disconnect();
     httpServer.close();
     db.close();

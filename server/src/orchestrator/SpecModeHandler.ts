@@ -1,7 +1,4 @@
 import type { DocType, Workspace } from '@omni/shared';
-import type { AgentManager } from '../agent/AgentManager.js';
-import type { ContextSync } from '../eventbus/ContextSync.js';
-import type { EventBus } from '../eventbus/EventBus.js';
 import { DocumentParser, type ParsedDocument } from '../documents/DocumentParser.js';
 import { getProject } from '../db/queries/projects.js';
 import { getTask } from '../db/queries/tasks.js';
@@ -26,11 +23,7 @@ const DOC_ROUTING: Record<string, DocType[]> = {
 export class SpecModeHandler {
   private documentParser: DocumentParser;
 
-  constructor(
-    private agentManager: AgentManager,
-    private contextSync: ContextSync,
-    private eventBus: EventBus,
-  ) {
+  constructor() {
     const config = getConfig();
     this.documentParser = new DocumentParser(
       path.join(config.projectRoot, 'data', 'uploads'),

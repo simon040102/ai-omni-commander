@@ -23,11 +23,6 @@ import type { AsanaSyncService } from '../asana/AsanaSyncService.js';
 import { createProject, listProjects, getProject, deleteProject, updateProject } from '../db/queries/projects.js';
 import { getTasksByProject, getDependencies, createTask, deleteTask, updateTaskFields, deleteTasksBySource, getTask } from '../db/queries/tasks.js';
 import { getAgentsByProject } from '../db/queries/agents.js';
-import { getAgentOutputs } from '../db/queries/events.js';
-import { JsonlWatcher } from '../agent/JsonlWatcher.js';
-import { SessionResolver } from '../agent/SessionResolver.js';
-import type { JsonlAssistantMessage, JsonlUserMessage } from '@omni/shared';
-import { getPlansByProject } from '../db/queries/plans.js';
 import { genId } from '../utils/uuid.js';
 import { notifyTaskStatusToast } from '../utils/toastEvents.js';
 import { createChildLogger } from '../utils/logger.js';
@@ -143,7 +138,6 @@ export function registerHandlers(
   // PROJECT.DELETE
   wsServer.registerHandler('project.delete', async (msg: WsMessage) => {
     const { payload } = msg as WsDeleteProject;
-    await agentManager.stopAllForProject(payload.projectId);
     deleteProject(payload.projectId);
     logger.info({ projectId: payload.projectId }, 'Project deleted');
 
@@ -945,83 +939,4 @@ function sendProjectState(
       } as WsMessage);
     }
   }
-
-  const plans = getPlansByProject(projectId);
-  if (plans.length > 0) {
-    wsServer.send(ws, {
-      type: 'agent.plans',
-      id: genId(),
-      timestamp: new Date().toISOString(),
-      payload: { projectId, plans },
-    } as WsMessage);
-  }
-
-  for (const agent of agents) {
-    let outputs = getAgentOutputs(agent.id, 200);
-
-    // If agent is stopped and has a sessionId, prefer JSONL over DB.
-    // JSONL is always a superset of DB — it includes any VSCode-continued conversations.
-    const agentCwd = agent.workingDir || project.workingDir;
-    if (agent.sessionId && agentCwd &&
-        (agent.status === 'stopped' || agent.status === 'error')) {
-      try {
-        const jsonlPath = SessionResolver.getJsonlPath(agentCwd, agent.sessionId);
-        const jsonlOutputs = jsonlMessagesToOutputs(new JsonlWatcher(jsonlPath).readAll());
-        if (jsonlOutputs.length > 0) {
-          // JSONL is chronological (oldest first); reverse to match DB DESC behavior
-          // so the final outputs.reverse() in the send block produces correct order
-          outputs = jsonlOutputs.reverse();
-        }
-      } catch {
-        // JSONL not found or unreadable — fall back to DB outputs
-      }
-    }
-
-    if (outputs.length > 0) {
-      wsServer.send(ws, {
-        type: 'project.agentOutputs',
-        id: genId(),
-        timestamp: new Date().toISOString(),
-        payload: {
-          agentId: agent.id,
-          outputs: outputs.reverse(),
-          flowPlanJson: agent.flowPlanJson || null,
-        },
-      } as WsMessage);
-    }
-  }
-}
-
-/** Convert JSONL session messages to the same format as DB agent_outputs */
-function jsonlMessagesToOutputs(messages: ReturnType<JsonlWatcher['readAll']>): Array<{
-  streamType: string;
-  content: string;
-  timestamp: string;
-}> {
-  const outputs: Array<{ streamType: string; content: string; timestamp: string }> = [];
-  for (const msg of messages) {
-    const ts = msg.timestamp || new Date().toISOString();
-    if (msg.type === 'assistant') {
-      const asst = msg as JsonlAssistantMessage;
-      for (const block of (asst.message?.content || [])) {
-        if (block.type === 'text') {
-          outputs.push({ streamType: 'text', content: block.text, timestamp: ts });
-        } else if (block.type === 'tool_use') {
-          outputs.push({ streamType: 'tool_use', content: JSON.stringify({ tool: block.name, input: block.input }), timestamp: ts });
-        }
-      }
-    } else if (msg.type === 'user') {
-      const user = msg as JsonlUserMessage;
-      for (const block of (user.message?.content || [])) {
-        if (block.type === 'tool_result') {
-          const content = typeof block.content === 'string' ? block.content : JSON.stringify(block.content);
-          outputs.push({ streamType: 'tool_result', content, timestamp: ts });
-        } else if (block.type === 'text' && block.text?.trim()) {
-          // User's typed message in VSCode (not tool result)
-          outputs.push({ streamType: 'system', content: `[USER] ${block.text}`, timestamp: ts });
-        }
-      }
-    }
-  }
-  return outputs;
 }

@@ -2,8 +2,6 @@ import path from 'node:path';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import type { SuperpowersFeature, TaskType, ProjectConfig, TestOptions } from '@omni/shared';
-import type { AgentManager } from '../agent/AgentManager.js';
-import type { EventBus } from '../eventbus/EventBus.js';
 import type { DocumentParser } from '../documents/DocumentParser.js';
 import { type SvnSpecService, extractFunctionCode } from '../svn/SvnSpecService.js';
 import { SpecFetcher } from '../documents/SpecFetcher.js';
@@ -119,8 +117,6 @@ export class ExecutionPipeline {
   private saFlowAnalyzer: SaFlowAnalyzer;
 
   constructor(
-    private agentManager: AgentManager,
-    private eventBus: EventBus,
     private documentParser: DocumentParser,
     specCacheDir?: string,
   ) {
