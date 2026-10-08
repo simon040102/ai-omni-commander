@@ -703,7 +703,7 @@ async function main() {
       if (role && (role === 'frontend' || role === 'backend')) {
         result = await pipeline.preparePromptForRole(taskId, role, { track });
       } else {
-        result = await pipeline.buildExecutionPlan(taskId, undefined, undefined, undefined, undefined, track);
+        result = await pipeline.buildExecutionPlan(taskId, { track });
       }
 
       // Always include both paths for orchestrator

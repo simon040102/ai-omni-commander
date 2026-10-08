@@ -532,7 +532,7 @@ describe('ExecutionPipeline', () => {
     it('track=light：檢查表改抽 BUG 原文、規格閱讀改讀 BUG 原文、規格遵循含 light 註記', async () => {
       createTask('p-lt', 't-lt', 'frontend', 'bug');
 
-      const plan = await pipeline.buildExecutionPlan('t-lt', undefined, undefined, undefined, undefined, 'light');
+      const plan = await pipeline.buildExecutionPlan('t-lt', { track: 'light' });
 
       // 規格檢查表 light 變體（BUG 原文抽取）
       expect(plan.prompt).toContain('## 規格檢查表（light 軌 — 從 BUG 原文抽取，強制）');
@@ -627,7 +627,7 @@ describe('ExecutionPipeline', () => {
     it('light 軌變體：案例來源改為 BUG 原文重現步驟', async () => {
       createTask('p-ut-lt', 't-ut-lt', 'frontend', 'bug', TEST_CMD_CONFIG);
 
-      const plan = await pipeline.buildExecutionPlan('t-ut-lt', undefined, undefined, undefined, undefined, 'light');
+      const plan = await pipeline.buildExecutionPlan('t-ut-lt', { track: 'light' });
 
       expect(plan.prompt).toContain('## 單元測試（強制流程 — 先列案例清單，再寫測試）');
       expect(plan.prompt).toContain('重讀 BUG 原文的重現步驟與預期行為');

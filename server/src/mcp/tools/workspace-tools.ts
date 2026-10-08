@@ -220,7 +220,5 @@ description: 什麼情況下應該使用這個 skill（觸發時機寫具體，a
 - 唯一允許寫入的目標：CLAUDE.md 和 .claude/skills/ 下的 markdown 檔案
 
 ### 進度回報
-orchestrator 會在任務指示中提供本次任務的 taskId。每完成一個 Phase 用 \`report_output(taskId="<taskId>", content="...")\` 回報；全部完成後用 report_output 回報產出檔案清單。
-
-完成所有檔案後，輸出 [TASK_COMPLETE]`;
+orchestrator 會在任務指示中提供本次任務的 taskId。每完成一個 Phase 用 \`report_output(taskId="<taskId>", content="...")\` 回報；全部完成後用 report_output 回報產出檔案清單。`;
 }

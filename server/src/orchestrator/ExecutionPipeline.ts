@@ -1,7 +1,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
-import type { SuperpowersFeature, TaskType, ProjectConfig, TestOptions } from '@omni/shared';
+import type { SuperpowersFeature, TaskType, ProjectConfig } from '@omni/shared';
 import type { DocumentParser } from '../documents/DocumentParser.js';
 import { type SvnSpecService, extractFunctionCode } from '../svn/SvnSpecService.js';
 import { SpecFetcher } from '../documents/SpecFetcher.js';
@@ -217,7 +217,10 @@ export class ExecutionPipeline {
    * Used by MCP Server (get_execution_plan → /api/execution-plan) to provide execution
    * context to external Claude Code sessions.
    */
-  async buildExecutionPlan(taskId: string, model?: string, mockupFiles?: string[], testOptions?: TestOptions, executionRunId?: string, track?: ExecutionTrack): Promise<{ prompt: string; workingDir: string; model: string }> {
+  async buildExecutionPlan(
+    taskId: string,
+    opts?: { model?: string; mockupFiles?: string[]; executionRunId?: string; track?: ExecutionTrack },
+  ): Promise<{ prompt: string; workingDir: string; model: string }> {
     const task = getTask(taskId);
     if (!task) throw new Error(`Task ${taskId} not found`);
 
@@ -242,7 +245,7 @@ export class ExecutionPipeline {
 
     const specFetch = await this.fetchAutoSpecs(task, taskId, projectConfig, task.label);
 
-    const taskAttachments = this.getTaskAttachments(task.projectId, taskId, executionRunId);
+    const taskAttachments = this.getTaskAttachments(task.projectId, taskId, opts?.executionRunId);
     const allSvnDocs = specFetch.docIds.length > 0
       ? getDocumentsForTask(taskId).filter(d => d.source === 'svn' || d.source === 'folder')
       : [];
@@ -290,7 +293,7 @@ export class ExecutionPipeline {
       superpowers,
       projectId: task.projectId,
       taskId,
-      track,
+      track: opts?.track,
       role: task.label,
       taskTitle: task.title,
       taskDescription: task.description || '',
@@ -300,8 +303,7 @@ export class ExecutionPipeline {
       dbSchemaFiles: dbSchemaFiles.length > 0 ? dbSchemaFiles : undefined,
       taskAttachments,
       svnDocuments,
-      mockupFiles,
-      testOptions,
+      mockupFiles: opts?.mockupFiles,
       extraPrompt,
       testCommands,
       hasDbConnections: (projectConfig?.dbConnections?.length ?? 0) > 0,
@@ -311,7 +313,7 @@ export class ExecutionPipeline {
 
     const workingDir = this.resolveWorkingDir(project, task.label);
     const { model: autoModel } = this.modelRouter.selectModel(task);
-    const finalModel = model || autoModel;
+    const finalModel = opts?.model || autoModel;
 
     return { prompt, workingDir, model: finalModel };
   }
@@ -326,7 +328,6 @@ export class ExecutionPipeline {
     opts?: {
       model?: string;
       mockupFiles?: string[];
-      testOptions?: TestOptions;
       executionRunId?: string;
       reportTaskId?: string;
       track?: ExecutionTrack;
@@ -416,7 +417,6 @@ export class ExecutionPipeline {
       taskAttachments,
       svnDocuments,
       mockupFiles: opts?.mockupFiles,
-      testOptions: opts?.testOptions,
       extraPrompt,
       testCommands,
       hasDbConnections: (projectConfig?.dbConnections?.length ?? 0) > 0,
@@ -469,7 +469,6 @@ export class ExecutionPipeline {
     taskAttachments?: Array<{ filename: string; filePath: string; docType?: string }>;
     svnDocuments?: Array<{ documentId: string; filename: string; filePath: string; parsedText: string | null; docType: string | null }>;
     mockupFiles?: string[];
-    testOptions?: TestOptions;
     extraPrompt?: string;
     /** 專案設定的單元測試指令（frontendTestCommand / backendTestCommand），注入「單元測試（強制流程）」區塊 */
     testCommands?: TestCommands;
@@ -593,7 +592,6 @@ export class ExecutionPipeline {
     // Layer 3: Task prompt (use reportTaskId for verification report path if provided)
     const taskPrompt = this.buildTaskPrompt(opts.taskTitle, opts.taskDescription, opts.taskType, {
       role: opts.role,
-      testOptions: opts.testOptions,
       reportTaskId: opts.reportTaskId ?? opts.taskId,
       realTaskId: opts.taskId,
       projectId: opts.projectId,
@@ -995,9 +993,9 @@ ${flowDiagram}
     title: string,
     description: string,
     taskType: TaskType,
-    promptOpts: { role?: string; testOptions?: TestOptions; reportTaskId?: string; realTaskId?: string; projectId?: string; track?: ExecutionTrack; testCommands?: TestCommands; hasDbConnections?: boolean } = {},
+    promptOpts: { role?: string; reportTaskId?: string; realTaskId?: string; projectId?: string; track?: ExecutionTrack; testCommands?: TestCommands; hasDbConnections?: boolean } = {},
   ): string {
-    const { role, testOptions, reportTaskId, realTaskId, projectId, track, testCommands, hasDbConnections } = promptOpts;
+    const { role, reportTaskId, realTaskId, projectId, track, testCommands, hasDbConnections } = promptOpts;
     const taskId = realTaskId ?? reportTaskId;
     const typeLabels: Record<TaskType, string> = {
       bug: 'Bug Fix',
@@ -1037,7 +1035,7 @@ ${this.buildStrategy(taskType, taskId, projectId)}
 
 ${backendSections}## 完成標準
 
-${this.buildCompletionCriteria(role, testOptions, reportTaskId ?? realTaskId, taskId)}
+${this.buildCompletionCriteria(role, reportTaskId ?? realTaskId, taskId)}
 - 如果遇到需要人工決策的問題，請加上 [NEEDS_HUMAN] 並說明原因`;
   }
 
@@ -1292,7 +1290,7 @@ ${caseSourceLine}
     return lines;
   }
 
-  private buildCompletionCriteria(role?: string, testOptions?: TestOptions, reportTaskId?: string, realTaskId?: string): string {
+  private buildCompletionCriteria(role?: string, reportTaskId?: string, realTaskId?: string): string {
     const taskId = realTaskId ?? reportTaskId;
     const reportName = reportTaskId ?? realTaskId ?? 'adhoc';
     // 單元測試：順序在 build 之後、run_spec_compliance（buildVerificationToolLines）之前
@@ -1300,86 +1298,25 @@ ${caseSourceLine}
       ? `- Build 通過後跑單元測試（指令與案例要求見「單元測試（強制流程）」區塊），確保全數通過；失敗則修復後重跑，最多 3 次；最終仍失敗 → mcp__omni-commander__update_task_status(taskId="${taskId}", status="failed", summary="單元測試失敗：...")`
       : '- Build 通過後跑單元測試（指令與案例要求見「單元測試（強制流程）」區塊），確保全數通過；失敗則修復後重跑，最多 3 次；最終仍失敗 → 標記任務 failed 並說明原因';
     if (role === 'frontend') {
-      const opts = testOptions?.frontend;
       const lines: string[] = [
         '- **回對規格**：開發完成後，重新閱讀原始規格文件，逐項確認畫面欄位、元件互動、API 串接、data-testid 是否都已正確實作。列出每項需求對應的程式碼位置及確認結果，若有缺漏立即修復',
         '- 執行 build 指令（例如 npm run build / pnpm build），確保零錯誤',
         unitTestLine,
         '- 所有 playwright 截圖一律使用 `fullPage: true`，確保捕捉完整頁面（含捲軸內容）',
       ];
-      const runMock = opts?.useMock !== false && !opts?.useRealApi || opts?.useMock;
-      const runReal = opts?.useRealApi;
-      if (opts?.smokeTest) {
-        if (runMock) {
-          lines.push(
-            `- Build 成功後，若工作目錄有\`.claude/skills/validate-output/SKILL.md\`，` +
-            `**必須**呼叫該 skill 執行 playwright-mcp smoke test（使用 mock 資料，USE_MOCK=true），截圖存到 \`docs/smoke-tests/{模組}/mock/\``,
-            '- validate-output 失敗時，嘗試修復錯誤後重新執行；無法修復則加上 [NEEDS_HUMAN]',
-          );
-        }
-        if (runReal) {
-          lines.push(
-            `- ${runMock ? 'Mock smoke test 通過後，' : 'Build 成功後，'}若工作目錄有\`.claude/skills/validate-output/SKILL.md\`，` +
-            `再次執行 playwright-mcp smoke test（使用真實後端 API），截圖存到 \`docs/smoke-tests/{模組}/realAPI/\``,
-          );
-        }
-      }
-      if (opts?.e2eSpec) {
-        const modes: string[] = [];
-        if (runMock) modes.push('mock 模式（E2E_MODE=mock）');
-        if (runReal) modes.push('真實 API 模式（USE_MOCK=false，確認後端已啟動）');
-        const modeNote = modes.join('，再跑一次 ');
-        lines.push(
-          `- ${opts?.smokeTest ? 'Smoke test 通過後，' : ''}若 \`e2e/templates/\` 存在，` +
-          `依照 \`e2e/templates/module-spec.template.ts\` 格式，為本次開發的模組在 \`e2e/\` 目錄撰寫 E2E spec 檔案（同時建立對應的 mock-data JSON）`,
-          `- E2E spec 執行指令（從 spec 檔案名稱取出模組代碼，如 \`e2e/sm29.spec.ts\` → \`sm29\`）：` +
-          (runMock ? `mock 模式（不需後端，跳過 auth setup）：\`E2E_MODE=mock TEST_MODULE={模組} TEST_API_MODE=mock npx playwright test e2e/{模組}.spec.ts --project=chromium --no-deps${opts?.headed ? ' --headed' : ''}\`，截圖存到 \`test-results/{模組}/mock/\`` : '') +
-          (runMock && runReal ? '；' : '') +
-          (runReal ? `real API 模式（需後端已啟動，含登入 auth setup）：\`TEST_MODULE={模組} TEST_API_MODE=realAPI npx playwright test e2e/{模組}.spec.ts --project=chromium${opts?.headed ? ' --headed' : ''}\`（不加 --no-deps，讓 auth.setup.ts 先跑完登入），截圖存到 \`test-results/{模組}/realAPI/\`` : ''),
-        );
-      }
-      if (opts?.consoleScript) {
-        lines.push(
-          `- 為本次開發的模組產生瀏覽器 Console 測試腳本，存到 \`e2e/console-scripts/{模組}.js\`：` +
-          `腳本需動態載入 html2canvas（\`await import('https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js')\`），` +
-          `腳本開頭一律先導航到登入頁、填入帳號密碼（admin/Admin123!/驗證碼0000）並等待跳轉完成（不管當前是否已登入），` +
-          `登入完成後導航到目標頁面，依據 data-testid 驗證關鍵元素、點擊查詢按鈕、確認結果渲染，每個步驟後截圖並自動下載 PNG，` +
-          `最後 \`console.table(results)\` 輸出 pass/fail 摘要。腳本必須可直接貼到瀏覽器 Console 執行，無需任何 npm 套件。`,
-        );
-      }
       lines.push(...this.buildVerificationToolLines(taskId));
       lines.push(
         `- 所有驗證步驟完成後，將完整驗證結果（規格逐項確認、build 結果、測試結果、截圖路徑）以 Markdown 格式寫入 \`docs/verification-reports/${reportName}.md\`（目錄不存在則建立）`,
-        '- 所有步驟完成後，在回應末尾加上 [TASK_COMPLETE]',
       );
       return lines.join('\n');
     }
 
     if (role === 'backend') {
-      const opts = testOptions?.backend;
       const lines: string[] = [
         '- **回對規格**：開發完成後，重新閱讀原始規格文件，逐項確認每支 API 的 URL、INPUT/OUTPUT 欄位、商業邏輯是否都已正確實作。列出每項需求對應的程式碼位置及確認結果，若有缺漏立即修復',
         '- 執行 build 指令，確保零錯誤',
         unitTestLine,
       ];
-      if (opts?.unitTests) {
-        lines.push(
-          '- 撰寫每個端點/模組的單元測試（案例清單與測試指令依「單元測試（強制流程）」區塊，不可另用其他指令），確保全數通過',
-          '- 在所有測試通過之前，**不要**標記 [TASK_COMPLETE]',
-        );
-      }
-      if (opts?.apiSmokeTest) {
-        lines.push(
-          '- Build 成功後，若工作目錄有 `.claude/skills/validate-api/SKILL.md`，' +
-          '**必須**呼叫該 skill 執行 API smoke test，確認端點回應正常',
-          '- validate-api 失敗時，嘗試修復錯誤後重新執行；無法修復則加上 [NEEDS_HUMAN]',
-        );
-      }
-      if (opts?.apiContract) {
-        lines.push(
-          '- 將本次開發的端點合約寫入 `.ai_context/api-contracts/{module}.json`（如目錄不存在請建立）',
-        );
-      }
       lines.push(...this.buildVerificationToolLines(taskId));
       lines.push(
         `- 所有驗證步驟完成後，將完整驗證結果以 Markdown 格式寫入 \`docs/verification-reports/${reportName}.md\`（目錄不存在則建立），內容包含：\n` +
@@ -1389,7 +1326,6 @@ ${caseSourceLine}
         `  4. **測試用 SQL 指令**（獨立的 code block）：\n` +
         `     - \`-- [SETUP] 新增假資料\`：針對本次 API 所需的 INSERT 語句，讓測試人員可直接執行建立測試資料\n` +
         `     - \`-- [TEARDOWN] 清除假資料\`：對應的 DELETE 語句，條件需精確（用剛才 INSERT 的識別欄位），確保不誤刪其他資料`,
-        '- 所有步驟完成後，在回應末尾加上 [TASK_COMPLETE]',
       );
       return lines.join('\n');
     }
@@ -1400,7 +1336,6 @@ ${caseSourceLine}
       '- 如果是前端專案，請執行 build 確保成功',
       unitTestLine,
       ...this.buildVerificationToolLines(taskId, false),
-      '- 確認完成後，在回應末尾加上 [TASK_COMPLETE]',
     ].join('\n');
   }
 
