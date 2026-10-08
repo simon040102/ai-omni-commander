@@ -189,7 +189,8 @@ describe('prepareFolder', () => {
     const version = await getFileVersion(dir, path.join(dir, 'SPEC_WA05_test.md'), true);
     // committer date in ISO format
     expect(version).toMatch(/^\d{4}-\d{2}-\d{2}T/);
-  });
+    // 這支會同步跑 6 次真的 git（每次自身上限 15 秒），全套測試的負載下常超過全域 10 秒上限而誤報失敗
+  }, 30_000);
 });
 
 // ── getFileVersion ──────────────────────────────────────────
