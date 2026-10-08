@@ -53,11 +53,9 @@ export function registerFlowTools(server: McpServer): void {
       taskId: z.string().describe('The task ID'),
       flowType: z.enum(['spec', 'plan', 'code', 'mindmap']).describe('Which flow this is'),
       mermaidContent: z.string().describe('The Mermaid content (flowchart TD for spec/plan/code; mindmap for mindmap)'),
+      // 省略時落到任務實際需要的槽位（不再無條件 default）：存錯槽位要等到結案才被閘門擋下，是最不值得的時機
       role: z.enum(['frontend', 'backend']).optional().describe(
-        'Role slot for plan/code flows. **省略時不再無條件落到 default**：若這支任務只需要一個角色'
-        + '（get_execution_plan 依 label 初始化的那一個），就自動存進那個槽位。'
-        + '理由：閘門檢查的是任務實際需要的角色槽位，存錯槽位的後果是**所有實作與驗收都做完、'
-        + '才在 update_task_status 那一步被擋下**——最不值得的時機。雙角色任務仍必須明確指定。',
+        'Role slot for plan/code flows. 省略時：單角色任務自動存進它需要的那個槽位；雙角色任務必須明確指定。',
       ),
       filename: z.string().optional().describe('Optional source document filename for display (e.g. SA spec filename)'),
       resetFailures: z.boolean().optional().describe('Reset the gate-B failure counter. ONLY with explicit user approval after [NEEDS_HUMAN]; the reset is logged.'),

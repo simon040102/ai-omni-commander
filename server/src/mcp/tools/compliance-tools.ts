@@ -595,7 +595,7 @@ ${JSON.stringify(created, null, 2)}`, '（created 清單被截斷——用 get_s
   // ── get_compliance_review_plan ────────────────────────────
   server.tool(
     'get_compliance_review_plan',
-    '取得「AI 規格回對」的派工計畫（給 orchestrator）。回傳一份完整 prompt：由 orchestrator 派**獨立的 AI 審查 subagent**（絕不可由寫 code 的 implementer 自評）讀 SA/SD 規格原文 + get_spec_checklist 檢查表 + 實際程式碼，逐項判定 matched/missing（必附 file+line 證據），最後用 save_compliance_review 一次寫回。完成閘門只認此 AI 回對結果（最新 ai_review run 的 missing=0）。full 軌計畫另含「合約反向對齊」步驟（code→spec，advisory）：枚舉程式實際帶的 request/response/db 欄位，程式有而規格沒定義的業務欄位用 report_spec_gap(category="field_undefined") 開缺口交使用者裁決——只做欄位維度、排除基礎設施雜訊、規格模糊則略過，**不影響 missing 判定與完成閘門**（light 軌無 SA/SD 規格文件，不做）。full 軌任務若有 SA 操作流程圖（sa-flows cache），計畫會加「流程回對」步驟：流程圖每個判斷分支/節點補為 logic 檢查項並在程式碼中找到對應路徑。light 軌任務（get_execution_plan 判軌）驗證對象改為原始 BUG 內容（任務描述 + Asana 留言 + 附件），標準不變。已有 AI 回對且最新一輪 missing>0 時，計畫自動加「增量重審」段：reviewer 只重判上輪 missing / 新增 / 有疑慮項，其餘上輪 matched 項由 save_compliance_review(carryForward=true) 程式重驗證據自動沿用——重審成本 O(改動)，閘門標準不變。任務有已裁決的規格缺口（resolve_spec_gap 落地）時，計畫自動注入「規格裁決」段——reviewer 驗證時裁決視同規格條文。',
+    '取得「AI 規格回對」的派工計畫（給 orchestrator）——回傳完整 prompt，由 orchestrator 派**獨立的 AI 審查 subagent**（絕不可由寫 code 的 implementer 自評）讀規格原文＋檢查表＋實際程式碼，逐項判定 matched/missing（matched 必附 file+line 證據），最後 save_compliance_review 一次寫回。**完成閘門只認此結果：最新 ai_review run missing=0**。計畫會依任務自動帶：已裁決的規格裁決（視同規格條文）、SA 流程圖的流程回對、實體 DB 欄位核對（專案有設 DB 連線時）、上輪 missing>0 時的增量重審（只重判 missing／新增／有疑慮項，其餘由 carryForward 程式重驗沿用）、full 軌的合約反向對齊（程式有、規格沒定義的業務欄位開 field_undefined 缺口；advisory，不影響判定與閘門）。light 軌（無 SA/SD）驗證對象改為原始 BUG 內容，標準不變。',
     {
       taskId: z.string().describe('任務 ID'),
     },
