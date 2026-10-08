@@ -1,7 +1,6 @@
 import { useProjectStore } from '../../stores/projectStore';
 import { useWsStore } from '../../stores/wsStore';
 import { useThemeStore } from '../../stores/themeStore';
-import { InterventionBell } from '../dashboard/InterventionBell';
 import { IconChevronRight, IconSun, IconMoon } from '../ui/Icons';
 import type { View } from './AppShell';
 
@@ -97,7 +96,7 @@ export function Header({ currentView, onViewChange }: HeaderProps) {
         )}
       </div>
 
-      {/* Right: Theme toggle + Intervention bell + Connection status */}
+      {/* Right: Theme toggle + Connection status */}
       <div className="flex items-center gap-2">
         {/* Theme toggle */}
         <button
@@ -107,10 +106,6 @@ export function Header({ currentView, onViewChange }: HeaderProps) {
         >
           {theme === 'dark' ? <IconSun className="w-4 h-4" /> : <IconMoon className="w-4 h-4" />}
         </button>
-
-        <div className="h-5 w-px bg-border" />
-
-        <InterventionBell />
 
         <div className="h-5 w-px bg-border" />
 

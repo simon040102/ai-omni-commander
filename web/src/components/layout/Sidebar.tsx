@@ -105,7 +105,6 @@ export function Sidebar({ currentView, onViewChange, pinned, onTogglePin }: Side
   const setCurrentProject = useProjectStore(s => s.setCurrentProject);
   const allAgents = useProjectStore(s => s.agents);
   const allTasks = useProjectStore(s => s.tasks);
-  const allInterventions = useProjectStore(s => s.interventions);
   const client = useWsStore(s => s.client);
 
   const currentProject = projects.find(p => p.id === currentProjectId);
@@ -114,9 +113,7 @@ export function Sidebar({ currentView, onViewChange, pinned, onTogglePin }: Side
   // Filter by current project for stats
   const agents = currentProjectId ? allAgents.filter(a => a.projectId === currentProjectId) : allAgents;
   const tasks = allTasks;
-  const interventions = allInterventions;
 
-  const pendingInterventions = interventions.filter(i => i.status === 'pending').length;
   const runningAgents = agents.filter(a => a.status === 'running').length;
   const globalRunningAgents = allAgents.filter(a => a.status === 'running').length;
   const completedTasks = tasks.filter(t => t.status === 'completed').length;
@@ -306,12 +303,6 @@ export function Sidebar({ currentView, onViewChange, pinned, onTogglePin }: Side
                   {completedTasks} done
                   {failedTasks > 0 && <span className="text-red-400 ml-1">/ {failedTasks} failed</span>}
                 </span>
-              </div>
-            )}
-            {pendingInterventions > 0 && (
-              <div className="flex justify-between text-yellow-400">
-                <span>Attention</span>
-                <span className="font-medium">{pendingInterventions} pending</span>
               </div>
             )}
           </div>

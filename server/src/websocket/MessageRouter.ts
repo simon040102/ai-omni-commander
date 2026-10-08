@@ -1,13 +1,12 @@
 import type { WebSocket } from 'ws';
 import type {
   WsMessage, WsCreateProject, WsUploadDocument,
-  WsAgentAction, WsAgentCommand, WsAgentResume, WsInterventionResolve,
-  WsDeleteProject, WsUpdateProject, WsDeleteAgent, WsUpdateAgent, WsAddAgent,
-  WsPlanAction, WsAsanaFetchTasks, WsAsanaFetchProjects, WsAsanaCheckConnection,
+  WsAgentAction,
+  WsDeleteProject, WsUpdateProject,
+  WsAsanaFetchTasks, WsAsanaFetchProjects, WsAsanaCheckConnection,
   WsAsanaSyncNow, WsAsanaUpdateSyncConfig,
   WsTaskCreate, WsTaskDelete, WsTaskUpdate, WsTaskBulkDeleteBySource,
   WsSvnBrowse, WsSvnPreview,
-  AgentRole,
 } from '@omni/shared';
 import type { SvnConfig } from '@omni/shared';
 import { normalizeSvnUrl, extractFunctionCode, runCommand, buildSvnAuth, buildCurlAuth } from '../svn/SvnSpecService.js';
@@ -22,19 +21,16 @@ import type { OmniWebSocketServer } from './WebSocketServer.js';
 import type { AsanaMcpClient } from '../asana/AsanaMcpClient.js';
 import type { AsanaSyncService } from '../asana/AsanaSyncService.js';
 import { createProject, listProjects, getProject, deleteProject, updateProject } from '../db/queries/projects.js';
-import { getTasksByProject, getDependencies, updateTask, createTask, deleteTask, updateTaskFields, deleteTasksBySource, getTask } from '../db/queries/tasks.js';
-import { getAgentsByProject, deleteAgent, updateAgent as updateAgentDb } from '../db/queries/agents.js';
-import { resolveIntervention, getAgentOutputs, logAgentOutput } from '../db/queries/events.js';
+import { getTasksByProject, getDependencies, createTask, deleteTask, updateTaskFields, deleteTasksBySource, getTask } from '../db/queries/tasks.js';
+import { getAgentsByProject } from '../db/queries/agents.js';
+import { getAgentOutputs } from '../db/queries/events.js';
 import { JsonlWatcher } from '../agent/JsonlWatcher.js';
 import { SessionResolver } from '../agent/SessionResolver.js';
 import type { JsonlAssistantMessage, JsonlUserMessage } from '@omni/shared';
-import { getPlan, getPlansByProject, updatePlanStatus } from '../db/queries/plans.js';
-import { getAgent } from '../db/queries/agents.js';
+import { getPlansByProject } from '../db/queries/plans.js';
 import { genId } from '../utils/uuid.js';
 import { notifyTaskStatusToast } from '../utils/toastEvents.js';
 import { createChildLogger } from '../utils/logger.js';
-import { loadSuperpowersPrompt } from '../skills/superpowers/index.js';
-import type { SuperpowersFeature } from '@omni/shared';
 import type { DocumentParser } from '../documents/DocumentParser.js';
 import { getDb } from '../db/connection.js';
 // logTaskOutput is a pure db function (mcp/flow-gate) — reused so the Web UI
@@ -138,310 +134,9 @@ export function registerHandlers(
       case 'stop':
         await agentManager.stopAgent(payload.agentId);
         break;
-      case 'restart':
-        await agentManager.restartAgent(payload.agentId);
-        break;
       case 'pause':
         await agentManager.stopAgent(payload.agentId);
         break;
-    }
-  });
-
-  // AGENT.COMMAND
-  wsServer.registerHandler('agent.command', async (msg: WsMessage, ws: WebSocket) => {
-    const { payload } = msg as WsAgentCommand;
-    try {
-      const sent = await agentManager.sendInputToAgent(payload.agentId, payload.command);
-      if (sent) {
-        logger.info({ agentId: payload.agentId }, 'Command sent to agent (session resumed)');
-        const userInstructionContent = `[USER INSTRUCTION] ${payload.command}`;
-        logAgentOutput({
-          agentId: payload.agentId,
-          streamType: 'system',
-          content: userInstructionContent,
-        });
-        wsServer.broadcast({
-          type: 'agent.output',
-          id: genId(),
-          timestamp: new Date().toISOString(),
-          payload: {
-            agentId: payload.agentId,
-            streamType: 'system',
-            content: userInstructionContent,
-            timestamp: new Date().toISOString(),
-          },
-        } as WsMessage);
-      } else {
-        logger.warn({ agentId: payload.agentId }, 'Agent not found or not running');
-        wsServer.send(ws, {
-          type: 'error',
-          id: genId(),
-          timestamp: new Date().toISOString(),
-          payload: { code: 'agent.command_failed', message: 'Agent not found or no session to resume.' },
-        } as WsMessage);
-      }
-    } catch (err) {
-      logger.error({ agentId: payload.agentId, err }, 'Failed to send command to agent');
-      wsServer.send(ws, {
-        type: 'error',
-        id: genId(),
-        timestamp: new Date().toISOString(),
-        payload: { code: 'agent.command_failed', message: `Failed to resume agent session: ${(err as Error).message}` },
-      } as WsMessage);
-    }
-  });
-
-  // AGENT.RESUME — resume a crashed/errored agent using its session ID
-  wsServer.registerHandler('agent.resume', async (msg: WsMessage, ws: WebSocket) => {
-    const { payload } = msg as WsAgentResume;
-    try {
-      const agentForRoleCheck = getAgent(payload.agentId);
-      if (agentForRoleCheck?.role === 'axure') {
-        logger.warn({ agentId: payload.agentId }, 'Axure agent cannot be resumed — Playwright MCP sessions are ephemeral');
-        wsServer.send(ws, {
-          type: 'error',
-          id: genId(),
-          timestamp: new Date().toISOString(),
-          payload: { code: 'agent.resume_failed', message: 'Axure agent 無法 resume（Playwright MCP session 不可恢復）。請使用 MockupView 的「繼續爬取」按鈕重新派發。' },
-        } as WsMessage);
-        return;
-      }
-      await agentManager.resumeAgent(payload.agentId, payload.prompt);
-      logger.info({ agentId: payload.agentId }, 'Agent resumed via WS command');
-    } catch (err) {
-      logger.error({ agentId: payload.agentId, err }, 'Failed to resume agent');
-      wsServer.send(ws, {
-        type: 'error',
-        id: genId(),
-        timestamp: new Date().toISOString(),
-        payload: { code: 'agent.resume_failed', message: (err as Error).message },
-      } as WsMessage);
-    }
-  });
-
-  // AGENT.DELETE
-  wsServer.registerHandler('agent.delete', async (msg: WsMessage) => {
-    const { payload } = msg as WsDeleteAgent;
-    // Look up the agent's project before deleting so we can refresh the task list
-    const agentRecord = getAgent(payload.agentId);
-    const projectId = agentRecord?.projectId;
-
-    // Reset tasks assigned to this agent back to pending before deleting
-    if (projectId) {
-      const projectTasks = getTasksByProject(projectId);
-      for (const t of projectTasks) {
-        if (t.assignedAgentId === payload.agentId && (t.status === 'in_progress' || t.status === 'assigned')) {
-          updateTask(t.id, { status: 'pending', assignedAgentId: null });
-        }
-      }
-    }
-
-    await agentManager.stopAgent(payload.agentId);
-    deleteAgent(payload.agentId);
-
-    // For fullstack tasks: if no other agents remain for this task, reset task to pending
-    if (projectId && agentRecord?.currentTaskId) {
-      const task = getTask(agentRecord.currentTaskId);
-      if (task && (task.status === 'in_progress' || task.status === 'assigned')) {
-        const remainingAgents = getAgentsByProject(projectId).filter(
-          a => a.currentTaskId === task.id,
-        );
-        if (remainingAgents.length === 0) {
-          updateTask(task.id, { status: 'pending', assignedAgentId: null });
-          // Notify frontend
-          wsServer.broadcast({
-            type: 'task.statusChange',
-            id: genId(),
-            timestamp: new Date().toISOString(),
-            payload: { taskId: task.id, projectId, newStatus: 'pending' },
-          } as WsMessage);
-        }
-      }
-    }
-    logger.info({ agentId: payload.agentId }, 'Agent deleted');
-
-    // Clean up per-agent upload folder
-    if (projectId && documentParser) {
-      await documentParser.deleteByAgent(payload.agentId, projectId);
-      logger.info({ agentId: payload.agentId, projectId }, 'Cleaned up per-agent uploads');
-    }
-
-    wsServer.broadcast({
-      type: 'agent.statusChange',
-      id: genId(),
-      timestamp: new Date().toISOString(),
-      payload: {
-        agentId: payload.agentId,
-        previousStatus: 'stopped',
-        newStatus: 'deleted',
-        reason: 'Removed by user',
-      },
-    } as WsMessage);
-
-    // Broadcast updated task list
-    if (projectId) {
-      const tasks = getTasksByProject(projectId);
-      wsServer.broadcast({
-        type: 'task.list',
-        id: genId(),
-        timestamp: new Date().toISOString(),
-        payload: { projectId, tasks },
-      } as WsMessage);
-    }
-  });
-
-  // AGENT.UPDATE (rename title, etc.)
-  wsServer.registerHandler('agent.update', async (msg: WsMessage) => {
-    const { payload } = msg as WsUpdateAgent;
-    if (payload.title !== undefined) {
-      updateAgentDb(payload.agentId, { title: payload.title });
-    }
-    const agent = getAgent(payload.agentId);
-    if (agent) {
-      wsServer.broadcast({
-        type: 'project.state',
-        id: genId(),
-        timestamp: new Date().toISOString(),
-        payload: {
-          project: getProject(agent.projectId)!,
-          tasks: getTasksByProject(agent.projectId),
-          agents: getAgentsByProject(agent.projectId),
-          dependencies: [],
-        },
-      } as WsMessage);
-    }
-  });
-
-  // AGENT.ADD
-  wsServer.registerHandler('agent.add', async (msg: WsMessage, ws: WebSocket) => {
-    const { payload } = msg as WsAddAgent;
-    try {
-      const parts: string[] = [];
-
-      if (payload.superpowersFeatures && payload.superpowersFeatures.length > 0) {
-        const spPrompt = loadSuperpowersPrompt(payload.superpowersFeatures as SuperpowersFeature[]);
-        if (spPrompt) parts.push(spPrompt);
-      }
-
-      const docContext = specHandler.getDocumentContext(payload.projectId, payload.role);
-      if (docContext) parts.push(docContext);
-
-      // Inject Axure HTML snapshots if requested
-      if (payload.useAxureContext !== false) {
-        const nodePath = await import('node:path');
-        let filePaths: string[] = [];
-
-        if (payload.mockupFiles && payload.mockupFiles.length > 0) {
-          // Use explicitly selected files from the client
-          filePaths = payload.mockupFiles;
-        } else {
-          // Fallback: scan all files in the project's snapshots dir
-          const nodeFs = await import('node:fs');
-          const snapshotsDir = nodePath.default.join(
-            nodePath.default.dirname(getConfig().dbPath), '..', 'docs', 'axure-snapshots', payload.projectId,
-          );
-          if (nodeFs.default.existsSync(snapshotsDir)) {
-            filePaths = nodeFs.default.readdirSync(snapshotsDir)
-              .filter((f: string) => f.endsWith('.html'))
-              .sort()
-              .map((f: string) => nodePath.default.join(snapshotsDir, f).replace(/\\/g, '/'));
-          }
-        }
-
-        if (filePaths.length > 0) {
-          // Group by function code (leading alphanumeric prefix before first '-')
-          const groups = new Map<string, string[]>();
-          for (const p of filePaths) {
-            const filename = p.split('/').pop() ?? p;
-            const code = filename.match(/^([a-zA-Z0-9]+)-/)?.[1]?.toUpperCase() ?? 'OTHER';
-            if (!groups.has(code)) groups.set(code, []);
-            groups.get(code)!.push(p);
-          }
-          const lines: string[] = [];
-          for (const [code, paths] of groups) {
-            lines.push(`**${code}**`);
-            for (const p of paths) lines.push(`  - ${p}`);
-          }
-          parts.push(`## Axure 原型 HTML 快照\n需要了解某功能的 UI 規格時，請用 Read tool 讀取對應的 HTML 檔案：\n\n${lines.join('\n')}`);
-        }
-      }
-
-      const prefix = parts.length > 0 ? parts.join('\n\n---\n\n') + '\n\n---\n\n' : '';
-      const fullPrompt = prefix + payload.prompt;
-
-      const agentId = await agentManager.startAgent({
-        projectId: payload.projectId,
-        agentId: payload.agentId,
-        role: payload.role as AgentRole,
-        prompt: fullPrompt,
-        model: payload.model,
-        workingDir: payload.workingDir,
-        useWorkspaceSkills: payload.useWorkspaceSkills,
-      });
-      logger.info({ agentId, projectId: payload.projectId, role: payload.role }, 'Agent manually added');
-
-      sendProjectState(wsServer, ws, payload.projectId, specHandler);
-    } catch (err) {
-      logger.error({ err, projectId: payload.projectId }, 'Failed to add agent');
-      wsServer.send(ws, {
-        type: 'error',
-        id: genId(),
-        timestamp: new Date().toISOString(),
-        payload: { code: 'agent.add_failed', message: (err as Error).message },
-      } as WsMessage);
-    }
-  });
-
-  // AGENT.PLAN_ACTION
-  wsServer.registerHandler('agent.planAction', async (msg: WsMessage, ws: WebSocket) => {
-    const { payload } = msg as WsPlanAction;
-    const plan = getPlan(payload.planId);
-    if (!plan) {
-      wsServer.send(ws, {
-        type: 'error',
-        id: genId(),
-        timestamp: new Date().toISOString(),
-        payload: { code: 'plan.not_found', message: 'Plan not found' },
-      } as WsMessage);
-      return;
-    }
-
-    updatePlanStatus(payload.planId, payload.action === 'approve' ? 'approved' : 'rejected');
-    logger.info({ planId: payload.planId, action: payload.action }, 'Plan action taken');
-
-    if (payload.action === 'approve') {
-      const agent = getAgent(plan.agentId);
-      if (agent) {
-        await agentManager.resumeAgent(plan.agentId, '計劃書已核准，請繼續執行。');
-        logger.info({ agentId: plan.agentId }, 'Agent resumed after plan approval');
-      }
-    } else if (payload.action === 'reject' && payload.feedback) {
-      const agent = getAgent(plan.agentId);
-      if (agent) {
-        await agentManager.resumeAgent(plan.agentId, `計劃書需要修改：\n${payload.feedback}\n\n請重新擬定計劃書。`);
-        logger.info({ agentId: plan.agentId }, 'Agent resumed with plan rejection feedback');
-      }
-    }
-
-    const plans = getPlansByProject(plan.projectId);
-    wsServer.broadcast({
-      type: 'agent.plans',
-      id: genId(),
-      timestamp: new Date().toISOString(),
-      payload: { projectId: plan.projectId, plans },
-    } as WsMessage);
-  });
-
-  // INTERVENTION.RESOLVE
-  wsServer.registerHandler('intervention.resolve', async (msg: WsMessage) => {
-    const { payload } = msg as WsInterventionResolve;
-    resolveIntervention(payload.interventionId, payload.userInput || payload.decision);
-
-    if (payload.decision === 'approve') {
-      const agentId = (payload as Record<string, unknown>)['agentId'] as string | undefined;
-      if (agentId) {
-        await agentManager.resumeAgent(agentId, payload.userInput);
-      }
     }
   });
 

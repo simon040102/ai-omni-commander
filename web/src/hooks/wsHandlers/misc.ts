@@ -1,4 +1,3 @@
-import { useProjectStore } from '../../stores/projectStore';
 import { useToastStore } from '../../stores/toastStore';
 import type { HandlerMap, WsMessageHandler } from './types';
 
@@ -17,29 +16,11 @@ const svnResultHandler: WsMessageHandler = (payload) => {
 };
 
 /**
- * svn.* / intervention.* / error WS message handlers.
+ * svn.* / error WS message handlers.
  */
 export const miscHandlers: HandlerMap = {
   'svn.browseResult': svnResultHandler,
   'svn.previewResult': svnResultHandler,
-
-  'intervention.request': (payload) => {
-    useProjectStore.getState().addIntervention({
-      id: payload['interventionId'] as string,
-      agentId: payload['agentId'] as string,
-      agentRole: payload['agentRole'] as string,
-      taskId: (payload['taskId'] as string) || null,
-      reason: payload['reason'] as string,
-      context: payload['context'] as string,
-      status: 'pending',
-    });
-    useToastStore.getState().addToast({
-      type: 'warning',
-      title: '需要人工介入',
-      message: payload['reason'] as string,
-      duration: 0, // persistent
-    });
-  },
 
   'error': (payload) => {
     useToastStore.getState().addToast({

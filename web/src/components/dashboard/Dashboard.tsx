@@ -4,7 +4,6 @@ import { useWsStore } from '../../stores/wsStore';
 import { useToastStore } from '../../stores/toastStore';
 import { TaskList } from './TaskList';
 import { AsanaSyncSettings } from './AsanaSyncSettings';
-import { PlanPanel } from './PlanPanel';
 import { IconPlay, IconGrid, IconRefresh, IconLightning } from '../ui/Icons';
 import { parseServerDate } from '../../lib/datetime';
 import type { View } from '../layout/AppShell';
@@ -20,12 +19,10 @@ interface DashboardProps {
 export function Dashboard({ onViewChange }: DashboardProps) {
   const currentProjectId = useProjectStore(s => s.currentProjectId);
   const projects = useProjectStore(s => s.projects);
-  const plans = useProjectStore(s => s.plans);
   const client = useWsStore(s => s.client);
   const addToast = useToastStore(s => s.addToast);
 
   const [selectedModel, setSelectedModel] = useState('sonnet');
-  const [showPlanPanel, setShowPlanPanel] = useState(true);
   const [showSyncSettings, setShowSyncSettings] = useState(false);
   const [lastSyncAt, setLastSyncAt] = useState<string | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
@@ -163,24 +160,6 @@ export function Dashboard({ onViewChange }: DashboardProps) {
           </button>
         </div>
       </div>
-
-      {/* ─── Plan approval panel ─── */}
-      {plans.length > 0 && showPlanPanel && (
-        <PlanPanel onClose={() => setShowPlanPanel(false)} />
-      )}
-      {plans.length > 0 && !showPlanPanel && (
-        <button
-          onClick={() => setShowPlanPanel(true)}
-          className="flex items-center gap-2 px-3 py-1.5 bg-muted/50 hover:bg-muted border border-border rounded-lg text-sm transition-colors flex-shrink-0"
-        >
-          <span className="font-medium">顯示計劃</span>
-          {plans.filter(p => p.status === 'pending').length > 0 && (
-            <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-yellow-500/20 text-yellow-400 animate-pulse">
-              {plans.filter(p => p.status === 'pending').length}
-            </span>
-          )}
-        </button>
-      )}
 
       {/* ─── Task list ─── */}
       <TaskList selectedModel={selectedModel} onViewChange={onViewChange} />

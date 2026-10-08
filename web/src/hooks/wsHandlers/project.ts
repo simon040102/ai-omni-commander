@@ -1,5 +1,4 @@
 import { useProjectStore } from '../../stores/projectStore';
-import { useAgentStore } from '../../stores/agentStore';
 import type { Project, Task, Agent, DependencyEdge } from '../../stores/projectStore';
 import type { HandlerMap } from './types';
 
@@ -18,8 +17,6 @@ export const projectHandlers: HandlerMap = {
   },
 
   'project.state': (payload) => {
-    // Clear all cached outputs on reconnect — fresh outputs will be loaded via project.agentOutputs
-    useAgentStore.getState().clearAll();
     useProjectStore.getState().setProjectState(payload as unknown as {
       project: Project;
       tasks: Task[];
@@ -36,19 +33,6 @@ export const projectHandlers: HandlerMap = {
       docType: 'SA' | 'SD';
     }>;
     useProjectStore.getState().setDocuments(docProjectId, documents);
-  },
-
-  'project.agentOutputs': (payload) => {
-    // Bulk load historical outputs for an agent (from DB)
-    const bulkAgentId = payload['agentId'] as string;
-    const bulkOutputs = payload['outputs'] as Array<{ streamType: string; content: string; timestamp: string }>;
-    if (bulkAgentId && bulkOutputs) {
-      useAgentStore.getState().setOutputsBulk(bulkAgentId, bulkOutputs.map(o => ({
-        streamType: o.streamType as 'text',
-        content: o.content,
-        timestamp: o.timestamp,
-      })));
-    }
   },
 
   // Project note saved/archived (MCP or REST) — notify listening panels (ProjectNotesPanel)

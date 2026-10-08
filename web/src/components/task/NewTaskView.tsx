@@ -6,8 +6,7 @@ import { ModeSelector } from '../project/ModeSelector';
 import type { TaskMode } from '../project/ModeSelector';
 import { QuickModeSetup } from '../project/QuickModeSetup';
 import { FolderPicker } from '../project/FolderPicker';
-import { TerminalOutput } from '../dashboard/TerminalOutput';
-import { IconPlay, IconChevronDown, IconChevronRight, IconTrash } from '../ui/Icons';
+import { IconPlay, IconChevronDown, IconTrash } from '../ui/Icons';
 import { parseServerDate } from '../../lib/datetime';
 import type { View } from '../layout/AppShell';
 import type { DocType } from '@omni/shared';
@@ -29,22 +28,6 @@ function detectDocType(filename: string): DocType {
   return 'SD';
 }
 
-const ROLE_COLORS: Record<string, string> = {
-  frontend: 'text-blue-400',
-  backend: 'text-purple-400',
-  devops: 'text-green-400',
-  testing: 'text-teal-400',
-  review: 'text-gray-400',
-  architect: 'text-orange-400',
-};
-
-const STATUS_COLORS: Record<string, string> = {
-  running: 'bg-green-500 animate-pulse',
-  completed: 'bg-blue-500',
-  failed: 'bg-red-500',
-  idle: 'bg-gray-500',
-};
-
 export function NewTaskView({ onViewChange }: NewTaskViewProps) {
   const client = useWsStore(s => s.client);
   const setCurrentProject = useProjectStore(s => s.setCurrentProject);
@@ -55,7 +38,6 @@ export function NewTaskView({ onViewChange }: NewTaskViewProps) {
   const [mode, setMode] = useState<TaskMode>('quick');
   const [model, setModel] = useState('sonnet');
   const [showForm, setShowForm] = useState(true);
-  const [expandedAgentId, setExpandedAgentId] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [mcpCommand, setMcpCommand] = useState<string | null>(null);
 
@@ -226,26 +208,6 @@ ${docList}
     setConfirmDeleteId(null);
     addToast({ type: 'success', title: '已刪除 Quick Run' });
   }, [client, addToast]);
-
-  const handleSendCommand = useCallback((agentId: string, command: string) => {
-    if (!client) return;
-    client.send({
-      type: 'agent.command',
-      id: crypto.randomUUID(),
-      timestamp: new Date().toISOString(),
-      payload: { agentId, command },
-    });
-  }, [client]);
-
-  const handleAgentAction = useCallback((agentId: string, action: 'stop' | 'restart') => {
-    if (!client) return;
-    client.send({
-      type: 'agent.action',
-      id: crypto.randomUUID(),
-      timestamp: new Date().toISOString(),
-      payload: { agentId, action },
-    });
-  }, [client]);
 
   const handleGoToProject = (projectId: string) => {
     setCurrentProject(projectId);
@@ -435,62 +397,6 @@ ${docList}
                   )}
                 </div>
 
-                {/* Agents for this project */}
-                {agents.length > 0 && (
-                  <div className="border-t border-border/50">
-                    {agents.map(agent => {
-                      const isExpanded = expandedAgentId === agent.id;
-
-                      return (
-                        <div key={agent.id}>
-                          <button
-                            onClick={() => setExpandedAgentId(isExpanded ? null : agent.id)}
-                            className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-muted/30 transition-colors"
-                          >
-                            {isExpanded
-                              ? <IconChevronDown className="w-3 h-3 text-muted-foreground" />
-                              : <IconChevronRight className="w-3 h-3 text-muted-foreground" />
-                            }
-                            <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${STATUS_COLORS[agent.status] || 'bg-gray-500'}`} />
-                            <span className={`font-medium ${ROLE_COLORS[agent.role] || 'text-foreground'}`}>{agent.role}</span>
-                            {agent.title && (
-                              <span className="text-muted-foreground truncate">{agent.title}</span>
-                            )}
-                            <span className="ml-auto text-[10px] text-muted-foreground flex-shrink-0">
-                              {agent.model}
-                              {agent.totalCostUsd > 0 && ` · $${agent.totalCostUsd.toFixed(3)}`}
-                            </span>
-                          </button>
-
-                          {/* Inline terminal */}
-                          {isExpanded && (
-                            <div className="border-t border-border/30">
-                              <div className="h-[300px]">
-                                <TerminalOutput
-                                  title={agent.title || agent.role}
-                                  role={agent.role}
-                                  status={agent.status}
-                                  agentId={agent.id}
-                                  model={agent.model}
-                                  onSendCommand={handleSendCommand}
-                                  onAction={handleAgentAction}
-                                  compact
-                                />
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-
-                {/* No agents yet */}
-                {agents.length === 0 && (
-                  <div className="border-t border-border/50 px-3 py-2">
-                    <span className="text-xs text-muted-foreground italic">等待 Agent 啟動...</span>
-                  </div>
-                )}
               </div>
             );
           })}

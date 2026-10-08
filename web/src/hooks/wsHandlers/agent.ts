@@ -1,101 +1,22 @@
 import { useProjectStore } from '../../stores/projectStore';
-import { useAgentStore } from '../../stores/agentStore';
 import { useToastStore } from '../../stores/toastStore';
 import { notifyTab } from '../../lib/tabNotification';
-import type { Agent, AgentPlan } from '../../stores/projectStore';
-import type { AgentProgress } from '../../stores/agentStore';
+import type { Agent } from '../../stores/projectStore';
 import type { HandlerMap } from './types';
 
 /**
  * agent.* WS message handlers.
  */
 export const agentHandlers: HandlerMap = {
-  'agent.plans': (payload) => {
-    const plansProjectId = payload['projectId'] as string;
-    const plans = payload['plans'] as AgentPlan[];
-    useProjectStore.getState().setPlans(plansProjectId, plans);
-  },
-
-  'agent.planReady': (payload) => {
-    const plan = payload['plan'] as AgentPlan;
-    const agentRole = payload['agentRole'] as string;
-    useProjectStore.getState().addPlan(plan);
-    useToastStore.getState().addToast({
-      type: 'info',
-      title: '計劃書已準備完成',
-      message: `${agentRole} Agent 已產出實作計劃，等待審核`,
-      duration: 0, // persistent
-    });
-  },
-
-  'agent.initialPrompt': (payload) => {
-    // Display initial prompt as the first output in terminal
-    const promptAgentId = payload['agentId'] as string;
-    const promptContent = payload['prompt'] as string;
-    if (promptAgentId && promptContent) {
-      useAgentStore.getState().appendOutput(promptAgentId, {
-        streamType: 'system',
-        content: `[初始 Prompt]\n\n${promptContent}`,
-        timestamp: new Date().toISOString(),
-      });
-    }
-  },
-
+  // MCP agent 回報進度（report_output）時會廣播：標記專案有活動、文字輸出時通知瀏覽器分頁。
+  // 輸出內容本身的顯示（TerminalOutput）已隨 legacy spawn 移除。
   'agent.output': (payload) => {
-    const agentId = payload['agentId'] as string;
-    const isStreaming = payload['isStreaming'] as boolean;
-    const streamType = payload['streamType'] as string;
-    const content = payload['content'] as string;
     const outputProjectId = payload['projectId'] as string | undefined;
-    const { appendStreaming, appendOutput, clearStreamingBuffer } = useAgentStore.getState();
-
-    // Mark activity for non-current projects
     if (outputProjectId) {
       useProjectStore.getState().markProjectActivity(outputProjectId);
     }
-
-    // Notify browser tab when text output arrives (not tool results/etc)
-    if (streamType === 'text' && !isStreaming) {
+    if (payload['streamType'] === 'text' && !payload['isStreaming']) {
       notifyTab();
-    }
-
-    // Handle streaming content — accumulate in buffer for real-time display
-    if (isStreaming) {
-      if (streamType === 'text') {
-        appendStreaming(agentId, 'text', content);
-      } else if (streamType === 'system' && content.startsWith('[thinking]')) {
-        appendStreaming(agentId, 'thinking', content.replace('[thinking] ', ''));
-      }
-      return;
-    }
-
-    // Non-streaming text or thinking = server flush after streaming
-    // Add the complete content to outputs (for persistence) and clear the streaming buffer
-    if (streamType === 'text' || (streamType === 'system' && content.startsWith('[thinking]'))) {
-      // Add to outputs so it persists in the UI
-      appendOutput(agentId, {
-        streamType: streamType as 'text',
-        content: content,
-        timestamp: payload['timestamp'] as string,
-      });
-      clearStreamingBuffer(agentId);
-      return;
-    }
-
-    // Other non-streaming output (tool_use, tool_result, system, etc.) — add normally
-    appendOutput(agentId, {
-      streamType: streamType as 'text',
-      content: content,
-      toolName: payload['toolName'] as string | undefined,
-      timestamp: payload['timestamp'] as string,
-    });
-  },
-
-  'agent.outputsCleared': (payload) => {
-    // Server cleared outputs for an agent (rerun) — clear frontend terminal too
-    const clearedAgentId = payload['agentId'] as string;
-    if (clearedAgentId) {
-      useAgentStore.getState().clearOutputs(clearedAgentId);
     }
   },
 
@@ -138,17 +59,6 @@ export const agentHandlers: HandlerMap = {
     }
   },
 
-  'agent.contextUsage': (payload) => {
-    useAgentStore.getState().setContextUsage(
-      payload['agentId'] as string,
-      {
-        totalTokens: payload['totalTokens'] as number,
-        maxTokens: payload['maxTokens'] as number,
-        percentage: payload['percentage'] as number,
-      },
-    );
-  },
-
   'agent.completed': (payload) => {
     const completedProjectId = payload['projectId'] as string;
     const completedAgentId = payload['agentId'] as string;
@@ -176,10 +86,4 @@ export const agentHandlers: HandlerMap = {
     // Outputs are also persisted in DB and reloaded on project switch.
   },
 
-  'agent.progress': (payload) => {
-    const progressData = payload as unknown as AgentProgress;
-    if (progressData.agentId) {
-      useAgentStore.getState().setProgress(progressData.agentId, progressData);
-    }
-  },
 };
