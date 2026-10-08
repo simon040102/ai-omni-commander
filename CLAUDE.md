@@ -334,23 +334,18 @@ pnpm verify
 - Server runs on port 3457 (configurable via `PORT` env var)
 - Vite dev server runs on port 5174 and proxies `/omni-ws` and `/api` to server
 - SQLite database: `data/omni.db` (persists across restarts)
-- Claude CLI path: configurable via `CLAUDE_PATH` env var (default: `claude`)
 
 ## Important Implementation Details
 
-- **stdin prompt delivery**: Initial prompts are written to Claude's stdin (not CLI args) to avoid ARG_MAX limits. With `--input-format stream-json`, the prompt is sent as `{"type":"user","content":"..."}`.
-- **useStreamInput**: All agents use `--input-format stream-json` to keep stdin open for follow-up instructions.
 - **DOCX → Markdown**: `.docx` files are converted to `.md` on upload. `parsed_text` stores a path pointer, not inline text. Agent reads via Read tool after context compression.
 - **PDF handling**: PDF file paths are passed in the prompt text; agents use Claude's Read tool to read them natively.
-- **Per-agent upload folders**: `uploads/{projectId}/{agentId}/`. Client pre-generates `agentId` before uploading, passes same ID to `agent.add` so files and agent share the same subfolder.
-- **Project skills**: Each agent's `cwd` is set to its workspace → Claude Code auto-discovers CLAUDE.md and `.claude/settings.json`.
 - **EventBus wildcard**: `agent.*` events are broadcast directly as WS messages (e.g., `agent.started`, `agent.output`), NOT wrapped in `eventbus.notification`.
 - **SQLite datetime**: `datetime('now')` returns UTC without 'Z' suffix. Frontend appends 'Z' before parsing.
 - **SVN root code extraction**: `OV0101` → `OV` (take leading alphabetic chars). Used to match `OV.銷項發票管理/` folder in SVN.
 - **z-index stacking**: Fixed overlays use `z-10`. Confirm dialogs inside overlays must use `relative z-20` or higher to receive click events.
 - **Two separate Asana import paths**: `AsanaImportDrawer.tsx` sends `task.create` directly (client-side label decision). `AsanaSyncService.syncOnce()` is used by auto-sync / `asana.syncNow`. Changes to server-side classification only affect the sync path — NOT the manual import drawer.
 - **tsx watch unreliable on Windows**: `pnpm dev` uses `tsx watch` which may not detect file changes on Windows. Always **manually restart the server** after editing `.ts` files to guarantee the new code is loaded.
-- **Legacy spawn 硬閘（`ALLOW_LEGACY_SPAWN`）**: 本機 spawn 派工（PTY/SDK）預設**停用**——`AgentManager.startAgent` 與 `ExecutionPipeline.executeTask` 未設 `ALLOW_LEGACY_SPAWN=1` 一律 throw。P3 清理後硬閘之外的觸發點也已拆除：Web UI Spec mode 改產生 MCP 指令（不再送 `project.startExecution`）、Asana auto-execute 已移除（同步只匯入任務）、mockup.crawl／SkillGenerator／Quick/Creative mode handler 已刪。僅剩 agent.add／agent.resume／project.startExecution 仍會走到 AgentManager（被硬閘擋下）。執行一律走外部 Claude Code session + MCP；MCP 合成 agent（`mcp-{taskId}`）與啟動恢復（kill-only）不受影響。
+- **本機 spawn 派工已整套移除（2026-10）**：PTY／SDK 引擎、`ALLOW_LEGACY_SPAWN` 硬閘、MasterOrchestrator／FullstackController／TaskDispatcher、Web 的 Agents／Events 畫面、計畫審核與介入通知都已刪除。執行一律走外部 Claude Code session + MCP。`AgentManager` 只剩兩件事（只改 DB、發事件、不碰程序）：啟動時把上次殘留的非 MCP agent 標 error 並把任務退回 pending（`mcp-{taskId}` 合成 agent 不動）、Web UI 的停止鈕。
 - **svn CLI ≥ 1.10 required**: SVN 認證改走 `--password-from-stdin`（避免密碼出現在指令列），此旗標需要 svn 1.10+（2018）。舊版 svn 會報 unknown option 且不會走 curl NTLM fallback。
 - **Server binds 127.0.0.1 by default**: `HOST` env 可改（如 `0.0.0.0` 供區網存取）。所有內部預設 URL（NOTIFY_URL、Vite proxy、health_check）都用 `127.0.0.1` 而非 `localhost`，避免 Node 18 的 IPv6 解析問題（engines 已要求 Node ≥ 20）。
-- **Fullstack task label**: `fullstack` label triggers `FullstackController` (4-phase flow). Requires both `frontendPath` AND `backendPath` on the project. Uses `skipTaskStatusUpdate` flag (persistent `Set` in AgentManager) to prevent subagents from marking task completed. Coordinator and integration-test agents skip auto-resume (one-shot execution). Markers: `[FULLSTACK_FIX]{json}[/FULLSTACK_FIX]` for coordinator, `[INTEGRATION_TEST_RESULT]{json}[/INTEGRATION_TEST_RESULT]` for Playwright agent. Reports: `docs/verification-reports/{taskId}-frontend.md` and `{taskId}-backend.md`.
+- **`get_execution_plan` 依賴 Web Server**：MCP process 不自己組 prompt，而是 HTTP 呼叫 Web Server 的 `/api/execution-plan/:taskId`（`ExecutionPipeline.buildExecutionPlan`／`preparePromptForRole` → `assembleContext`）。Web Server 沒開，`get_execution_plan` 會失敗——`health_check` 的 webServer 項可先確認。`fullstack` label 照舊是開發任務 label（受執行計畫閘等管制），以 `role=frontend`／`backend` 分別取兩份 plan 派工；原本的 4 階段 FullstackController 已移除。
