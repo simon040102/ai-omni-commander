@@ -11,13 +11,10 @@
     "mcp": "node dist/mcp-entry.js"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.2.114",
     "@modelcontextprotocol/sdk": "^1.27.1",
     "@omni/shared": "workspace:*",
     "@types/turndown": "^5.0.6",
     "better-sqlite3": "^11.7.0",
-    "chokidar": "^4.0.0",
-    "cross-spawn": "^7.0.6",
     "dotenv": "^16.4.0",
     "express": "^4.21.0",
     "httpntlm": "^1.8.13",
@@ -36,7 +33,6 @@
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
-    "@types/cross-spawn": "^6.0.6",
     "@types/express": "^5.0.0",
     "@types/mssql": "^9.1.0",
     "@types/pg": "^8.11.0",
