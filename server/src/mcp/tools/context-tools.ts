@@ -20,6 +20,10 @@ import { getFlowState, getCompletionBlockers, logTaskOutput, type FlowGateState,
 import { runSpecChangeCheck, type SpecChangeTarget } from '../spec-change.js';
 import { listResolvedSpecGaps, listOtherTaskResolvedGapDigest, buildRulingsBlock } from '../../utils/specGapResolution.js';
 
+/** 結案前要走的步驟（照完成閘門的順序）。原本只寫「驗收後 completed」，漏了預檢與獨立 AI 回對，照做必被擋。 */
+const CLOSE_OUT_STEPS = 'run_spec_compliance 程式預檢 → get_verification_plan 逐項驗收並 report_verification_result → '
+  + '通知 orchestrator 用 get_compliance_review_plan 派**獨立** reviewer 回對、save_compliance_review 寫回（最新回對 missing=0 才能結案）→ update_task_status(completed)';
+
 /** resume_task 每筆歷史回報最多帶多少字——全文用 get_task_outputs 分頁取 */
 const RESUME_OUTPUT_EXCERPT_CHARS = 500;
 /** resume_task 專案筆記的字元預算——超過的給則數與 list_project_notes 指引 */
@@ -251,10 +255,10 @@ export function registerContextTools(server: McpServer): void {
               steps.push(`狀態 in_progress、role=${b.role}：${b.missing}`);
             }
           } else {
-            steps.push('閘門已通過（或已跳過）→ get_verification_plan 逐項驗收，通過後 update_task_status(completed)');
+            steps.push(`流程圖閘門已通過（或已跳過）→ ${CLOSE_OUT_STEPS}`);
           }
         } else {
-          steps.push('狀態 in_progress（無 flow-gate）→ 繼續實作；完成前 get_verification_plan 逐項驗收後 update_task_status(completed)');
+          steps.push(`狀態 in_progress（無 flow-gate）→ 繼續實作；完成後 ${CLOSE_OUT_STEPS}`);
         }
       }
 

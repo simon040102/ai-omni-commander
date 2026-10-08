@@ -201,6 +201,15 @@ describe('context-tools', () => {
       });
     });
 
+    // 原本只寫「get_verification_plan 逐項驗收後 completed」——漏了程式預檢與獨立 AI 回對（完成閘門的依據）
+    it('進行中、無 flow-gate：nextSteps 列出結案前要做的每一步，含獨立 AI 回對', async () => {
+      seed(testDb);
+      const data = JSON.parse((await callTool(server, 'resume_task', { taskId: 'task-1' })).content[0].text);
+      for (const s of ['get_verification_plan', 'run_spec_compliance', 'get_compliance_review_plan', 'missing=0']) {
+        expect(data.nextSteps, s).toContain(s);
+      }
+    });
+
     it('summarizes flow-gate state and points at the missing gate step', async () => {
       seed(testDb);
       const flowState = {

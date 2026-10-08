@@ -25,6 +25,19 @@ describe('mcp prompts', () => {
     expect(text).not.toContain('第 0 步');
   });
 
+  // 原本流程從「驗收」直接跳「結案」——漏了檢查表、程式預檢、獨立 AI 回對，照它走必在結案被閘門擋下
+  it('start_task 涵蓋結案閘門要的每一步，而且順序對（檢查表→預檢→驗收→獨立 AI 回對→結案）', () => {
+    const text = buildStartTaskText('task-abc');
+    const at = (s: string) => text.indexOf(s);
+    for (const s of ['save_spec_checklist', 'run_spec_compliance', 'get_compliance_review_plan', 'save_compliance_review', 'missing=0']) {
+      expect(text, s).toContain(s);
+    }
+    expect(text).toContain('獨立');   // 回對不可由寫 code 的人自評
+    expect(at('save_spec_checklist')).toBeLessThan(at('run_spec_compliance'));
+    expect(at('run_spec_compliance')).toBeLessThan(at('get_compliance_review_plan'));
+    expect(at('get_compliance_review_plan')).toBeLessThan(at('status="completed"'));
+  });
+
   it('start_task text without taskId instructs locating the task first', () => {
     const text = buildStartTaskText(undefined);
     expect(text).toContain('list_pending_tasks');
