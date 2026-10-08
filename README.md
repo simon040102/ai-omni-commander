@@ -110,7 +110,7 @@ claude      # 另開終端，任何資料夾皆可
 | 規格回對 | `save_spec_checklist`, `get_spec_checklist`, `waive_checklist_item`, `run_spec_compliance`, `get_compliance_review_plan`, `save_compliance_review` |
 | 驗收 | `get_verification_plan`, `get_test_baseline_plan`, `report_verification_result`, `report_verification_evidence` |
 | 專案筆記 | `save_project_note`, `list_project_notes`, `archive_project_note` |
-| Flow-Gated 流程圖 | `save_task_flow`, `report_flow_check`, `get_task_flows`, `save_sa_flow` |
+| Flow-Gated 流程圖 | `save_task_flow`, `report_flow_check`, `get_task_flows` |
 | Asana | `sync_asana_tasks`, `list_asana_projects`, `get_asana_task_comments` |
 | 進度回報 | `report_output`, `report_milestone` |
 | 專案 / 設定 / 診斷 | `list_projects`, `get_project`, `create_project`, `update_project`, `set_extra_prompt`, `set_global_config`, `get_skill_gen_plan`, `query_external_db`, `health_check` |

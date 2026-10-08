@@ -6,7 +6,7 @@ const FLOWS_DIR_NAME = 'sa-flows';
 /**
  * SA 操作流程圖（Mermaid）的快取目錄讀取。
  *
- * 流程圖現在由 MCP 的 save_task_flow／save_sa_flow 寫入（mcp/flow-gate.ts 沿用同一組
+ * 流程圖現在由 MCP 的 save_task_flow 寫入（mcp/flow-gate.ts 沿用同一組
  * `{projectId}-{hash}-flow.mmd`／`-meta.json` 命名），這裡只負責查路徑與列出。
  * 原本「用 PTY 呼叫 Claude 產生流程圖」的部分已隨 legacy spawn 移除。
  */

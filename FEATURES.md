@@ -114,7 +114,6 @@ AI-OmniCommander 是一個 **MCP Server**，為外部 Claude Code session 提供
 - `save_task_flow` — 儲存流程圖（spec / plan / code / mindmap）
 - `report_flow_check` — 回報開工閘/完工閘（gate="A"/"B"）比對結果
 - `get_task_flows` — 列出任務已存的流程圖
-- `save_sa_flow` — 儲存 SA 文件的 Mermaid 流程圖快取
 
 ### Asana（3）
 

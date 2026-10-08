@@ -255,7 +255,7 @@ MCP Server（stdio，由 Claude Code 經 .mcp.json spawn）與 Web Server（Expr
   ```
 - 新增程式碼時**嚴禁**在 MCP process 內用 `process.cwd()` 解析路徑，一律走 `getDataDir()` / `resolveFromRepoRoot()`
 
-### MCP Tools (59 total)
+### MCP Tools (58 total)
 
 完整用法見各工具 description 與 server instructions（連線時自動注入）。分組一覽：
 
@@ -266,7 +266,7 @@ MCP Server（stdio，由 Claude Code 經 .mcp.json spawn）與 Web Server（Expr
 - **規格回對（checklist / compliance）**：`save_spec_checklist`, `get_spec_checklist`, `waive_checklist_item`, `run_spec_compliance`, `get_compliance_review_plan`, `save_compliance_review`, `verify_db_schema`（db_field 對實體 DB 核對）
 - **驗收**：`get_verification_plan`, `get_test_baseline_plan`, `report_verification_result`, `report_verification_evidence`
 - **專案筆記**：`save_project_note`, `list_project_notes`, `archive_project_note`
-- **流程圖（Flow-Gated）**：`save_task_flow`, `report_flow_check`, `get_task_flows`, `save_sa_flow`
+- **流程圖（Flow-Gated）**：`save_task_flow`（SA 流程圖用 `flowType="spec"`；原 `save_sa_flow` 功能完全重疊、從未被呼叫，已移除）, `report_flow_check`, `get_task_flows`
 - **回報**：`report_output`, `report_milestone`
 - **Asana / 其他**：`sync_asana_tasks`, `list_asana_projects`, `get_asana_task_comments`, `get_skill_gen_plan`, `query_external_db`, `health_check`
 - **自我觀察（唯讀，不碰閘門）**：`analyze_harness`（讀回對/缺口/筆記 trace，找**機制本身**哪裡失靈；所有統計按月切——總數會把已修好的舊帳和還在壞的混成一個數字）, `get_attention_summary`（「該注意什麼」：卡著工作的缺口／帶著缺口結案／失敗任務的缺口／停滯／逾期，**依要做什麼分組、不依資料來源分組**；什麼都沒有就明說沒有）。純函式在 `mcp/harness-analysis.ts`、`mcp/attention.ts`

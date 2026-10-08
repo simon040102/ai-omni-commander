@@ -269,8 +269,8 @@ export class ExecutionPipeline {
       }
     }
 
-    // For MCP mode: check SA flow cache only (no PTY generation).
-    // If not cached, the subagent will generate it via save_sa_flow MCP tool.
+    // 只讀 SA 流程圖快取（不產生）。沒有快取就不放流程圖段落；流程圖由 Flow-Gated 流程的
+    // save_task_flow(flowType="spec") 產生。
     let saFlowResult = null;
     if (task.label === 'frontend') {
       const saDoc = this.findSaDocument(taskId, task.projectId, allSvnDocs);
@@ -283,7 +283,6 @@ export class ExecutionPipeline {
           saFlowResult = { fullFlow: cachedFlow, relevantFlow: cachedFlow, flowPath: cachedPath };
         }
         // If not cached, saFlowResult stays null → assembleContext won't include it
-        // The MCP prompt header instructs the subagent to generate and save_sa_flow
       }
     }
 
@@ -384,9 +383,8 @@ export class ExecutionPipeline {
       }
     }
 
-    // For MCP mode: check SA flow cache only (no PTY generation) — same as
-    // buildExecutionPlan above. If not cached, the subagent generates it via
-    // the save_sa_flow MCP tool; we must never spawn claude from this path.
+    // 只讀 SA 流程圖快取（同 buildExecutionPlan）。沒有快取就不放流程圖段落；流程圖由
+    // Flow-Gated 流程的 save_task_flow(flowType="spec") 產生。
     let saFlowResult = null;
     if (forRole === 'frontend') {
       const saDoc = this.findSaDocument(taskId, task.projectId, allSvnDocs);
@@ -399,7 +397,6 @@ export class ExecutionPipeline {
           saFlowResult = { fullFlow: cachedFlow, relevantFlow: cachedFlow, flowPath: cachedPath };
         }
         // If not cached, saFlowResult stays null → assembleContext won't include it
-        // The MCP prompt header instructs the subagent to generate and save_sa_flow
       }
     }
 

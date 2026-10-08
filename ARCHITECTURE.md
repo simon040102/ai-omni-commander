@@ -35,7 +35,7 @@ Claude Code / Claude Desktop
 | File / Dir | Purpose |
 |------|---------|
 | `server/src/mcp-entry.ts` | stdio transport entry, spawned by Claude Code |
-| `server/src/mcp/McpServer.ts` | Registers all 59 tools + `start_task` prompt + server instructions |
+| `server/src/mcp/McpServer.ts` | Registers all 58 tools + `start_task` prompt + server instructions |
 | `server/src/mcp/tools/` | Tool implementations（task／document／project／progress／compliance／spec-gap／flow／verification／insight／db…） |
 | `server/src/mcp/db.ts` | Standalone SQLite connection for the MCP process |
 | `server/src/mcp/notify.ts` | HTTP POST to Web Server for real-time UI updates |

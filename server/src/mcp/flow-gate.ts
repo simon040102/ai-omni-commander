@@ -127,7 +127,7 @@ export function getRoleState(state: FlowGateState, role: FlowRole): RoleFlowStat
 
 // ── flow file storage (legacy sa-flows compatible) ──────────
 
-/** Resolve data/sa-flows dir from DB_PATH (same convention as save_sa_flow). */
+/** Resolve data/sa-flows dir from DB_PATH (same convention as SaFlowAnalyzer). */
 export function getFlowsDir(): string {
   const flowsDir = path.join(getDataDir(), 'sa-flows');
   fs.mkdirSync(flowsDir, { recursive: true });
