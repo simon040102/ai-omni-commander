@@ -285,6 +285,8 @@ MCP Prompt：`start_task` — 標準任務工作流（get_execution_plan → in_
 - **唯讀、不碰閘門**：不寫任何 DB；結果僅供參考，**不可當成完成閘門或 AI 回對 matched/missing 的依據**（準度不及大模型）
 - 單筆失敗只標該筆 error；429/5xx/網路錯誤重試一次；一次最多 200 筆、併發 8
 - 註冊：`claude mcp add --scope user jev -- node "d:/暫存檔/claude code/ai-omni-commander-v5/server/dist/jev-mcp-entry.js"`
+- **給其他人安裝的獨立版**：`pnpm build:jev-mcp` → `packages/jev-mcp/jev-mcp.zip`（單檔 `jev-mcp.mjs`＋一鍵安裝 `install.cmd`／`install.sh`＋README）。入口 `server/src/jev/standalone-entry.ts`，**金鑰只讀 env**（安裝腳本以 `claude mcp add -e TYPESAFE_API_KEY=…` 寫進對方的 `~/.claude.json`）。omni 版與獨立版共用 `runStdio.ts`，只差金鑰來源；讀 omni DB 的 `omni-key.ts` 只給 omni 版用——**獨立版不可 import 任何會帶進 better-sqlite3 的模組**（build.mjs 會檢查，違反就打包失敗）
+- `install.ps1` 只用 ASCII（PS 5.1 讀非 ASCII .ps1 會亂碼），且 `claude mcp add` 的 `--` 必須加引號 `'--'`——PS 5.1 會吃掉裸的 `--`，變長參數 `-e` 就把 `node <路徑>` 也吞成環境變數
 
 ### 本地資料夾規格來源（specFolders — 與 SVN 並存）
 

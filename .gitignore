@@ -60,3 +60,6 @@ docs/*
 docs/axure-snapshots/*
 !docs/axure-snapshots/crawl-axure.mjs
 *.zip
+
+# Jev MCP 獨立版打包產物（pnpm build:jev-mcp 產生）
+packages/jev-mcp/release/

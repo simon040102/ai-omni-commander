@@ -64,6 +64,28 @@ describe('jev_classify', () => {
     expect(out.note).toContain('僅供參考');
   });
 
+  it('沒傳 getApiKey（獨立版）→ 只讀 env TYPESAFE_API_KEY', async () => {
+    const seen: string[] = [];
+    const f = vi.fn(async (_u: string, init: RequestInit) => {
+      seen.push((init.headers as Record<string, string>).Authorization);
+      return new Response(JSON.stringify({ answers: { answer: { type: 'choice', choice: 'bug', confidence: 0.9 } } }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const server = new McpServer({ name: 't', version: '0' }, { capabilities: { tools: {} } });
+    registerJevTools(server, { fetchImpl: f });
+    const prev = process.env['TYPESAFE_API_KEY'];
+    try {
+      delete process.env['TYPESAFE_API_KEY'];
+      const none = await callTool(server, 'jev_classify', { question: 'q', options: OPTIONS, items: [{ id: '1', text: 'x' }] });
+      expect(none.isError).toBe(true);
+      process.env['TYPESAFE_API_KEY'] = 'env-key';
+      const ok = await callTool(server, 'jev_classify', { question: 'q', options: OPTIONS, items: [{ id: '1', text: 'x' }] });
+      expect(ok.isError).toBeUndefined();
+      expect(seen).toEqual(['Bearer env-key']);
+    } finally {
+      if (prev === undefined) delete process.env['TYPESAFE_API_KEY']; else process.env['TYPESAFE_API_KEY'] = prev;
+    }
+  });
+
   it('沒有 none/other 類選項時提醒（Jev 會被迫硬選一個）', async () => {
     const r = await callTool(setup(), 'jev_classify', {
       question: 'q', options: { bug: 'a', feature: 'b' }, items: [{ id: '1', text: '當掉' }],

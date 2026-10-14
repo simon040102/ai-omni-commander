@@ -18,10 +18,12 @@
 		"test:watch": "npx vitest --config server/vitest.config.ts",
 		"verify": "npx vitest run --config server/vitest.config.ts && tsc --build && cd web && npx vitest run && npx vite build",
 		"typecheck": "tsc --build",
+		"build:jev-mcp": "node packages/jev-mcp/build.mjs",
 		"clean": "rm -rf shared/dist server/dist web/dist node_modules/.cache"
 	},
 	"devDependencies": {
 		"concurrently": "^9.1.0",
+		"esbuild": "0.27.7",
 		"typescript": "^5.7.0",
 		"vitest": "^4.1.0"
 	},

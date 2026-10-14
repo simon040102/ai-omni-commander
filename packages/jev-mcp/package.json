@@ -1,0 +1,10 @@
+{
+  "name": "jev-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Jev (TypeSafe) MCP server for Claude Code — batch classify / score with jev_classify. Standalone build of ai-omni-commander's jev MCP.",
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

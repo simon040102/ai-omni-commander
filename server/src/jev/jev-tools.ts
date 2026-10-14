@@ -4,11 +4,10 @@
  * 唯讀：不寫任何 DB，不碰任務／閘門。
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import Database from 'better-sqlite3';
 import { z } from 'zod';
-import { getDbPath, compactJson, fitListToLimit } from '../mcp/helpers.js';
+import { compactJson, fitListToLimit } from '../mcp/helpers.js';
 import {
-  classifyWithJev, resolveTypesafeApiKey, JEV_DEFAULT_MODEL, TYPESAFE_API_KEY_CONFIG,
+  classifyWithJev, JEV_DEFAULT_MODEL,
   type JevQuestion, type JevItemResult,
 } from '../utils/typesafe.js';
 
@@ -17,28 +16,17 @@ export const JEV_MAX_TEXT = 8000;
 const NONE_LIKE = /^(none|other|unknown|n\/a|na|其他|都不是|無)$/i;
 
 export interface JevToolDeps {
+  /** 預設只讀 env TYPESAFE_API_KEY（獨立版）；omni 版注入 omni-key.ts 的 readOmniJevApiKey */
   getApiKey?: () => string;
   fetchImpl?: typeof fetch;
 }
 
-/** 金鑰：OmniCommander 全域設定（DB）優先、env TYPESAFE_API_KEY 備援——與 Web 設定頁同一套規則。DB 不在也能只靠 env 跑。 */
-export function readJevApiKey(): string {
-  let dbKey = '';
-  try {
-    const db = new Database(getDbPath(), { readonly: true, fileMustExist: true });
-    try {
-      dbKey = (db.prepare('SELECT value FROM global_config WHERE key = ?').get(TYPESAFE_API_KEY_CONFIG) as { value: string } | undefined)?.value ?? '';
-    } finally {
-      db.close();
-    }
-  } catch { /* DB 不存在或還沒有 global_config → 只看 env */ }
-  return resolveTypesafeApiKey(dbKey, process.env['TYPESAFE_API_KEY']).key;
-}
+export const readEnvJevApiKey = (): string => process.env['TYPESAFE_API_KEY'] ?? '';
 
 const err = (text: string) => ({ content: [{ type: 'text' as const, text: `Error: ${text}` }], isError: true });
 
 export function registerJevTools(server: McpServer, deps: JevToolDeps = {}): void {
-  const getApiKey = deps.getApiKey ?? readJevApiKey;
+  const getApiKey = deps.getApiKey ?? readEnvJevApiKey;
 
   server.tool(
     'jev_classify',
