@@ -276,6 +276,16 @@ MCP Server（stdio，由 Claude Code 經 .mcp.json spawn）與 Web Server（Expr
 
 MCP Prompt：`start_task` — 標準任務工作流（get_execution_plan → in_progress → 執行 → 回報 → 驗收 → completed/failed；`taskId` 可省略，會用 list_pending_tasks/next_task 定位）。
 
+### Jev MCP（獨立的第二個 MCP server，同 repo）
+
+`server/dist/jev-mcp-entry.js`，只有一支 `jev_classify`：把「資料量大、每筆都問同一個封閉問題」的判斷批次丟給 TypeSafe 的 Jev（choice＝從選項挑一個；score＝依由低到高的量尺打 0~1 分）。核心邏輯 `server/src/utils/typesafe.ts`（OmniCommander 內部功能要用 Jev 時直接呼叫這裡，不繞 MCP）；工具在 `server/src/jev/`。
+
+- **刻意不包進 omni MCP**：Jev 是通用能力、與任務管理無關；獨立註冊才能單獨開關（不想把資料送第三方的專案就不掛），也不讓 omni 的工具清單變胖
+- **金鑰**：Web Global Settings 的「TypeSafe API Key（Jev）」（`global_config.typesafe.apiKey`），env `TYPESAFE_API_KEY` 備援；jev MCP 以唯讀開 DB 讀金鑰，DB 不在也能只靠 env 跑
+- **唯讀、不碰閘門**：不寫任何 DB；結果僅供參考，**不可當成完成閘門或 AI 回對 matched/missing 的依據**（準度不及大模型）
+- 單筆失敗只標該筆 error；429/5xx/網路錯誤重試一次；一次最多 200 筆、併發 8
+- 註冊：`claude mcp add --scope user jev -- node "d:/暫存檔/claude code/ai-omni-commander-v5/server/dist/jev-mcp-entry.js"`
+
 ### 本地資料夾規格來源（specFolders — 與 SVN 並存）
 
 專案級設定 `config_json.specFolders`（ProjectSettings 的「規格資料夾」區塊編輯）：
