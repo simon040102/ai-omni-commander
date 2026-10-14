@@ -12,7 +12,8 @@ import type { SvnConfig } from '@omni/shared';
 import { normalizeSvnUrl, extractFunctionCode, runCommand, buildSvnAuth, buildCurlAuth } from '../svn/SvnSpecService.js';
 import { validateSpecFolders } from '../documents/FolderSpecSource.js';
 import type { SvnSpecService } from '../svn/SvnSpecService.js';
-import { getSvnCredentials, setSvnCredentials, getAsanaPat, setAsanaPat, getGlobalMcpServers, setGlobalMcpServers } from '../db/queries/globalConfig.js';
+import { getSvnCredentials, setSvnCredentials, getAsanaPat, setAsanaPat, getTypesafeApiKey, setTypesafeApiKey, getGlobalMcpServers, setGlobalMcpServers } from '../db/queries/globalConfig.js';
+import { checkTypesafeKey, resolveTypesafeApiKey } from '../utils/typesafe.js';
 import type { McpStdioServerConfig } from '@omni/shared';
 import { getConfig, reloadAsanaPat } from '../config.js';
 import type { SpecModeHandler } from '../orchestrator/SpecModeHandler.js';
@@ -519,6 +520,7 @@ export function registerHandlers(
   const sendConfigState = (ws: WebSocket) => {
     const creds = getSvnCredentials();
     const asanaPat = getAsanaPat();
+    const typesafe = resolveTypesafeApiKey(getTypesafeApiKey(), process.env['TYPESAFE_API_KEY']);
     wsServer.send(ws, {
       type: 'config.state',
       id: genId(),
@@ -528,6 +530,8 @@ export function registerHandlers(
         hasSvnPassword: !!creds.password,
         hasAsanaPat: !!(asanaPat || getConfig().asanaPat),
         asanaPatSource: asanaPat ? 'db' : getConfig().asanaPat ? 'env' : 'none',
+        hasTypesafeApiKey: typesafe.source !== 'none',
+        typesafeApiKeySource: typesafe.source,
         globalMcpServers: getGlobalMcpServers(),
       },
     } as WsMessage);
@@ -548,6 +552,23 @@ export function registerHandlers(
     setAsanaPat(payload.pat);
     reloadAsanaPat(payload.pat || null);
     sendConfigState(ws);
+  });
+
+  wsServer.registerHandler('config.setTypesafeApiKey', (msg: WsMessage, ws: WebSocket) => {
+    const { payload } = msg as unknown as { payload: { apiKey: string } };
+    setTypesafeApiKey((payload.apiKey || '').trim());
+    sendConfigState(ws);
+  });
+
+  wsServer.registerHandler('config.testTypesafe', async (_msg: WsMessage, ws: WebSocket) => {
+    const { key } = resolveTypesafeApiKey(getTypesafeApiKey(), process.env['TYPESAFE_API_KEY']);
+    const result = await checkTypesafeKey(key);
+    wsServer.send(ws, {
+      type: 'config.testResult',
+      id: genId(),
+      timestamp: new Date().toISOString(),
+      payload: { service: 'typesafe', ...result },
+    } as WsMessage);
   });
 
   wsServer.registerHandler('config.setGlobalMcpServers', (msg: WsMessage, ws: WebSocket) => {

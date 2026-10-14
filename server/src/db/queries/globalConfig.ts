@@ -1,4 +1,5 @@
 import { getDb } from '../connection.js';
+import { TYPESAFE_API_KEY_CONFIG } from '../../utils/typesafe.js';
 
 export function getGlobalConfig(key: string): string | null {
   const db = getDb();
@@ -41,6 +42,22 @@ export function setAsanaPat(pat: string): void {
     setGlobalConfig('asana.pat', pat);
   } else {
     deleteGlobalConfig('asana.pat');
+  }
+}
+
+// =============================================
+// TypeSafe (Jev) API key
+// =============================================
+
+export function getTypesafeApiKey(): string {
+  return getGlobalConfig(TYPESAFE_API_KEY_CONFIG) || '';
+}
+
+export function setTypesafeApiKey(key: string): void {
+  if (key) {
+    setGlobalConfig(TYPESAFE_API_KEY_CONFIG, key);
+  } else {
+    deleteGlobalConfig(TYPESAFE_API_KEY_CONFIG);
   }
 }
 
