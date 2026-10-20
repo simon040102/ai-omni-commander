@@ -162,6 +162,13 @@ function escapeRegex(s: string): string {
  */
 const EVIDENCE_SCAN_LIMIT = 50;
 
+/**
+ * ui_text 超過此字數視為描述型、找不到時回 manual 不報 missing。實測（2026-10，442 次預檢）：
+ * >80 字只配對成功 5 次，報 missing 的 30 次有 27 次最後被豁免；41–80 字仍常配對成功、
+ * 也抓到過真缺漏（AI 同判 missing 9 次），所以門檻不往下拉。
+ */
+export const UI_TEXT_LITERAL_MAX_CHARS = 80;
+
 /** ui_text：exact substring。`limit` 是**收集**上限，不是回傳上限——
  *  呼叫端分完強弱之後自己 slice 到 MAX_EVIDENCE。
  *  跨行文字（content 含換行）逐行找不到時，退回以第一個非空行定位證據。 */
@@ -882,8 +889,13 @@ export function runComplianceEngine(items: EngineItem[], roots: WorkspaceRoots):
     switch (item.itemType) {
       case 'ui_text': {
         const strength = splitEvidenceStrength(files, matchSubstring(files, item.content));
+        // 長描述型：找得到照樣 matched（證據可當回對員的線索），找不到不報 missing——
+        // 這種長度多是規格描述句、不是畫面字面，字面比對抓不到不代表沒做，交 AI 回對判。
+        const isLongDescription = [...item.content].length > UI_TEXT_LITERAL_MAX_CHARS;
         results.push(strength.strong.length > 0
           ? { ...base, status: 'matched', evidence: strength.strong.slice(0, MAX_EVIDENCE) }
+          : isLongDescription
+            ? { ...base, status: 'manual', note: `超過 ${UI_TEXT_LITERAL_MAX_CHARS} 字的描述型文字，不做字面比對（找不到不代表沒做），交 AI 回對判定` }
           : strength.weak.length > 0
             ? { ...base, status: 'missing', evidence: strength.weak.slice(0, MAX_EVIDENCE), note: weakEvidenceNote(strength) }
             : { ...base, status: 'missing', note: 'workspace 中找不到此文字（exact substring，區分全形半形）' });

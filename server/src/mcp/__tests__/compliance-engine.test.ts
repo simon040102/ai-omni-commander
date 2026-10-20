@@ -184,6 +184,33 @@ describe('runComplianceEngine', () => {
     expect(result.summary).toMatchObject({ total: 2, matched: 1, missing: 1, autoTotal: 2, score: 50 });
   });
 
+  it('ui_text 超過 80 字：找不到改回 manual（不算 missing）；找得到照樣 matched 附證據；80 字以內照舊', () => {
+    // 實測（2026-10，442 次預檢）：>80 字的 ui_text 只配對成功 5 次，報 missing 的 30 次有 27 次最後被豁免——
+    // 多是規格描述句、不是畫面字面。41–80 字仍常配對成功且抓到過真缺漏，所以門檻不往下拉。
+    const longMissing = '這是一段很長的規格描述句，' + '說明畫面上應該要呈現的行為與資料來源，'.repeat(4) + '實際畫面不會逐字出現。';
+    const longPresent = [
+      `export function Wa05Index() {`, `  return (`, `    <div>`,
+      `      <h1>代理人設定作業</h1>`, `      <button>查詢（Ｑ）</button>`,
+    ].join('\n');
+    const shortMissing = '不存在的短文字';
+    expect([...longMissing].length).toBeGreaterThan(80);
+    expect([...longPresent].length).toBeGreaterThan(80);
+
+    const result = runComplianceEngine([
+      item({ id: 'lm', itemType: 'ui_text', content: longMissing, side: 'frontend' }),
+      item({ id: 'lp', itemType: 'ui_text', content: longPresent, side: 'frontend' }),
+      item({ id: 'sm', itemType: 'ui_text', content: shortMissing, side: 'frontend' }),
+    ], { frontend: feRoot });
+    const by = (id: string) => result.items.find(r => r.itemId === id)!;
+
+    expect(by('lm').status).toBe('manual');
+    expect(by('lm').note).toContain('80');
+    expect(by('lp').status).toBe('matched');
+    expect(by('lp').evidence![0].file).toBe('src/pages/Wa05/Index.tsx');
+    expect(by('sm').status).toBe('missing');
+    expect(result.summary).toMatchObject({ total: 3, matched: 1, missing: 1, manual: 1, autoTotal: 2 });
+  });
+
   it('identifier types with pure-CJK content fall back to substring (no \\b false-negative)', () => {
     const result = runComplianceEngine([
       // 純中文 content 存成 db_field（subagent 誤分類的情境）：\b 對 CJK 永不成立，須退回 substring

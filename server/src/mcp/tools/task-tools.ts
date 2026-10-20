@@ -490,7 +490,7 @@ ${flowGateSection}
       taskId: z.string().describe('The task ID'),
       status: z.enum(['in_progress', 'completed', 'failed']).describe('New task status'),
       summary: z.string().optional().describe('Optional result summary (recommended for completed/failed)'),
-      skipGates: z.array(z.enum(COMPLETION_GATE_KEYS)).optional().describe('只跳過列出的閘（flow=完工閘, checklist=檢查表, ai_review=AI 規格回對, unit=單元測試, plan=執行計畫, verify=驗收結果）；其他沒過的閘照擋。限使用者明確同意跳過**這幾道**時使用，需 skipReason，記 [SKIP]。'),
+      skipGates: z.array(z.enum(COMPLETION_GATE_KEYS)).optional().describe('只跳過列出的閘（flow=完工閘, checklist=檢查表, ai_review=AI 規格回對, unit=單元測試, plan=執行計畫, verify=驗收結果）；其他沒過的閘照擋。限使用者明確同意跳過**這幾道**時使用，需 skipReason，記 [SKIP]。本任務沒有自己的程式、工作在別張任務做完時，不要跳 plan——改用 coveredBy。'),
       skipFlowGate: z.boolean().optional().describe('跳過**所有**沒過的閘（舊參數）。使用者只同意跳特定閘時改用 skipGates。限使用者明確同意，需 skipReason，記 [SKIP]。'),
       skipReason: z.string().optional().describe('Reason the user approved skipping (required with skipGates / skipFlowGate)'),
       coveredBy: z.string().optional().describe('「已由別張任務涵蓋」：本任務沒有自己的程式變更，工作在另一張任務做完並走完閘門（例：一張報表拆成多張子任務）。填那張任務的 taskId。限使用者明確同意；需 coverageNote。涵蓋任務必須同專案、已結案、且結案時沒有跳過任何閘。**只解開執行計畫閘**，其他閘照常判定。記 [COVERED_BY]。'),
@@ -707,6 +707,7 @@ ${skipHint('unit')}` });
             if (sk === 'no_reason') return { kind: 'error', message: NO_SKIP_REASON };
             if (sk === 'block') {
               blocks.push({ gate: 'plan', message: `Error: 此任務從未取得執行計畫或派工記錄——開發任務必須先 get_execution_plan(taskId) 取得流程（或由 orchestrator save_task_dispatch 存派工快照）再開工。
+若本任務**沒有自己的程式變更、工作已在另一張任務做完**（例：報表拆成多張子任務），經使用者同意後改用 coveredBy="<那張任務的 taskId>" + coverageNote 結案——不必跳閘，那張任務必須同專案、已結案且沒有跳過任何閘。
 ${skipHint('plan')}` });
             }
           }

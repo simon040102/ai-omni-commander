@@ -570,6 +570,9 @@ describe('task-tools', () => {
       const blocked = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
       expect(blocked.isError).toBe(true);
       expect(blocked.content[0].text).toContain('從未取得執行計畫或派工記錄');
+      // 實測 10-08 後 18/18 跳過此閘的都是「子任務沒有自己的程式」，卻沒人用 coveredBy——訊息要先指這條路
+      expect(blocked.content[0].text).toContain('coveredBy=');
+      expect(blocked.content[0].text.indexOf('coveredBy=')).toBeLessThan(blocked.content[0].text.indexOf('skipGates='));
       expect(blocked.content[0].text).not.toContain('規格缺口未裁決');
       expect((testDb.prepare('SELECT status FROM tasks WHERE id = ?').get('task-1') as any).status).toBe('in_progress');
 
