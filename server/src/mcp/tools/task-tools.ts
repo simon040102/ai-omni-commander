@@ -15,7 +15,7 @@ import {
   detectSpecDocuments, getCompletionBlockers, logTaskOutput,
   type ExecutionTrack,
 } from '../flow-gate.js';
-import { parseJson, getAsanaPat, ASANA_API_BASE, ASANA_FETCH_TIMEOUT_MS, fitListToLimit } from '../helpers.js';
+import { parseJson, getAsanaPat, ASANA_API_BASE, ASANA_FETCH_TIMEOUT_MS, fitListToLimit, getDataDir } from '../helpers.js';
 import { detectLabel, detectTaskType } from '../../utils/taskClassification.js';
 import { normalizeDueDate, localTodayYmd, isOverdue } from '../../utils/dueDate.js';
 import { readImageSize, mimeTypeForImage, type ImageSize } from '../../utils/imageSize.js';
@@ -42,6 +42,9 @@ const COMPLETION_GATE_LABELS: Record<CompletionGateKey, string> = {
 
 /** 多道閘同時沒過時的建議修復順序：先補流程紀錄，再測試／驗收，AI 回對最後（改 code 會讓回對失效）。 */
 const GATE_FIX_ORDER: CompletionGateKey[] = ['plan', 'flow', 'checklist', 'unit', 'verify', 'ai_review'];
+
+/** 執行計畫超過此字數改寫檔交付（回應上限 CHARACTER_LIMIT=25000，留給摘要的餘裕） */
+export const EXECUTION_PLAN_INLINE_MAX = 20000;
 
 /** 同一組閘在這段時間內重複擋下不重寫——agent 反覆試結案時不洗版。 */
 const GATE_BLOCK_DEDUPE_MINUTES = 10;
@@ -469,7 +472,44 @@ ${flowGateSection}
 ---
 
 `;
-          return { content: [{ type: 'text' as const, text: header + data.prompt }] };
+          const fullPlan = header + data.prompt;
+          if (fullPlan.length <= EXECUTION_PLAN_INLINE_MAX) {
+            return { content: [{ type: 'text' as const, text: fullPlan }] };
+          }
+          // 大計畫：全文逐字寫檔、回應只給摘要。實測 10 月 260 次有 164 次超過回應上限——
+          // orchestrator 要分段讀，派工時還得把幾萬字整段抄進 subagent prompt（最貴的輸出 token，也可能抄漏）。
+          // 改讀原檔：內容一個字不變，subagent 讀到的就是完整原文。
+          const planDir = path.join(getDataDir(), 'plans');
+          fs.mkdirSync(planDir, { recursive: true });
+          const planFile = path.join(planDir, `${task.id}-${effectiveRole}-${effectiveTrack}.md`);
+          fs.writeFileSync(planFile, fullPlan, 'utf-8');
+          const lineCount = fullPlan.split('\n').length;
+          const readInstruction = `先用 Read 工具完整讀取 ${planFile}（共 ${lineCount} 行；Read 一次最多 2000 行，超過就用 offset 接著讀，一定要讀到第 ${lineCount} 行），裡面是本任務的完整執行計畫與規範，全部照做。`;
+          return {
+            content: [{
+              type: 'text' as const,
+              text: `## 執行計畫已寫入檔案（全文、未刪減）
+計畫全文 ${fullPlan.length} 字、共 ${lineCount} 行，超過單次回應上限，完整內容在：
+${planFile}
+
+**Task ID:** ${task.id}
+**Role:** ${effectiveRole}
+**任務軌道:** ${effectiveTrack.toUpperCase()}（${trackReason}）
+**Workspace:** ${data.workingDir}
+**Frontend Path:** ${data.frontendPath || 'N/A'}
+**Backend Path:** ${data.backendPath || 'N/A'}
+**建議派工模型（給 orchestrator）:** ${dispatchModel}（${dispatchModelReason}——Agent tool 派工時帶 model: "${dispatchModel}"）
+${effectiveTrack === 'full' ? '\n本任務已啟用流程圖閘門（步驟與閘門規則在計畫檔的「Flow-Gated Development」段）。\n' : ''}
+### 派工方式（orchestrator）
+subagent 的 prompt 開頭放這句（**不要摘要或改寫計畫內容**——讓 subagent 讀原檔，才不會漏字、打錯字）：
+> ${readInstruction}
+
+其餘照 CLAUDE.md 規定附上 Workspace 規範段與狀態回報段。
+
+### 自己執行（沒有派工）
+${readInstruction.replace('裡面是本任務', '再開工——裡面是本任務')}`,
+            }],
+          };
         }
 
         let errorDetail = '';

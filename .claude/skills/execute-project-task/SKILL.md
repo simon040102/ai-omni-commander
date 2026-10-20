@@ -132,7 +132,7 @@ Workspace：D:\fork\ofeinvoice_ui
    plan 裡已自動注入規格文件路徑、規格裁決、專案經驗筆記、專案額外指令、單元測試／驗收／規格回對規範與狀態回報指示，
    bug／feature／refactor 也帶了對應的 Superpowers 方法論；而且沒有取過 plan 的開發任務，結案時會被「執行計畫閘」擋下。
 2. `update_task_status(taskId, "in_progress")`
-3. Agent tool 派 subagent，cwd＝plan 回傳的 workingDir，模型照 plan 回傳的 model（規則見 CLAUDE.md「派工模型政策」）。prompt＝**plan 回傳的 prompt 原文**，前面再加：
+3. Agent tool 派 subagent，cwd＝plan 回傳的 workingDir，模型照 plan 回傳的 model（規則見 CLAUDE.md「派工模型政策」）。prompt＝**plan 回傳的 prompt 原文**；plan 太大時回應會寫「執行計畫已寫入檔案」——這時 prompt 開頭改放回應給的那句「先用 Read 完整讀取 <計畫檔>…讀到第 N 行」，**不要自己讀完再抄進 prompt、也不要摘要**（檔案內容與原本回應逐字相同）。前面再加：
    - CLAUDE.md「#3 讀取 Workspace 規範」那四步（plan 只寫了一句「檢查有無 CLAUDE.md」，這四步比較完整）
    - taskType 是 other 時，plan 不帶方法論段——照 CLAUDE.md「#1 注入 Superpowers 方法論」補上 /verification-before-completion
    - State 6 使用者額外提供的文件——**只放完整路徑**，讓 subagent 自己用 Read tool 讀；**嚴禁把規格內容摘要進 prompt**（摘要會打錯字、漏細節，subagent 會照錯的做）

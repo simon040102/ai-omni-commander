@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import Database from 'better-sqlite3';
 import { runMigrations } from '../../db/schema.js';
 
@@ -254,6 +257,78 @@ describe('task-tools', () => {
       // So either we get a 404 (server running) or connection error (server not running)
       const result = await callTool(server, 'get_execution_plan', { taskId: 'task-1' });
       expect(result.isError).toBe(true);
+    });
+  });
+
+  describe('get_execution_plan — 大計畫改寫檔交付（內容逐字不變）', () => {
+    // 實測 10 月 260 次有 164 次超過回應上限（中位數 7.7 萬字）：orchestrator 要分段讀、
+    // 派工時再整段抄進 subagent prompt（輸出 token、也可能抄漏）。內容一個字都不改，只改交付方式。
+    let tmpDir: string;
+    let prevDbPath: string | undefined;
+    const BIG = Array.from({ length: 1500 }, (_, i) => `第 ${i + 1} 行：規格與規範內容，必須逐字保留。`).join('\n');
+
+    function stubPlan(prompt: string) {
+      vi.stubGlobal('fetch', vi.fn(async () => ({
+        ok: true,
+        json: async () => ({ prompt, workingDir: '/tmp/project', model: 'sonnet', frontendPath: '/tmp/project/web', backendPath: '/tmp/project/server' }),
+      })));
+    }
+
+    beforeEach(() => {
+      seedProject(testDb);
+      testDb.prepare(`INSERT INTO tasks (id, project_id, title, label, task_type) VALUES ('task-1', 'proj-1', 'WA05 大計畫', 'frontend', 'feature')`).run();
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omni-plan-'));
+      prevDbPath = process.env['DB_PATH'];
+      process.env['DB_PATH'] = path.join(tmpDir, 'omni.db');
+    });
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+      if (prevDbPath === undefined) delete process.env['DB_PATH']; else process.env['DB_PATH'] = prevDbPath;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it('超過上限 → 全文寫進 data/plans，回應只給摘要＋檔案路徑＋行數＋派工方式；檔案內容就是原本的回應全文', async () => {
+      stubPlan(BIG);
+      const result = await callTool(server, 'get_execution_plan', { taskId: 'task-1' });
+      expect(result.isError).toBeUndefined();
+      const text = result.content[0].text as string;
+      expect(text.length).toBeLessThan(5000);
+      const planFile = path.join(tmpDir, 'plans', 'task-1-frontend-full.md');
+      expect(text).toContain(planFile);
+      const file = fs.readFileSync(planFile, 'utf-8');
+      // 逐字：原本回應＝判軌段＋header＋分隔線＋Web Server 組的 prompt
+      expect(file.startsWith('## 任務軌道：FULL（規格驅動流程）')).toBe(true);
+      expect(file).toContain('**Task ID:** task-1');
+      expect(file).toContain('## Flow-Gated Development');
+      expect(file.endsWith('---\n\n' + BIG)).toBe(true);
+      // 摘要要讓 orchestrator 不必讀全文就能派工
+      const lines = file.split('\n').length;
+      expect(text).toContain(`共 ${lines} 行`);
+      expect(text).toContain('建議派工模型');
+      expect(text).toContain('FULL');
+      expect(text).toContain('不要摘要或改寫');
+      expect(text).toContain('offset');
+      // 閘門副作用照舊：full 軌啟用流程圖閘、留 [TRACK]
+      expect((testDb.prepare('SELECT flow_required FROM tasks WHERE id = ?').get('task-1') as { flow_required: number }).flow_required).toBe(1);
+    });
+
+    it('小計畫 → 照舊整段放在回應裡，不寫檔', async () => {
+      stubPlan('PLAN BODY');
+      const text = (await callTool(server, 'get_execution_plan', { taskId: 'task-1' })).content[0].text as string;
+      expect(text.startsWith('## 任務軌道：FULL（規格驅動流程）')).toBe(true);
+      expect(text.endsWith('---\n\nPLAN BODY')).toBe(true);
+      expect(fs.existsSync(path.join(tmpDir, 'plans'))).toBe(false);
+    });
+
+    it('同一任務不同角色／軌道各自一份檔案，重取時覆蓋為最新內容', async () => {
+      stubPlan(BIG + '\n舊版');
+      await callTool(server, 'get_execution_plan', { taskId: 'task-1', role: 'backend' });
+      stubPlan(BIG + '\n新版');
+      await callTool(server, 'get_execution_plan', { taskId: 'task-1', role: 'backend' });
+      const f = fs.readFileSync(path.join(tmpDir, 'plans', 'task-1-backend-full.md'), 'utf-8');
+      expect(f.endsWith('新版')).toBe(true);
+      expect(f).not.toContain('舊版');
     });
   });
 

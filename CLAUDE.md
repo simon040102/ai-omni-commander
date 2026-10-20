@@ -169,6 +169,7 @@ subagent 的 prompt 必須包含：
   - **Asana 已存在的任務**（已有 taskId）→ 直接 `update_task_status(taskId, "in_progress")`
   - **使用者口述的新任務**（沒有 taskId）→ 先 `create_task(projectId, title, label, ...)`，用回傳的 taskId，再 `update_task_status(taskId, "in_progress")`
 - Agent tool 派 subagent，prompt 包含所有收集到的上下文
+- **大計畫交付方式**：`get_execution_plan` 全文超過 2 萬字時改寫進 `data/plans/<taskId>-<role>-<track>.md`（內容與原本回應**逐字相同**，每次取都覆蓋為最新），回應只給摘要＋檔案路徑＋行數＋一句派工用的「先用 Read 完整讀取…讀到第 N 行」。派工時 prompt 開頭放那句即可——**不要自己讀完再抄進 subagent prompt，也不要摘要**。實測 10 月 260 次有 164 次超過回應上限（中位數 7.7 萬字），原本 orchestrator 要分段讀、再把幾萬字整段抄進 prompt（最貴的輸出 token，也可能抄漏）；改版後以真實 8.8 萬字計畫比對，檔案與舊版回應 SHA-256 相同。2 萬字以內的照舊整段放在回應裡
 - **流水線並行**：任務 A 進入 AI 回對（獨立背景 agent）後，orchestrator 不必乾等——可立即開始備料/派工任務 B。回對結果回來再收 A 的尾。前端+後端雙 agent 並行照舊
 - subagent 用 `report_output` / `report_milestone` 回報進度
 - 完成後 `update_task_status(taskId, "completed")`
