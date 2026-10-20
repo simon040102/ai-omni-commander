@@ -936,4 +936,25 @@ export function runMigrations(db: Database.Database): void {
       }
     }
   }
+
+  // =============================================
+  // v23 Migration: spec_compliance_runs.workspace_rev — 每次預檢／回對時各 workspace 的
+  // git HEAD 與是否有未提交修改（JSON：{frontend?:{head,dirty}, backend?:{head,dirty}}；非 git 為 null）。
+  //
+  // 【為什麼】消融分析時「預檢標 missing → 之後 AI 判 matched」的 500 項分不出是「中間真的改了程式」
+  // 還是「預檢誤報」——沒記兩次 run 之間程式有沒有動。純加欄位，舊資料為 NULL（不推算）。
+  // =============================================
+  {
+    try {
+      const cols = db.prepare("PRAGMA table_info(spec_compliance_runs)").all() as Array<{ name: string }>;
+      if (!cols.some(c => c.name === 'workspace_rev')) {
+        db.exec("ALTER TABLE spec_compliance_runs ADD COLUMN workspace_rev TEXT");
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!/duplicate column/i.test(msg)) {
+        process.stderr.write(`[schema] v23 spec_compliance_runs.workspace_rev migration failed: ${msg}\n`);
+      }
+    }
+  }
 }

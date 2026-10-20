@@ -29,7 +29,7 @@ import {
 import {
   validateReviewEvidence, resolveProjectSpecRoots, RELEVANCE_WINDOW, type EvidenceCheckInput,
 } from '../evidence-validator.js';
-import { readSpecFolders } from '../../documents/FolderSpecSource.js';
+import { readSpecFolders, readGitRevision } from '../../documents/FolderSpecSource.js';
 import {
   validateWaiveReason, validateSupersede,
   WAIVE_REASON_PRECISION_RULE, SUPERSEDE_PRECISION_RULE, MIN_WAIVE_REASON_CHARS,
@@ -182,6 +182,32 @@ export function findSaFlowForTask(
     } catch { /* ignore */ }
   }
   return null;
+}
+
+/**
+ * 該項在最新一次 AI 回對裡的判定（寫進 [WAIVE] 稽核行）。實測有 266 項是「AI 判 missing 後改走豁免」，
+ * 沒記豁免當下的狀態就分不出正當豁免還是逃生口。最新回對沒有這一項 → 如實回「尚未回對」，不猜。
+ */
+/**
+ * 各 workspace（frontend/backend）此刻的 git 版本，存進 run 的 workspace_rev。
+ * 兩次 run 之間 HEAD 沒變、也都沒有未提交修改 → 程式沒動，可分辨「真的修好」與「預檢誤報」。
+ * 規格 root 不記（交付物是規格文件，不屬程式版本）。
+ */
+async function workspaceRevisions(roots: WorkspaceRoots): Promise<string> {
+  const out: Record<string, { head: string; dirty: boolean } | null> = {};
+  for (const side of ['frontend', 'backend'] as const) {
+    const root = roots[side];
+    if (root) out[side] = await readGitRevision(root);
+  }
+  return JSON.stringify(out);
+}
+
+function latestAiReviewStatus(db: ReturnType<typeof getMcpDb>, taskId: string, itemId: string): string {
+  const run = db.prepare(
+    "SELECT results_json FROM spec_compliance_runs WHERE task_id = ? AND source = 'ai_review' ORDER BY run_at DESC, rowid DESC LIMIT 1"
+  ).get(taskId) as { results_json: string } | undefined;
+  const hit = run ? parseJson<ItemResult[]>(run.results_json, []).find(r => r.itemId === itemId) : undefined;
+  return hit?.status ?? '尚未回對';
 }
 
 export function registerComplianceTools(server: McpServer): void {
@@ -434,7 +460,7 @@ ${JSON.stringify(created, null, 2)}`, '（created 清單被截斷——用 get_s
       db.prepare(`
         INSERT INTO agent_outputs (agent_id, task_id, stream_type, content)
         VALUES (?, ?, 'system', ?)
-      `).run(agentId, item.task_id, `[WAIVE] ${item.content}: ${finalReason}`);
+      `).run(agentId, item.task_id, `[WAIVE] ${item.content}: ${finalReason}（豁免時 AI 回對：${latestAiReviewStatus(db, item.task_id, itemId)}）`);
 
       const notifyOk = await notifyWebServer({
         event: 'task.checklistSaved',
@@ -529,9 +555,9 @@ ${JSON.stringify(created, null, 2)}`, '（created 清單被截斷——用 get_s
       // 寫入 run 記錄（source='engine'：程式預檢，不解鎖完成閘門）
       const runId = randomUUID();
       db.prepare(`
-        INSERT INTO spec_compliance_runs (id, task_id, total, matched, missing, manual, waived, results_json, source)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'engine')
-      `).run(runId, taskId, summary.total, summary.matched, summary.missing, summary.manual, summary.waived, JSON.stringify(result.items));
+        INSERT INTO spec_compliance_runs (id, task_id, total, matched, missing, manual, waived, results_json, source, workspace_rev)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'engine', ?)
+      `).run(runId, taskId, summary.total, summary.matched, summary.missing, summary.manual, summary.waived, JSON.stringify(result.items), await workspaceRevisions(roots));
 
       // agent_outputs（同 report_output 通道）
       const { agentId, created, role, title } = ensureMcpAgent(db, taskId, task.project_id);
@@ -1314,9 +1340,9 @@ ${problems.join('\n\n---\n\n')}`,
 
       const runId = randomUUID();
       db.prepare(`
-        INSERT INTO spec_compliance_runs (id, task_id, total, matched, missing, manual, waived, results_json, source)
-        VALUES (?, ?, ?, ?, ?, 0, ?, ?, 'ai_review')
-      `).run(runId, taskId, total, matched, missing, waivedRows.length, JSON.stringify(reviewItems));
+        INSERT INTO spec_compliance_runs (id, task_id, total, matched, missing, manual, waived, results_json, source, workspace_rev)
+        VALUES (?, ?, ?, ?, ?, 0, ?, ?, 'ai_review', ?)
+      `).run(runId, taskId, total, matched, missing, waivedRows.length, JSON.stringify(reviewItems), await workspaceRevisions(roots));
 
       // agent_outputs（同 report_output 通道）
       const { agentId, created, role, title } = ensureMcpAgent(db, taskId, task.project_id);

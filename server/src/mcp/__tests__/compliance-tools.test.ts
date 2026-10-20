@@ -364,6 +364,26 @@ describe('compliance-tools', () => {
       expect(outputs.some(o => o.content.startsWith('[WAIVE] 不存在的文字: 使用者確認 Phase 2 再做'))).toBe(true);
     });
 
+    it('[WAIVE] 留下豁免當下該項的 AI 回對狀態（分辨「被判 missing 後改走豁免」）', async () => {
+      // 實測 266 項是 AI 判 missing 後走豁免——分不出正當豁免還是逃生口，因為沒記豁免當下的狀態
+      seedProject(testDb);
+      seedTask(testDb);
+      await callTool(server, 'save_spec_checklist', { taskId: 'task-1', items: [MISSING_ITEM, { itemType: 'ui_text', content: '另一項文字', side: 'frontend' }] });
+      const rows = testDb.prepare('SELECT id, content FROM spec_checklist_items ORDER BY rowid').all() as Array<{ id: string; content: string }>;
+      testDb.prepare(`INSERT INTO spec_compliance_runs (id, task_id, total, matched, missing, manual, waived, results_json, source)
+        VALUES ('run-ai', 'task-1', 1, 0, 1, 0, 0, ?, 'ai_review')`).run(JSON.stringify([{ itemId: rows[0].id, itemType: 'ui_text', content: rows[0].content, status: 'missing' }]));
+
+      await callTool(server, 'waive_checklist_item', { itemId: rows[0].id, reason: '使用者確認 Phase 2 再做，本輪不實作' });
+      await callTool(server, 'waive_checklist_item', { itemId: rows[1].id, reason: '使用者確認 Phase 2 再做，本輪不實作' });
+      const lines = (testDb.prepare("SELECT content FROM agent_outputs WHERE task_id = 'task-1' AND content LIKE '[WAIVE]%' ORDER BY id").all() as Array<{ content: string }>).map(o => o.content);
+      expect(lines[0]).toContain('（豁免時 AI 回對：missing）');
+      // 最新回對沒有這一項 → 如實寫沒回對過，不猜
+      expect(lines[1]).toContain('（豁免時 AI 回對：尚未回對）');
+      // 理由欄位本身不被污染
+      const r = testDb.prepare('SELECT waive_reason FROM spec_checklist_items WHERE id = ?').get(rows[0].id) as { waive_reason: string };
+      expect(r.waive_reason).toBe('使用者確認 Phase 2 再做，本輪不實作');
+    });
+
     it('is idempotent — second waive returns already-waived without a second [WAIVE] line', async () => {
       seedProject(testDb);
       seedTask(testDb);
@@ -1373,6 +1393,18 @@ describe('compliance-tools', () => {
         const items = JSON.parse(run.results_json) as Array<Record<string, unknown>>;
         expect(items.every(i => !('engineStatus' in i))).toBe(true);
       });
+    });
+
+    it('預檢與 AI 回對的 run 都記下當時 workspace 的 git 版本（非 git → null，不猜）', async () => {
+      const rows = await seedChecklist([UI_ITEM]);
+      await callTool(server, 'run_spec_compliance', { taskId: 'task-1' });
+      await callTool(server, 'save_compliance_review', {
+        taskId: 'task-1',
+        results: [{ itemId: rows[0].id, status: 'matched', evidence: [{ file: 'src/Index.tsx', line: 1 }] }],
+      });
+      const runs = testDb.prepare("SELECT source, workspace_rev FROM spec_compliance_runs WHERE task_id = 'task-1' ORDER BY rowid").all() as Array<{ source: string; workspace_rev: string | null }>;
+      expect(runs.map(r => r.source)).toEqual(['engine', 'ai_review']);
+      for (const r of runs) expect(JSON.parse(r.workspace_rev!)).toEqual({ frontend: null });
     });
 
     describe('validateOnly 試跑（只驗不寫）', () => {

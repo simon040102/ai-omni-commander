@@ -134,6 +134,8 @@ describe('verification-tools', () => {
         const plan = JSON.parse(result.content[0].text);
         expect(plan.items[0].id).toBe('be-unit-tests');
         expect(plan.items[0].item).toBe('單元測試全數通過（指令：mvn test）');
+        // 第一次跑的結果也要留下（原本只記修好後那筆，量不出閘門有沒有逼出失敗）；閘門照舊只看最新一筆
+        expect(plan.items[0].how).toContain('第一次跑完就回報');
         // 後端清單不含前端的單元測試項
         expect(plan.items.map((i: any) => i.id)).not.toContain('fe-unit-tests');
       });

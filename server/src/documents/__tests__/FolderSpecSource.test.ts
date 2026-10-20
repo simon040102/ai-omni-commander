@@ -7,6 +7,7 @@ import {
   prepareFolder, findSpecFiles, getFileVersion, inferDocTypeFromFilename,
   isGitRepo, assertAllowedGitArgs, validateSpecFolders, readSpecFolders,
   pathsOverlap, isPathUnder, filterSafeSpecFolders, specDocLabel, isHtmlSpecFile, hasSpecExtension,
+  readGitRevision,
   type GitRunner, type GitResult,
 } from '../FolderSpecSource.js';
 
@@ -76,6 +77,30 @@ describe('assertAllowedGitArgs（git 安全白名單）', () => {
   it('rejects pull without --ff-only', () => {
     expect(() => assertAllowedGitArgs(['pull'])).toThrow(/--ff-only/);
     expect(() => assertAllowedGitArgs(['pull', '--rebase'])).toThrow(/--ff-only/);
+  });
+});
+
+// ── readGitRevision（唯讀：只用 rev-parse / status）──────────
+
+describe('readGitRevision', () => {
+  it('git repo → HEAD 與是否有未提交修改；只呼叫 rev-parse 與 status', async () => {
+    const repo = mkdir('rev-repo');
+    fs.mkdirSync(path.join(repo, '.git'));
+    const clean = recordingRunner({ 'rev-parse': { stdout: 'abc123\n' }, status: { stdout: '' } });
+    expect(await readGitRevision(repo, clean.runner)).toEqual({ head: 'abc123', dirty: false });
+    expect(clean.calls.map(c => c[0]).sort()).toEqual(['rev-parse', 'status']);
+    const dirty = recordingRunner({ 'rev-parse': { stdout: 'abc123\n' }, status: { stdout: ' M src/a.ts\n' } });
+    expect(await readGitRevision(repo, dirty.runner)).toEqual({ head: 'abc123', dirty: true });
+  });
+
+  it('不是 git repo、或 git 失敗 → null（不猜、不丟例外）', async () => {
+    const plain = mkdir('rev-plain');
+    const r = recordingRunner();
+    expect(await readGitRevision(plain, r.runner)).toBeNull();
+    expect(r.calls).toEqual([]);
+    const repo = mkdir('rev-broken');
+    fs.mkdirSync(path.join(repo, '.git'));
+    expect(await readGitRevision(repo, recordingRunner({ 'rev-parse': { status: 128, stderr: 'fatal' } }).runner)).toBeNull();
   });
 });
 

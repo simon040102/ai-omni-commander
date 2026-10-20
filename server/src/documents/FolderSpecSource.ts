@@ -107,6 +107,30 @@ function firstLine(text: string): string {
   return (text || '').split('\n')[0]!.trim();
 }
 
+// ── read-only revision snapshot ─────────────────────────────
+
+/**
+ * 資料夾目前的 git 版本（唯讀：只用 rev-parse HEAD 與 status --porcelain，同一套白名單守衛）。
+ * 給規格回對記「這次 run 時程式在哪個版本、有沒有未提交修改」。非 git 或 git 失敗 → null，不猜。
+ */
+export async function readGitRevision(
+  folderPath: string,
+  runGit: GitRunner = defaultGitRunner,
+): Promise<{ head: string; dirty: boolean } | null> {
+  if (!isGitRepo(folderPath)) return null;
+  try {
+    const [rp, st] = await Promise.all([
+      runGitGuarded(runGit, ['rev-parse', 'HEAD'], folderPath, GIT_QUERY_TIMEOUT_MS),
+      runGitGuarded(runGit, ['status', '--porcelain'], folderPath, GIT_QUERY_TIMEOUT_MS),
+    ]);
+    if (rp.status !== 0 || rp.error || st.status !== 0 || st.error) return null;
+    const head = firstLine(rp.stdout);
+    return head ? { head, dirty: st.stdout.trim().length > 0 } : null;
+  } catch {
+    return null;
+  }
+}
+
 // ── folder preparation ──────────────────────────────────────
 
 export interface PrepareFolderResult {

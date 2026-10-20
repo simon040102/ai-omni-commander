@@ -127,7 +127,7 @@ function unitTestItem(req: RequiredUnitTestItem): VerificationItem {
   return {
     id: req.id,
     item: unitTestItemText(req.command),
-    how: `在 ${req.side} workspace 執行 \`${req.command}\`，確認全數通過。單元測試只驗邏輯，不驗 SQL 和欄位名——API 煙霧測試照舊執行，是補強不是取代。跑全套撞到既有的**無關失敗**（非本任務造成）→ 不可順手修：${UNRELATED_TEST_FAILURE_RULE}，並建議使用者執行 get_test_baseline_plan 做基線修復。${TEST_SCOPE_NOTE_RULE}`,
+    how: `在 ${req.side} workspace 執行 \`${req.command}\`，確認全數通過。**第一次跑完就回報**（失敗也照實回報 passed=false，note 寫失敗幾支）；修好後重跑再回報一次——閘門只看最新一筆，第一筆是留給事後量測「測試有沒有抓到東西」用的。單元測試只驗邏輯，不驗 SQL 和欄位名——API 煙霧測試照舊執行，是補強不是取代。跑全套撞到既有的**無關失敗**（非本任務造成）→ 不可順手修：${UNRELATED_TEST_FAILURE_RULE}，並建議使用者執行 get_test_baseline_plan 做基線修復。${TEST_SCOPE_NOTE_RULE}`,
   };
 }
 
