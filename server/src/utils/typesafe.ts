@@ -13,46 +13,74 @@ export function resolveTypesafeApiKey(dbKey: string | null | undefined, envKey: 
 }
 
 // ── Jev 分類／打分 ─────────────────────────────────────────
-// API：POST /v1/systemone，一次一筆 state、可多題。這裡固定一題（key=answer），
-// 多筆資料用有上限的併發逐筆送。實測格式（2026-10）：
+// API：POST /v1/systemone，一次一筆 state、可多題（同一次請求）。單題用法固定 key=answer；
+// 多題用 questions[].key。多筆資料用有上限的併發逐筆送。實測格式（2026-10）：
 //   choice → { choice, confidence, probabilities: {選項: 機率} }
 //   score  → { score: 0~1, confidence, legend: {index: 量尺文字}, probabilities: {index: 機率} }
+//   noul   → { noul: 0~1 }（「是」的機率，沒有 confidence）——對外叫 yesno
 
 export const JEV_DEFAULT_MODEL = 'jev-latest';
 const QUESTION_KEY = 'answer';
+/** yesno 沒有 confidence：「是」的機率落在這個區間內標 uncertain */
+const YESNO_UNCERTAIN_LOW = 0.3;
+const YESNO_UNCERTAIN_HIGH = 0.7;
 
 export type JevQuestion =
   | { type: 'choice'; instructions: string; options: Record<string, string> }
-  | { type: 'score'; instructions: string; scale: string[] };
+  | { type: 'score'; instructions: string; scale: string[] }
+  | { type: 'yesno'; instructions: string };
+
+export interface JevNamedQuestion { key: string; q: JevQuestion }
 
 export interface JevItem { id: string; text: string }
 
-export interface JevItemResult {
-  id: string;
+export interface JevAnswer {
   answer?: string;
   score?: number;
   nearest?: string;
+  probability?: number;
   confidence?: number;
   probabilities?: Record<string, number>;
   uncertain?: boolean;
   error?: string;
 }
 
-export function buildJevRequest(q: JevQuestion, text: string, context?: string, model = JEV_DEFAULT_MODEL) {
+export interface JevItemResult extends JevAnswer {
+  id: string;
+  /** 多題（questions）時每題的答案；單題時不出現，答案直接在本層 */
+  answers?: Record<string, JevAnswer>;
+}
+
+function toApiQuestion(q: JevQuestion) {
+  if (q.type === 'choice') return { type: 'choice', instructions: q.instructions, criteria: q.options };
+  if (q.type === 'score') return { type: 'score', instructions: q.instructions, criteria: q.scale };
+  return { type: 'noul', instructions: q.instructions };
+}
+
+export function buildJevRequestMulti(questions: JevNamedQuestion[], text: string, context?: string, model = JEV_DEFAULT_MODEL) {
   return {
     model,
     state: context ? { item: text, context } : { item: text },
-    questions: {
-      [QUESTION_KEY]: q.type === 'choice'
-        ? { type: 'choice', instructions: q.instructions, criteria: q.options }
-        : { type: 'score', instructions: q.instructions, criteria: q.scale },
-    },
+    questions: Object.fromEntries(questions.map(({ key, q }) => [key, toApiQuestion(q)])),
   };
 }
 
-export function parseJevAnswer(q: JevQuestion, body: unknown, minConfidence: number): Omit<JevItemResult, 'id'> {
-  const a = (body as { answers?: Record<string, Record<string, unknown>> })?.answers?.[QUESTION_KEY];
+export function buildJevRequest(q: JevQuestion, text: string, context?: string, model = JEV_DEFAULT_MODEL) {
+  return buildJevRequestMulti([{ key: QUESTION_KEY, q }], text, context, model);
+}
+
+export function parseJevAnswer(q: JevQuestion, body: unknown, minConfidence: number, key = QUESTION_KEY): JevAnswer {
+  const a = (body as { answers?: Record<string, Record<string, unknown>> })?.answers?.[key];
   if (!a) return { error: 'Jev 回應缺少 answers' };
+  if (q.type === 'yesno') {
+    if (typeof a.noul !== 'number') return { error: 'Jev 回應缺少 noul' };
+    const p = a.noul;
+    return {
+      answer: p >= 0.5 ? 'yes' : 'no',
+      probability: p,
+      ...(p > YESNO_UNCERTAIN_LOW && p < YESNO_UNCERTAIN_HIGH ? { uncertain: true } : {}),
+    };
+  }
   const confidence = typeof a.confidence === 'number' ? a.confidence : undefined;
   const uncertain = confidence !== undefined && confidence < minConfidence ? { uncertain: true } : {};
   if (q.type === 'choice') {
@@ -77,6 +105,8 @@ export function parseJevAnswer(q: JevQuestion, body: unknown, minConfidence: num
 export interface ClassifyOptions {
   apiKey: string;
   question: JevQuestion;
+  /** 一次問多題（同一次請求）：有給就用它，忽略 question，結果放在每筆的 answers{key} */
+  questions?: JevNamedQuestion[];
   items: JevItem[];
   context?: string;
   model?: string;
@@ -94,9 +124,10 @@ export async function classifyWithJev(opts: ClassifyOptions): Promise<{
   model?: string;
 }> {
   const {
-    apiKey, question, items, context, model = JEV_DEFAULT_MODEL, minConfidence = 0.5,
+    apiKey, question, questions, items, context, model = JEV_DEFAULT_MODEL, minConfidence = 0.5,
     concurrency = 8, timeoutMs = 15_000, retryDelayMs = 500, fetchImpl = fetch,
   } = opts;
+  const multi = questions && questions.length > 0 ? questions : null;
   const results: JevItemResult[] = new Array(items.length);
   const usage = { inputTokens: 0, outputTokens: 0 };
   let resolvedModel: string | undefined;
@@ -104,7 +135,9 @@ export async function classifyWithJev(opts: ClassifyOptions): Promise<{
   const callOnce = (item: JevItem) => fetchImpl(`${TYPESAFE_API_BASE}/systemone`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(buildJevRequest(question, item.text, context, model)),
+    body: JSON.stringify(multi
+      ? buildJevRequestMulti(multi, item.text, context, model)
+      : buildJevRequest(question, item.text, context, model)),
     signal: AbortSignal.timeout(timeoutMs),
   });
 
@@ -130,7 +163,9 @@ export async function classifyWithJev(opts: ClassifyOptions): Promise<{
       resolvedModel ??= body.model;
       usage.inputTokens += body.usage?.input_tokens ?? 0;
       usage.outputTokens += body.usage?.output_tokens ?? 0;
-      results[index] = { id: item.id, ...parseJevAnswer(question, body, minConfidence) };
+      results[index] = multi
+        ? { id: item.id, answers: Object.fromEntries(multi.map(({ key, q }) => [key, parseJevAnswer(q, body, minConfidence, key)])) }
+        : { id: item.id, ...parseJevAnswer(question, body, minConfidence) };
     } catch (err) {
       results[index] = { id: item.id, error: err instanceof Error ? err.message : String(err) };
     }

@@ -86,6 +86,42 @@ describe('jev_classify', () => {
     }
   });
 
+  it('questions：一次問多題（是非＋選擇），逐筆回 answers，summary 依題目分開統計', async () => {
+    const f = vi.fn(async (_u: string, init: RequestInit) => {
+      const body = JSON.parse(init.body as string);
+      expect(Object.keys(body.questions)).toEqual(['leak', 'kind']);
+      expect(body.questions.leak.type).toBe('noul');
+      const leak = (body.state.item as string).includes('password') ? 0.95 : 0.05;
+      return new Response(JSON.stringify({
+        answers: { leak: { type: 'noul', noul: leak }, kind: { type: 'choice', choice: 'logging', confidence: 0.9 } },
+        usage: { input_tokens: 20, output_tokens: 2 },
+      }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const r = await callTool(setup({ fetchImpl: f }), 'jev_classify', {
+      questions: [
+        { key: 'leak', question: '有沒有印出密碼或金鑰？', type: 'yesno' },
+        { key: 'kind', question: '這段程式在做什麼？', options: { logging: '寫 log', db: '存取資料庫', other: '其他' } },
+      ],
+      items: [{ id: 'f1', text: "log('password=' + p)" }, { id: 'f2', text: 'db.query(sql)' }],
+    });
+    expect(r.isError).toBeUndefined();
+    const out = JSON.parse(r.content[0].text);
+    expect(out.results[0].answers.leak).toEqual({ answer: 'yes', probability: 0.95 });
+    expect(out.results[1].answers.leak.answer).toBe('no');
+    expect(out.summary.byQuestion.leak.counts).toEqual({ yes: 1, no: 1 });
+    expect(out.summary.byQuestion.kind.counts).toEqual({ logging: 2 });
+  });
+
+  it('questions 的 key 重複或題目設定不全 → 錯誤', async () => {
+    const s = setup();
+    const dup = await callTool(s, 'jev_classify', { questions: [{ key: 'a', question: 'q', type: 'yesno' }, { key: 'a', question: 'q2', type: 'yesno' }], items: [{ id: '1', text: 'x' }] });
+    expect(dup.isError).toBe(true);
+    const noOpts = await callTool(s, 'jev_classify', { questions: [{ key: 'a', question: 'q', type: 'choice' }], items: [{ id: '1', text: 'x' }] });
+    expect(noOpts.isError).toBe(true);
+    const none = await callTool(s, 'jev_classify', { items: [{ id: '1', text: 'x' }] });
+    expect(none.isError).toBe(true);
+  });
+
   it('沒有 none/other 類選項時提醒（Jev 會被迫硬選一個）', async () => {
     const r = await callTool(setup(), 'jev_classify', {
       question: 'q', options: { bug: 'a', feature: 'b' }, items: [{ id: '1', text: '當掉' }],

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
-  checkTypesafeKey, resolveTypesafeApiKey, buildJevRequest, parseJevAnswer, classifyWithJev,
+  checkTypesafeKey, resolveTypesafeApiKey, buildJevRequest, buildJevRequestMulti, parseJevAnswer, classifyWithJev,
   type JevQuestion,
 } from '../typesafe.js';
 
@@ -44,6 +44,41 @@ describe('parseJevAnswer', () => {
 
   it('回應缺 answers → 回錯誤而不是丟例外', () => {
     expect(parseJevAnswer(CHOICE, {}, 0.5).error).toBeTruthy();
+  });
+});
+
+describe('是非題（yesno → API 的 noul）與一次問多題', () => {
+  it('buildJevRequestMulti：多題放同一個 questions，yesno 轉成 noul', () => {
+    const req = buildJevRequestMulti([
+      { key: 'leak', q: { type: 'yesno', instructions: '有印出密碼嗎？' } },
+      { key: 'kind', q: CHOICE },
+    ], 'console.log(pwd)');
+    expect(req.questions).toEqual({
+      leak: { type: 'noul', instructions: '有印出密碼嗎？' },
+      kind: { type: 'choice', instructions: CHOICE.instructions, criteria: CHOICE.type === 'choice' ? CHOICE.options : {} },
+    });
+  });
+
+  it('parseJevAnswer yesno：回「是」的機率與 yes/no；0.3～0.7 之間標 uncertain', () => {
+    const YES: JevQuestion = { type: 'yesno', instructions: 'q' };
+    const body = (p: number) => ({ answers: { leak: { type: 'noul', noul: p } } });
+    expect(parseJevAnswer(YES, body(0.96), 0.5, 'leak')).toEqual({ answer: 'yes', probability: 0.96 });
+    expect(parseJevAnswer(YES, body(0.1), 0.5, 'leak')).toEqual({ answer: 'no', probability: 0.1 });
+    expect(parseJevAnswer(YES, body(0.55), 0.5, 'leak').uncertain).toBe(true);
+  });
+
+  it('classifyWithJev 帶 questions：每筆回 answers{key: …}，一筆只送一次請求', async () => {
+    const f = vi.fn(async () => new Response(JSON.stringify({
+      answers: { leak: { type: 'noul', noul: 0.9 }, kind: { type: 'choice', choice: 'bug', confidence: 0.8 } },
+      usage: { input_tokens: 10, output_tokens: 1 },
+    }), { status: 200 }));
+    const out = await classifyWithJev({
+      apiKey: 'k', question: CHOICE, items: [{ id: 'a', text: 'x' }, { id: 'b', text: 'y' }],
+      questions: [{ key: 'leak', q: { type: 'yesno', instructions: 'q' } }, { key: 'kind', q: CHOICE }],
+      fetchImpl: f as unknown as typeof fetch,
+    });
+    expect(f).toHaveBeenCalledTimes(2);
+    expect(out.results[0]).toEqual({ id: 'a', answers: { leak: { answer: 'yes', probability: 0.9 }, kind: { answer: 'bug', confidence: 0.8 } } });
   });
 });
 
