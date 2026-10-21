@@ -83,12 +83,26 @@ describe('verification-tools', () => {
       expect(plan.items).toHaveLength(6);
     });
 
-    it('returns full list with note for other labels', async () => {
-      seedTask(testDb, 'devops');
+    it('不認得的 label → 前後端完整清單＋提示（原本行為）', async () => {
+      seedTask(testDb, 'review');
       const result = await callTool(server, 'get_verification_plan', { taskId: 'task-1' });
       const plan = JSON.parse(result.content[0].text);
       expect(plan.items).toHaveLength(6);
-      expect(plan.note).toContain('devops');
+      expect(plan.note).toContain('review');
+    });
+
+    it('devops → 部署專屬清單：腳本實際執行＋服務／容器實測＋改到程式才跑的單元測試；不再出現 DDL／Playwright 等前後端項目', async () => {
+      seedTask(testDb, 'devops');
+      const plan = JSON.parse((await callTool(server, 'get_verification_plan', { taskId: 'task-1' })).content[0].text);
+      const ids = plan.items.map((i: { id: string }) => i.id);
+      expect(ids).toEqual(['ops-script-run', 'ops-service-check', 'ops-code-unit-tests']);
+      expect(plan.note).toBeNull();
+    });
+
+    it('architect → 規格專屬清單：規格驗證＋已同步到 omni 規格來源', async () => {
+      seedTask(testDb, 'architect');
+      const plan = JSON.parse((await callTool(server, 'get_verification_plan', { taskId: 'task-1' })).content[0].text);
+      expect(plan.items.map((i: { id: string }) => i.id)).toEqual(['spec-validate', 'spec-synced']);
     });
 
     it('returns error for non-existent task', async () => {
@@ -235,9 +249,15 @@ describe('verification-tools', () => {
       ]);
     });
 
-    it('fullstack / 其他 label → 兩側有設的都要', () => {
+    it('fullstack／testing／不認得的 label → 兩側有設的都要', () => {
       expect(getRequiredUnitTestItems('fullstack', cmds).map(i => i.id)).toEqual(['be-unit-tests', 'fe-unit-tests']);
-      expect(getRequiredUnitTestItems('devops', cmds).map(i => i.id)).toEqual(['be-unit-tests', 'fe-unit-tests']);
+      expect(getRequiredUnitTestItems('testing', cmds).map(i => i.id)).toEqual(['be-unit-tests', 'fe-unit-tests']);
+      expect(getRequiredUnitTestItems('review', cmds).map(i => i.id)).toEqual(['be-unit-tests', 'fe-unit-tests']);
+    });
+
+    it('devops／architect → 不強制單元測試（實測：部署、規格任務只能拿無關的前端全套結果交差＝假證據）', () => {
+      expect(getRequiredUnitTestItems('devops', cmds)).toEqual([]);
+      expect(getRequiredUnitTestItems('architect', cmds)).toEqual([]);
     });
 
     it('只設一側 → 其他 label 也只要求那一側；沒設 → 空', () => {

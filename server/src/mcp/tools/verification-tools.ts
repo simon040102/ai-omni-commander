@@ -110,7 +110,11 @@ export function getRequiredUnitTestItems(label: string, testCommands?: Verificat
   switch (label) {
     case 'frontend': return fe;
     case 'backend': return be;
-    default: return [...be, ...fe]; // fullstack / 其他 label：兩側有設的都要
+    // 部署／規格任務不強制：實測只能拿無關的前端全套結果交差（假證據）。
+    // 改到前後端程式時，專屬清單另有「改到程式就跑該側單元測試」項（非閘門）。
+    case 'devops':
+    case 'architect': return [];
+    default: return [...be, ...fe]; // fullstack／testing／其他 label：兩側有設的都要
   }
 }
 
@@ -252,6 +256,42 @@ const FRONTEND_ITEMS: VerificationItem[] = [
   },
 ];
 
+/** 部署／維運任務：驗的是「腳本真的跑得起來、服務真的起來」，不是前端畫面或 DDL */
+function devopsItems(testCommands?: VerificationTestCommands): VerificationItem[] {
+  const cmds = [testCommands?.frontend && `前端 \`${testCommands.frontend}\``, testCommands?.backend && `後端 \`${testCommands.backend}\``].filter(Boolean).join('、');
+  return [
+    {
+      id: 'ops-script-run',
+      item: '腳本實際執行成功：本次改動的部署／維運腳本在目標或等價環境跑過',
+      how: '在目標環境（或等價的測試環境）實際執行本次新增或修改的腳本／設定（部署腳本、CI 設定、容器設定等），回報執行的指令、結束碼與輸出重點。只做語法或靜態檢查不算——要真的跑過',
+    },
+    {
+      id: 'ops-service-check',
+      item: '執行後服務／容器實測正常',
+      how: '腳本跑完後確認受影響的服務或容器真的起來且運作正常：狀態、健康檢查端點、啟動日誌無錯誤；必要時打一支代表性 API。回報實際看到的輸出，不是「應該會成功」',
+    },
+    {
+      id: 'ops-code-unit-tests',
+      item: '若本任務改到前端／後端程式：該側單元測試通過',
+      how: `本任務只改腳本、設定、文件 → 回報 notApplicable 並寫明「未改應用程式」。有改到應用程式 → 跑**被改到那一側**的單元測試${cmds ? `（${cmds}）` : ''}並回報結果；沒改到的那一側不用跑`,
+    },
+  ];
+}
+
+/** 規格任務（architect）：交付物是規格文件本身 */
+const SPEC_ITEMS: VerificationItem[] = [
+  {
+    id: 'spec-validate',
+    item: '規格文件驗證通過：格式、內部一致、交叉引用有效',
+    how: '用規格工具驗證本次改動的文件（例如 spec-agent 的 validate_document／check_consistency，或專案既有的規格檢查），回報結果；工具回報的問題要修正或說明為何不修',
+  },
+  {
+    id: 'spec-synced',
+    item: '改動已同步到 omni 的規格來源',
+    how: '確認 omni 撈得到新版：對相關任務跑 fetch_svn_specs（或專案登記的規格資料夾已是新版），回報抓到的檔案與版本時間',
+  },
+];
+
 export function getVerificationItems(label: string, testCommands?: VerificationTestCommands, hasDbConnections = false): { items: VerificationItem[]; note: string | null } {
   // 該任務 side 的 testCommand 有設定 → 驗收清單自動前置「單元測試全數通過」項；沒設定不出現。
   // 前置哪些項與 update_task_status 的單元測試閘門共用 getRequiredUnitTestItems（單一真相）。
@@ -265,6 +305,10 @@ export function getVerificationItems(label: string, testCommands?: VerificationT
       return { items: [...unitItems, ...FRONTEND_ITEMS], note: null };
     case 'fullstack':
       return { items: [...unitItems, ...backendItems, ...FRONTEND_ITEMS], note: null };
+    case 'devops':
+      return { items: devopsItems(testCommands), note: null };
+    case 'architect':
+      return { items: SPEC_ITEMS, note: null };
     default:
       return {
         items: [...unitItems, ...backendItems, ...FRONTEND_ITEMS],
@@ -278,7 +322,7 @@ export function registerVerificationTools(server: McpServer): void {
   // ── get_verification_plan ─────────────────────────────────
   server.tool(
     'get_verification_plan',
-    '取得任務的驗收清單（依 task label 決定：backend=撈全表靜態檢查/DDL 比對/API 煙霧測試/seed SQL；frontend=tsc --noEmit/Playwright；fullstack=兩者）。專案設定的 frontendTestCommand/backendTestCommand 有設定時，會自動前置「單元測試全數通過」驗收項——此項是完成閘門依據：update_task_status(completed) 要求該項最新一筆驗收回報 passed=true。專案有綁定外部 DB（dbConnections）時，後端清單追加「資料異動驗證」項（query_external_db count/sample 確認新增/修改/刪除真實落地）。**標記 completed 之前必須逐項執行並用 report_verification_result 回報結果——任何驗收項最新一筆為 FAIL 會被完成閘門擋下。**',
+    '取得任務的驗收清單（依 task label 決定：backend=撈全表靜態檢查/DDL 比對/API 煙霧測試/seed SQL；frontend=tsc --noEmit/Playwright；fullstack=兩者；devops=腳本實際執行/服務實測/改到程式才跑的單元測試；architect=規格驗證/同步到 omni）。專案設定的 frontendTestCommand/backendTestCommand 有設定時，前端／後端／全端／testing 任務會自動前置「單元測試全數通過」驗收項（devops／architect 不強制）——此項是完成閘門依據：update_task_status(completed) 要求該項最新一筆驗收回報 passed=true。專案有綁定外部 DB（dbConnections）時，後端清單追加「資料異動驗證」項（query_external_db count/sample 確認新增/修改/刪除真實落地）。**標記 completed 之前必須逐項執行並用 report_verification_result 回報結果——任何驗收項最新一筆為 FAIL 會被完成閘門擋下。**',
     {
       taskId: z.string().describe('任務 ID'),
     },

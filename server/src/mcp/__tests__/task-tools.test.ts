@@ -1079,12 +1079,19 @@ describe('task-tools', () => {
       expect(retry.isError).toBeUndefined();
     });
 
-    it('其他 label（如 devops）→ 兩側有設的都要', async () => {
-      startTask('devops', JSON.stringify({ frontendTestCommand: 'pnpm vitest run' }));
+    it('testing label → 兩側有設的都要（測試就是它的產出）', async () => {
+      startTask('testing', JSON.stringify({ frontendTestCommand: 'pnpm vitest run' }));
 
       const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('frontendTestCommand（pnpm vitest run）');
+    });
+
+    it('devops label → 不受單元測試閘門管制（部署任務拿無關的前端全套結果交差＝假證據）', async () => {
+      startTask('devops', JSON.stringify({ frontendTestCommand: 'pnpm vitest run' }));
+
+      const result = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      expect(result.content[0].text).not.toContain('frontendTestCommand（pnpm vitest run）');
     });
 
     it('skipFlowGate=true + skipReason 跳過此閘門並記 [SKIP] 稽核', async () => {
