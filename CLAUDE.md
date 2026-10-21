@@ -243,10 +243,11 @@ MCP Server（stdio，由 Claude Code 經 .mcp.json spawn）與 Web Server（Expr
   ```
 - 新增程式碼時**嚴禁**在 MCP process 內用 `process.cwd()` 解析路徑，一律走 `getDataDir()` / `resolveFromRepoRoot()`
 
-### MCP Tools (59 total)
+### MCP Tools (60 total)
 
 完整用法見各工具 description 與 server instructions（連線時自動注入）。分組一覽：
 
+- **查 Asana 上不屬於我的單（唯讀、不寫 DB）**：`browse_asana_tasks`——同步照舊**只存派給我的**，所以 list_pending_tasks／next_task／統計／閘門完全不受影響；使用者明確要看別人或沒人接的單時才用：`projectId`＋`scope`（all／others／unassigned）＋`keyword`／`section` 即時列清單（含 subtask，標出已在 omni 裡的 `omniTaskId`），`taskGid` 查單張全文與留言。抓取邏輯與 `sync_asana_tasks` 共用 `mcp/asana-project-fetch.ts`（兩邊看到的資料一致）。要接手別人的單：在 Asana 改派給自己，下次同步自動進 omni。**刻意不做「同步全量存、預設過濾」**：那要改十幾個讀 tasks 表的地方（清單、推薦、停滯、每日推送、Web UI），漏一處就會把別人的單算進我的待辦或觸發開工類副作用
 - **任務分類檢查（Jev，唯讀）**：`review_task_classification`——用 Jev 檢查任務類型（bug/feature/refactor）與角色（frontend/backend/fullstack），只列「Jev 信心度 ≥0.8 且與現況不同」的建議，**不改任何資料**（類型與角色決定派工軌道、workspace、驗收清單，必須給使用者確認後才用 `update_task` 改）。同步時的關鍵字規則認不出「有誤／無法／查不到」這類說法：實測林同棪 60 張有 41 張被建議，多為 other→bug
 - **任務 / 執行計畫**：`get_task`, `list_pending_tasks`（in_progress 任務附 `stalledHours`/`stalled` 卡死偵測）, `get_execution_plan`, `update_task_status`, `update_task`, `next_task`（附 `stalledTasks` 疑似停滯清單）, `get_task_outputs`, `resume_task`（附最近 `lastDispatch` 派工快照）, `save_task_dispatch`（派工快照，中斷復原）, `add_task_dependency`, `remove_task_dependency`, `create_task`
 - **文件 / 規格**：`get_documents`, `read_document`, `search_documents`, `find_axure_snapshot`, `fetch_svn_specs`, `fetch_task_attachments`

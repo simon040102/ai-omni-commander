@@ -18,6 +18,7 @@ import { registerContextTools } from './tools/context-tools.js';
 import { registerComplianceTools } from './tools/compliance-tools.js';
 import { registerConsistencyTools } from './tools/consistency-tools.js';
 import { registerClassificationTools } from './tools/classification-tools.js';
+import { registerAsanaBrowseTools } from './tools/asana-browse-tools.js';
 import { registerPrompts } from './prompts.js';
 
 export function createOmniMcpServer(): McpServer {
@@ -65,6 +66,7 @@ export function createOmniMcpServer(): McpServer {
   registerComplianceTools(server);
   registerConsistencyTools(server);
   registerClassificationTools(server);
+  registerAsanaBrowseTools(server);
 
   // Register prompts (start_task workflow)
   registerPrompts(server);

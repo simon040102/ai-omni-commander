@@ -19,7 +19,7 @@ import { parseJson, getAsanaPat, ASANA_API_BASE, ASANA_FETCH_TIMEOUT_MS, fitList
 import { detectLabel, detectTaskType } from '../../utils/taskClassification.js';
 import { normalizeDueDate, localTodayYmd, isOverdue } from '../../utils/dueDate.js';
 import { readImageSize, mimeTypeForImage, type ImageSize } from '../../utils/imageSize.js';
-import { fetchAsanaSubtasksTree } from '../../utils/asanaSubtasks.js';
+import { fetchAsanaProjectTasks } from '../asana-project-fetch.js';
 import { runSpecChangeCheck, type SpecChangeTarget } from '../spec-change.js';
 import { parseTestCommands, getRequiredUnitTestItems, findLatestUnitTestVerification, listVerificationEntries, getVerificationItems, listReportedVerificationItems, unitTestItemText, UNRELATED_TEST_FAILURE_RULE, TEST_SCOPE_NOTE_RULE } from './verification-tools.js';
 import { getStalledHours, DEFAULT_STALE_THRESHOLD_HOURS } from '../stale-tasks.js';
@@ -1337,68 +1337,11 @@ ${missing.map(i => `- ${i.id}：${i.item}`).join('\n')}
         const asanaPat = getAsanaPat(db);
         if (!asanaPat) return { content: [{ type: 'text' as const, text: 'Error: Asana PAT not configured. Set it in global settings or ASANA_PAT env var.' }], isError: true };
 
-        // Get current user GID
-        const userRes = await fetch(`${ASANA_API_BASE}/users/me`, {
-          headers: { 'Authorization': `Bearer ${asanaPat}`, 'Accept': 'application/json' },
-          signal: AbortSignal.timeout(ASANA_FETCH_TIMEOUT_MS),
-        });
-        if (!userRes.ok) return { content: [{ type: 'text' as const, text: `Asana API error: ${userRes.status} ${await userRes.text()}` }], isError: true };
-        const userData = await userRes.json() as { data?: { gid?: string } };
-        const userGid = userData.data?.gid;
-
-        // --- Asana 分類維度抽取 ---
-        // Section：一張 task 在不同 project 會有多筆 membership，挑出本專案 (asana_project_gid) 對應的那筆
-        const extractSection = (task: Record<string, unknown>): string | null => {
-          const memberships = task['memberships'] as Array<{ project?: { gid?: string }; section?: { name?: string } }> | undefined;
-          if (!memberships || memberships.length === 0) return null;
-          const match = memberships.find(m => m.project?.gid === project.asana_project_gid) || memberships[0];
-          return match?.section?.name || null;
-        };
-
-        // Fetch all project tasks with pagination.
-        // memberships.section.name → 分區(Section)；memberships.project.gid 用來挑出本專案對應的 membership
-        // tags.name → 標籤；custom_fields.* → 自訂欄位（用 display_value 落地最穩，enum 另取 enum_value.name 備援）
-        // num_subtasks → subtask 遞迴抓取的種子判斷
-        const optFields = 'name,notes,due_on,completed,num_subtasks,permalink_url,memberships.section.name,memberships.project.gid,tags.name,assignee.name,assignee.gid,custom_fields.name,custom_fields.display_value,custom_fields.enum_value.name,parent.gid,parent.name,parent.notes';
-        const allTasks: Array<Record<string, unknown>> = [];
-        let nextUrl: string | null = `${ASANA_API_BASE}/tasks?project=${project.asana_project_gid}&limit=100&completed_since=now&opt_fields=${optFields}`;
-
-        while (nextUrl) {
-          const res = await fetch(nextUrl, {
-            headers: { 'Authorization': `Bearer ${asanaPat}`, 'Accept': 'application/json' },
-            signal: AbortSignal.timeout(ASANA_FETCH_TIMEOUT_MS),
-          });
-          if (!res.ok) return { content: [{ type: 'text' as const, text: `Asana API error fetching tasks: ${res.status}` }], isError: true };
-          const data = await res.json() as { data?: Record<string, unknown>[]; next_page?: { uri?: string } };
-          allTasks.push(...(data.data || []));
-          nextUrl = data.next_page?.uri || null;
-        }
-
-        // --- Subtask 遞迴抓取（先抓全樹、後過濾 assignee）---
-        // 專案任務清單抓不到未 multi-home 進專案的 subtask；真正要派工的
-        // 工作項目（前端/串接/後端/UT）常在第二層 subtask。共用邏輯見
-        // utils/asanaSubtasks.ts（深度 ≤3、只抓未完成、gid 去重、≤300 支/次）。
-        // subtask 沒有 memberships → section 繼承根任務（下游依 section 分組時
-        // 才不會全部掉進「無分區」）。
-        const subtaskSections = new Map<string, string | null>();
-        let subtaskStats: { fetched: number; requests: number; truncated: boolean; warnings: string[] } | null = null;
-        if (includeSubtasks !== false) {
-          const tree = await fetchAsanaSubtasksTree(allTasks, {
-            fetchFn: (url: string) => fetch(url, {
-              headers: { 'Authorization': `Bearer ${asanaPat}`, 'Accept': 'application/json' },
-              signal: AbortSignal.timeout(ASANA_FETCH_TIMEOUT_MS),
-            }),
-            optFields,
-          });
-          const rootSections = new Map(allTasks.map(t => [String(t['gid'] || ''), extractSection(t)] as const));
-          for (const entry of tree.entries) {
-            const gid = String(entry.task['gid'] || '');
-            if (!gid) continue;
-            subtaskSections.set(gid, rootSections.get(entry.rootGid) ?? null);
-            allTasks.push(entry.task);
-          }
-          subtaskStats = { fetched: tree.entries.length, requests: tree.requestCount, truncated: tree.truncated, warnings: tree.warnings };
-        }
+        // 抓整個專案（含 subtask 樹）——與 browse_asana_tasks 共用同一份抓取邏輯（mcp/asana-project-fetch.ts）。
+        // subtask 沒有 memberships → section 繼承根任務（下游依 section 分組時才不會全部掉進「無分區」）。
+        const fetched = await fetchAsanaProjectTasks(asanaPat, project.asana_project_gid, { includeSubtasks });
+        if (!fetched.ok) return { content: [{ type: 'text' as const, text: fetched.error }], isError: true };
+        const { userGid, tasks: allTasks, subtaskSections, subtaskStats, sectionOf: extractSection } = fetched;
 
         // Filter to tasks assigned to me — 以「任務本身的 assignee」判：
         // 工作項目 subtask 指派給我、其母任務指派別人 → 仍要收（樹已先抓全）
