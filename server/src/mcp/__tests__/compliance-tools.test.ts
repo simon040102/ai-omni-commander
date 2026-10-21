@@ -515,6 +515,15 @@ describe('compliance-tools', () => {
       expect(data.runtimeCheckPlan.uiTexts).toEqual(['代理人設定作業']);
     });
 
+    it('get_compliance_review_plan：沒有檢查表 → 回錯誤並明說不要派審查員（實測 3 張任務派了審查員才發現，白跑一輪）', async () => {
+      seedProject(testDb);
+      seedTask(testDb);
+      const result = await callTool(server, 'get_compliance_review_plan', { taskId: 'task-1' });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('不要派審查員');
+      expect(result.content[0].text).toContain('save_spec_checklist(taskId="task-1"');
+    });
+
     it('returns guidance (not error) when the task has no checklist', async () => {
       seedProject(testDb);
       seedTask(testDb);
@@ -563,15 +572,16 @@ describe('compliance-tools', () => {
         .all(taskId) as Array<{ id: string; content: string }>;
     }
 
-    it('returns guidance (not error) when the task has no non-waived checklist items', async () => {
+    it('沒有檢查表 → 錯誤（不要派審查員）；全部豁免 → 提示、不是錯誤', async () => {
       seedProject(testDb);
       seedTask(testDb);
 
+      // 原本回一般文字，實測 orchestrator 沒看到就照樣派審查員——改成錯誤
       const result = await callTool(server, 'get_compliance_review_plan', { taskId: 'task-1' });
-      expect(result.isError).toBeUndefined();
+      expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('save_spec_checklist');
 
-      // All-waived is the same: nothing to review
+      // All-waived: nothing to review, guidance only (unchanged)
       await callTool(server, 'save_spec_checklist', { taskId: 'task-1', items: [UI_ITEM] });
       await callTool(server, 'waive_checklist_item', { itemId: itemIds()[0].id, reason: 'Phase 2' });
       const result2 = await callTool(server, 'get_compliance_review_plan', { taskId: 'task-1' });

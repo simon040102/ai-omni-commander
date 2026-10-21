@@ -83,6 +83,20 @@ describe('verification-tools', () => {
       expect(plan.items).toHaveLength(6);
     });
 
+    it('已判軌但還沒有規格檢查表 → 附警告（提早發現，不等到派審查員）；有檢查表或未判軌 → 沒有警告', async () => {
+      seedTask(testDb, 'frontend');
+      const noTrack = JSON.parse((await callTool(server, 'get_verification_plan', { taskId: 'task-1' })).content[0].text);
+      expect(noTrack.checklistWarning).toBeUndefined();
+
+      testDb.prepare(`UPDATE tasks SET flow_state = ? WHERE id = 'task-1'`).run(JSON.stringify({ track: 'full' }));
+      const missing = JSON.parse((await callTool(server, 'get_verification_plan', { taskId: 'task-1' })).content[0].text);
+      expect(missing.checklistWarning).toContain('save_spec_checklist(taskId="task-1"');
+
+      testDb.prepare(`INSERT INTO spec_checklist_items (id, task_id, project_id, item_type, content) VALUES ('ci-1', 'task-1', 'proj-1', 'ui_text', '查詢')`).run();
+      const ok = JSON.parse((await callTool(server, 'get_verification_plan', { taskId: 'task-1' })).content[0].text);
+      expect(ok.checklistWarning).toBeUndefined();
+    });
+
     it('不認得的 label → 前後端完整清單＋提示（原本行為）', async () => {
       seedTask(testDb, 'review');
       const result = await callTool(server, 'get_verification_plan', { taskId: 'task-1' });

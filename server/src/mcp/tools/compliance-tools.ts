@@ -643,6 +643,16 @@ ${JSON.stringify(created, null, 2)}`, '（created 清單被截斷——用 get_s
       const items = db.prepare('SELECT * FROM spec_checklist_items WHERE task_id = ? ORDER BY created_at ASC, rowid ASC')
         .all(taskId) as ChecklistRow[];
       const activeItems = items.filter(i => i.waived === 0);
+      if (items.length === 0) {
+        // 原本回一般文字，orchestrator 容易沒看到就照樣派審查員（實測 3 張任務白跑一輪）——明確回錯誤
+        return {
+          content: [{
+            type: 'text' as const,
+            text: `Error: 此任務還沒有規格檢查表，**不要派審查員**——沒有檢查表就沒有可判定的對象，審查員只會白跑一輪。先由 implementer（或你）用 save_spec_checklist(taskId="${taskId}", items=[...]) 從規格抽取檢查表（content 逐字抄；light 軌抽 BUG 原文），再呼叫 get_compliance_review_plan。`,
+          }],
+          isError: true,
+        };
+      }
       if (activeItems.length === 0) {
         return {
           content: [{

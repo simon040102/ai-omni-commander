@@ -343,6 +343,16 @@ export function registerVerificationTools(server: McpServer): void {
 
       const { items, note } = getVerificationItems(task.label, testCommands, hasDbConnections);
 
+      // 已判軌（取過執行計畫）卻還沒有規格檢查表 → 提早說，不要等到派了審查員才發現（實測白跑過）。
+      // 只提醒、不擋：結案時本來就有檢查表閘門。
+      const track = parseJson<{ track?: string }>(
+        (db.prepare('SELECT flow_state FROM tasks WHERE id = ?').get(taskId) as { flow_state: string | null } | undefined)?.flow_state ?? null, {},
+      ).track;
+      const checklistCount = (db.prepare('SELECT COUNT(*) AS c FROM spec_checklist_items WHERE task_id = ?').get(taskId) as { c: number }).c;
+      const checklistWarning = track && checklistCount === 0
+        ? `⚠ 此任務還沒有規格檢查表：結案前必須有（檢查表閘門），AI 回對也沒有可判定的對象。現在就用 save_spec_checklist(taskId="${taskId}", items=[...]) 從規格抽取（content 逐字抄${track === 'light' ? '；light 軌抽 BUG 原文' : ''}），不要等到派審查員才發現。`
+        : undefined;
+
       return {
         content: [{
           type: 'text' as const,
@@ -350,6 +360,7 @@ export function registerVerificationTools(server: McpServer): void {
             taskId: task.id,
             label: task.label,
             note,
+            ...(checklistWarning ? { checklistWarning } : {}),
             instruction: `逐項執行後呼叫 report_verification_result(taskId, results=[{item, passed, note?}]) 回報，item 用清單中的 id 或 item 文字。截圖等證據檔案用 report_verification_evidence(taskId, filePath, description) 上傳。
 
 【回報紀律】
