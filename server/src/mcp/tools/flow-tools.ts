@@ -101,21 +101,29 @@ export function registerFlowTools(server: McpServer): void {
       });
 
       let resetLogged = false;
+      // 重存會作廢先前通過的閘（stale-pass rule）——記下作廢了哪些，回應要明說（實測沒說，看狀態才發現）
+      const invalidated: Array<{ role: string; gates: string[] }> = [];
+      const noteInvalidated = (role: string, rs: { gateA?: { passed: boolean }; gateB?: { passed: boolean } }, which: Array<'A' | 'B'>) => {
+        const gates = which.filter(g => (g === 'A' ? rs.gateA : rs.gateB)?.passed === true).map(g => (g === 'A' ? GATE_A_LABEL : GATE_B_LABEL));
+        if (gates.length > 0) invalidated.push({ role, gates });
+      };
       const state = mutateFlowState(db, taskId, (s) => {
         const now = new Date().toISOString();
         if (ft === 'spec') {
           s.spec = { hash: saved.hash, savedAt: now };
           // Re-saving spec invalidates ALL roles' gates (stale-pass rule)
-          for (const rs of Object.values(s.roles)) {
-            if (rs) { delete rs.gateA; delete rs.gateB; }
+          for (const [roleName, rs] of Object.entries(s.roles)) {
+            if (rs) { noteInvalidated(roleName, rs, ['A', 'B']); delete rs.gateA; delete rs.gateB; }
           }
         } else if (ft === 'plan') {
           const rs = getRoleState(s, flowRole);
+          noteInvalidated(flowRole, rs, ['A', 'B']);
           rs.plan = { hash: saved.hash, savedAt: now };
           delete rs.gateA;
           delete rs.gateB;
         } else if (ft === 'code') {
           const rs = getRoleState(s, flowRole);
+          noteInvalidated(flowRole, rs, ['B']);
           rs.code = { hash: saved.hash, savedAt: now };
           delete rs.gateB;
           if (resetFailures && rs.gateBFailures > 0) {
@@ -137,9 +145,13 @@ export function registerFlowTools(server: McpServer): void {
       }).catch(() => {});
 
       // 自動選了槽位就要講出來——沉默地替人做決定，等於把「存錯槽位」換成「不知道存去哪」
-      const rolePicked = roleAutoPicked
+      const rolePickedNote = roleAutoPicked
         ? `📌 未指定 role，已依本任務唯一需要的角色存進 **role=${roleAutoPicked}** 槽位（閘門檢查的就是這一個）。\n\n`
         : '';
+      const invalidatedNote = invalidated.length > 0
+        ? `⚠ **先前通過的閘已作廢**（圖改了，舊的比對結果不再算數），要重新比對、重新 report_flow_check：\n${invalidated.map(i => `- role=${i.role}：${i.gates.join('、')}`).join('\n')}\n\n`
+        : '';
+      const rolePicked = rolePickedNote + invalidatedNote;
 
       // ── next-step instruction injection ──
       if (ft === 'mindmap') {

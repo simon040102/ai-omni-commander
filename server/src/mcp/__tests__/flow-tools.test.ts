@@ -106,6 +106,34 @@ describe('flow-gated development', () => {
       expect(st.roles.default?.plan).toBeUndefined();
     });
 
+    // 實測回饋：流程圖重存後先前通過的閘被作廢，回應沒說，看到狀態才發現
+    it('重存 spec-flow：先前通過的開工閘／完工閘被作廢 → 回應逐一列出（每個角色）', async () => {
+      setFlowState(testDb, 'task-1', {
+        specExpected: true, spec: { hash: 'old', savedAt: 'x' },
+        roles: {
+          frontend: { required: true, gateBFailures: 0, gateA: { passed: true, at: 'x', diffs: '' }, gateB: { passed: true, at: 'x', diffs: '' } },
+          backend: { required: true, gateBFailures: 0, gateA: { passed: true, at: 'x', diffs: '' } },
+        },
+      } as unknown as FlowGateState);
+      const r = await callTool(server, 'save_task_flow', { taskId: 'task-1', flowType: 'spec', mermaidContent: MMD2 });
+      const text = r.content[0].text as string;
+      expect(text).toContain('先前通過的閘已作廢');
+      expect(text).toContain('role=frontend：開工閘（規格理解確認）、完工閘（實作邏輯對齊）');
+      expect(text).toMatch(/role=backend：開工閘（規格理解確認）\n/);
+    });
+
+    it('重存 plan-flow：先前通過的開工閘被作廢 → 回應明說要重跑；先前沒過就不囉嗦', async () => {
+      setFlowState(testDb, 'task-1', {
+        specExpected: false,
+        roles: { backend: { required: true, gateBFailures: 0, plan: { hash: 'p', savedAt: 'x' }, gateA: { passed: true, at: 'x', diffs: '' } } },
+      } as unknown as FlowGateState);
+      const r1 = await callTool(server, 'save_task_flow', { taskId: 'task-1', flowType: 'plan', mermaidContent: MMD2, role: 'backend' });
+      expect(r1.content[0].text).toContain('先前通過的閘已作廢');
+      expect(r1.content[0].text).toContain('role=backend：開工閘');
+      const r2 = await callTool(server, 'save_task_flow', { taskId: 'task-1', flowType: 'plan', mermaidContent: MMD, role: 'backend' });
+      expect(r2.content[0].text).not.toContain('先前通過的閘已作廢');
+    });
+
     // ★ 負向：雙角色任務自動選會選錯，而選錯槽位比落 default 更難查
     //   （圖存進去了、閘也過了，只是過在錯的那一半）
     it('★ 雙角色任務省略 role 時仍落 default，不自動猜', async () => {
