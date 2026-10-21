@@ -567,10 +567,12 @@ ${readInstruction.replace('裡面是本任務', '再開工——裡面是本任�
         }
 
         // [I2] State transition validation ([A11] failed → in_progress allows retry)
+        // 未開工 → completed 直接允許：結案時六道閘門照常判定，有沒有經過 in_progress 不影響品質；
+        // 實測常見於被別張任務涵蓋的子任務（一直是 pending），原本要多改一次狀態。failed 仍須先回 in_progress。
         const allowedTransitions: Record<string, string[]> = {
-          'pending': ['in_progress'],
-          'queued': ['in_progress'],
-          'assigned': ['in_progress'],
+          'pending': ['in_progress', 'completed'],
+          'queued': ['in_progress', 'completed'],
+          'assigned': ['in_progress', 'completed'],
           'in_progress': ['completed', 'failed'],
           'failed': ['in_progress'],
         };

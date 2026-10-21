@@ -533,13 +533,39 @@ describe('task-tools', () => {
       seedTask(testDb);
       seedDispatch(testDb); // 開發任務結案需有執行計畫/派工記錄（R2）
 
-      // pending → completed is not a valid transition; go through in_progress first
       await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'in_progress' });
       await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed', summary: 'All done' });
 
       const row = testDb.prepare('SELECT status, result_summary FROM tasks WHERE id = ?').get('task-1') as { status: string; result_summary: string };
       expect(row.status).toBe('completed');
       expect(row.result_summary).toBe('All done');
+    });
+
+    // 實測回饋：待辦不能直接標結案，要先改進行中再改一次（常見於被別張任務涵蓋的子任務）。
+    // 有沒有經過進行中不影響品質——六道閘門在結案時照常判定。
+    it('待辦可以直接標結案，但閘門照常判定（沒派工記錄的開發任務照擋）', async () => {
+      seedProject(testDb);
+      seedTask(testDb);
+      const blocked = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      expect(blocked.isError).toBe(true);
+      expect(blocked.content[0].text).toContain('從未取得執行計畫');
+      expect((testDb.prepare('SELECT status FROM tasks WHERE id = ?').get('task-1') as { status: string }).status).toBe('pending');
+
+      seedDispatch(testDb);
+      const ok = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed', summary: 'done' });
+      expect(ok.isError).toBeUndefined();
+      expect((testDb.prepare('SELECT status FROM tasks WHERE id = ?').get('task-1') as { status: string }).status).toBe('completed');
+    });
+
+    it('失敗的任務仍要先改回進行中才能結案（失敗後應重新做過）', async () => {
+      seedProject(testDb);
+      seedTask(testDb);
+      seedDispatch(testDb);
+      await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'in_progress' });
+      await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'failed', summary: 'x' });
+      const r = await callTool(server, 'update_task_status', { taskId: 'task-1', status: 'completed' });
+      expect(r.isError).toBe(true);
+      expect(r.content[0].text).toContain('Invalid state transition');
     });
 
     it('returns error for non-existent task', async () => {
