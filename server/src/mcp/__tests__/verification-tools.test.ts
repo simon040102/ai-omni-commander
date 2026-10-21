@@ -97,6 +97,46 @@ describe('verification-tools', () => {
       expect(ok.checklistWarning).toBeUndefined();
     });
 
+    it('flow-gated 任務還有角色沒過完工閘 → 附 flowWarning 列出每個角色缺哪一步；全過或不需流程圖 → 沒有', async () => {
+      seedTask(testDb, 'fullstack');
+      const notGated = JSON.parse((await callTool(server, 'get_verification_plan', { taskId: 'task-1' })).content[0].text);
+      expect(notGated.flowWarning).toBeUndefined();
+
+      const passed = { passed: true, at: '2026-10-01T00:00:00Z' };
+      const state = {
+        track: 'full',
+        roles: {
+          frontend: { required: true, plan: { hash: 'p' }, gateA: passed, code: { hash: 'c' }, gateB: passed },
+          backend: { required: true, plan: { hash: 'p' }, gateA: passed },
+        },
+      };
+      testDb.prepare(`UPDATE tasks SET flow_required = 1, flow_state = ? WHERE id = 'task-1'`).run(JSON.stringify(state));
+      const missing = JSON.parse((await callTool(server, 'get_verification_plan', { taskId: 'task-1' })).content[0].text);
+      expect(missing.flowWarning).toContain('role=backend');
+      expect(missing.flowWarning).toContain('code-flow 未儲存');
+      expect(missing.flowWarning).not.toContain('role=frontend');
+
+      state.roles.backend = { ...state.roles.frontend };
+      testDb.prepare(`UPDATE tasks SET flow_state = ? WHERE id = 'task-1'`).run(JSON.stringify(state));
+      const ok = JSON.parse((await callTool(server, 'get_verification_plan', { taskId: 'task-1' })).content[0].text);
+      expect(ok.flowWarning).toBeUndefined();
+    });
+
+    it('專案有設 verificationEnv → 原樣附在驗收清單；沒設或空白 → 不出現', async () => {
+      seedTask(testDb, 'frontend');
+      const none = JSON.parse((await callTool(server, 'get_verification_plan', { taskId: 'task-1' })).content[0].text);
+      expect(none.verificationEnv).toBeUndefined();
+
+      testDb.prepare(`UPDATE projects SET config_json = ? WHERE id = 'proj-1'`).run(JSON.stringify({ verificationEnv: '   ' }));
+      const blank = JSON.parse((await callTool(server, 'get_verification_plan', { taskId: 'task-1' })).content[0].text);
+      expect(blank.verificationEnv).toBeUndefined();
+
+      const env = '前端 http://127.0.0.1:5173，登入帳密見 D:\\secrets\\test-account.txt';
+      testDb.prepare(`UPDATE projects SET config_json = ? WHERE id = 'proj-1'`).run(JSON.stringify({ verificationEnv: env }));
+      const set = JSON.parse((await callTool(server, 'get_verification_plan', { taskId: 'task-1' })).content[0].text);
+      expect(set.verificationEnv).toBe(env);
+    });
+
     it('不認得的 label → 前後端完整清單＋提示（原本行為）', async () => {
       seedTask(testDb, 'review');
       const result = await callTool(server, 'get_verification_plan', { taskId: 'task-1' });

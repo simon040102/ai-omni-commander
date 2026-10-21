@@ -15,6 +15,7 @@ import { randomUUID } from 'node:crypto';
 import { getMcpDb } from '../db.js';
 import { notifyWebServer } from '../notify.js';
 import { ensureMcpAgent, getDataDir, parseJson, truncateResponse } from '../helpers.js';
+import { getCompletionBlockers, getFlowState } from '../flow-gate.js';
 
 export interface VerificationItem {
   id: string;
@@ -340,6 +341,9 @@ export function registerVerificationTools(server: McpServer): void {
       // 專案有綁定外部 DB（dbConnections）→ 後端清單追加「資料異動驗證」項（R4）
       const dbConnections = parseJson<{ dbConnections?: unknown }>(proj?.config_json ?? null, {}).dbConnections;
       const hasDbConnections = Array.isArray(dbConnections) && dbConnections.length > 0;
+      // 專案層驗收環境說明（網址、登入方式、帳密檔位置）——原樣附上，省掉每次自己摸索環境
+      const rawEnv = parseJson<{ verificationEnv?: unknown }>(proj?.config_json ?? null, {}).verificationEnv;
+      const verificationEnv = typeof rawEnv === 'string' && rawEnv.trim() ? rawEnv.trim() : undefined;
 
       const { items, note } = getVerificationItems(task.label, testCommands, hasDbConnections);
 
@@ -353,6 +357,14 @@ export function registerVerificationTools(server: McpServer): void {
         ? `⚠ 此任務還沒有規格檢查表：結案前必須有（檢查表閘門），AI 回對也沒有可判定的對象。現在就用 save_spec_checklist(taskId="${taskId}", items=[...]) 從規格抽取（content 逐字抄${track === 'light' ? '；light 軌抽 BUG 原文' : ''}），不要等到派審查員才發現。`
         : undefined;
 
+      // flow-gated 任務：完工閘還沒過的角色現在就說（判斷與結案閘同一支 getCompletionBlockers），
+      // 不要驗收全跑完、結案才被擋。只提醒、不擋。
+      const flowRequired = (db.prepare('SELECT flow_required FROM tasks WHERE id = ?').get(taskId) as { flow_required: number | null } | undefined)?.flow_required === 1;
+      const flowBlockers = flowRequired ? getCompletionBlockers(getFlowState(db, taskId)) : [];
+      const flowWarning = flowBlockers.length > 0
+        ? `⚠ 流程圖閘門還沒過，結案會被完工閘擋下——先補完：\n${flowBlockers.map(b => `- role=${b.role}：${b.missing}`).join('\n')}`
+        : undefined;
+
       return {
         content: [{
           type: 'text' as const,
@@ -361,6 +373,8 @@ export function registerVerificationTools(server: McpServer): void {
             label: task.label,
             note,
             ...(checklistWarning ? { checklistWarning } : {}),
+            ...(flowWarning ? { flowWarning } : {}),
+            ...(verificationEnv ? { verificationEnv } : {}),
             instruction: `逐項執行後呼叫 report_verification_result(taskId, results=[{item, passed, note?}]) 回報，item 用清單中的 id 或 item 文字。截圖等證據檔案用 report_verification_evidence(taskId, filePath, description) 上傳。
 
 【回報紀律】

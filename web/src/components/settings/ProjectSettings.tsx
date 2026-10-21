@@ -62,6 +62,7 @@ export function ProjectSettings() {
   // Unit test commands per role (injected into execution plan + verification plan)
   const [frontendTestCommand, setFrontendTestCommand] = useState('');
   const [backendTestCommand, setBackendTestCommand] = useState('');
+  const [verificationEnv, setVerificationEnv] = useState('');
 
   // MCP skill gen modal
   const [skillGenMcpCommand, setSkillGenMcpCommand] = useState<string | null>(null);
@@ -109,6 +110,7 @@ export function ProjectSettings() {
       setBackendExtraPrompt(existingConfig?.backendExtraPrompt || '');
       setFrontendTestCommand(existingConfig?.frontendTestCommand || '');
       setBackendTestCommand(existingConfig?.backendTestCommand || '');
+      setVerificationEnv(existingConfig?.verificationEnv || '');
     }
   }, [project, existingConfig]);
 
@@ -161,6 +163,7 @@ export function ProjectSettings() {
       backendExtraPrompt: backendExtraPrompt.trim() || undefined,
       frontendTestCommand: frontendTestCommand.trim() || undefined,
       backendTestCommand: backendTestCommand.trim() || undefined,
+      verificationEnv: verificationEnv.trim() || undefined,
       dbConnections: dbConnections.length > 0 ? dbConnections : undefined,
     };
 
@@ -182,7 +185,7 @@ export function ProjectSettings() {
     addToast({ type: 'success', title: '已儲存專案設定' });
   }, [client, project, name, frontendPath, backendPath, asanaProjectGid, dbConnections,
     svnFrontendPath, svnBackendPath, specFolders, axshareUrl, frontendExtraPrompt, backendExtraPrompt,
-    frontendTestCommand, backendTestCommand, existingConfig, addToast]);
+    frontendTestCommand, backendTestCommand, verificationEnv, existingConfig, addToast]);
 
   const handleGenSkills = useCallback((workspaceType: 'frontend' | 'backend') => {
     if (!project) return;
@@ -467,6 +470,17 @@ export function ProjectSettings() {
               placeholder="例如：mvn test"
               className="w-full bg-muted border border-border rounded-md px-3 py-2 text-sm font-mono outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
             />
+          </div>
+          <div>
+            <label className="block text-xs text-muted-foreground mb-1">驗收環境說明</label>
+            <textarea
+              value={verificationEnv}
+              onChange={(e) => setVerificationEnv(e.target.value)}
+              rows={3}
+              placeholder="例如：前端 http://127.0.0.1:5173，後端 :8080；測試帳號見 D:\secrets\test-account.txt（只寫檔案位置，不要寫密碼）"
+              className="w-full bg-muted border border-border rounded-md px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
+            />
+            <p className="text-xs text-muted-foreground mt-1">原樣附在驗收清單（get_verification_plan），驗收時不用每次自己摸索環境。</p>
           </div>
         </div>
 

@@ -94,6 +94,11 @@ export interface ProjectConfig {
   frontendTestCommand?: string;
   /** 後端單元測試指令（如 "mvn test"）——行為同 frontendTestCommand */
   backendTestCommand?: string;
+  /**
+   * 驗收環境說明（自由文字：服務網址、怎麼登入、測試帳號放在哪個檔案）。
+   * get_verification_plan 原樣附上，驗收者不用每次自己摸索環境。只寫位置不寫密碼本身。
+   */
+  verificationEnv?: string;
 }
 
 /** Stored plan for an agent */
