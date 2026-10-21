@@ -38,6 +38,7 @@ function stubAsana(opts: { onDetail?: boolean } = {}) {
     if (u.includes('/tasks?project=')) return ok({ data: main });
     const sub = u.match(/\/tasks\/([^/?]+)\/subtasks/);
     if (sub) return ok({ data: subs[sub[1]!] || [] });
+    if (/\/tasks\/[^/?]+\/attachments/.test(u)) return ok({ data: [{ name: '截圖1.png' }, { name: '截圖2.png' }] });
     const stories = u.match(/\/tasks\/([^/?]+)\/stories/);
     if (stories) return ok({ data: [
       { type: 'comment', text: '這張麻煩看一下', created_by: { name: 'PM' }, created_at: '2026-10-20T01:00:00Z' },
@@ -114,6 +115,8 @@ describe('browse_asana_tasks', () => {
     expect(out.task.notes).toContain('附重現步驟');
     expect(out.task.assignee).toBe('（未指派）');
     expect(out.comments).toEqual([{ author: 'PM', at: '2026-10-20T01:00:00Z', text: '這張麻煩看一下' }]);
+    expect(out.attachments).toEqual(['截圖1.png', '截圖2.png']);
+    expect(out.attachmentsHint).toContain('fetch_task_attachments(projectId=<專案 ID>, taskGid="t-none")');
     expect(taskCount()).toBe(0);
   });
 

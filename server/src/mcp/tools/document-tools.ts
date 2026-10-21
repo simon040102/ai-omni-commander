@@ -140,33 +140,42 @@ export function registerDocumentTools(server: McpServer): void {
   // ── fetch_task_attachments ───────────────────────────────────
   server.tool(
     'fetch_task_attachments',
-    '從 Asana 任務下載附件圖片。解析任務描述中的 Asana asset URL，下載圖片並存到本地供 subagent 使用。',
+    '從 Asana 任務下載附件（截圖、檔案）存到本地，下載後用 Read tool 看圖。兩種指定方式擇一：taskId＝omni 裡的任務；taskGid＝Asana 單號——**不在 omni 裡的單（別人的／未指派，用 browse_asana_tasks 查到的）用這個**。唯讀：只下載，不改 Asana 上任何東西。',
     {
-      projectId: z.string().describe('專案 ID'),
-      taskId: z.string().describe('任務 ID'),
+      projectId: z.string().describe('專案 ID（決定下載目錄）'),
+      taskId: z.string().optional().describe('omni 任務 ID（任務在 omni 裡時用）'),
+      taskGid: z.string().optional().describe('Asana task GID（任務不在 omni 裡時用，例如 browse_asana_tasks 回傳的 gid）'),
     },
     { title: 'Fetch Task Attachments', readOnlyHint: false, destructiveHint: false, openWorldHint: true },
-    async ({ projectId, taskId }) => {
+    async ({ projectId, taskId, taskGid }) => {
       const db = getMcpDb();
+      if (!taskId && !taskGid) {
+        return { content: [{ type: 'text' as const, text: 'Error: 給 taskId（omni 任務）或 taskGid（Asana 單號）其中一個。' }], isError: true };
+      }
 
-      // Get task description
-      const task = db.prepare('SELECT description, title, source_ref FROM tasks WHERE id = ?').get(taskId) as {
-        description: string | null; title: string; source_ref: string | null;
-      } | undefined;
-      if (!task) return { content: [{ type: 'text' as const, text: `Error: Task "${taskId}" not found` }], isError: true };
+      // omni 任務：描述裡的 asset 連結＋source_ref；只給 GID：直接問 Asana，不需要任務在 omni 裡
+      let description = '';
+      let asanaGid: string | null = taskGid ?? null;
+      if (taskId) {
+        const task = db.prepare('SELECT description, title, source_ref FROM tasks WHERE id = ?').get(taskId) as {
+          description: string | null; title: string; source_ref: string | null;
+        } | undefined;
+        if (!task) return { content: [{ type: 'text' as const, text: `Error: Task "${taskId}" not found` }], isError: true };
+        description = task.description || '';
+        asanaGid = asanaGid ?? task.source_ref;
+      }
 
       // Get Asana PAT
       const asanaPat = getAsanaPat(db);
       if (!asanaPat) return { content: [{ type: 'text' as const, text: 'Error: Asana PAT not configured.' }], isError: true };
 
       // Extract asset IDs from description
-      const description = task.description || '';
       const assetIds = [...description.matchAll(/get_asset\?asset_id=(\d+)/g)].map(m => m[1]!);
 
-      // Also try fetching attachments via Asana API if we have source_ref (task GID)
-      if (task.source_ref) {
+      // Also try fetching attachments via Asana API if we have the task GID
+      if (asanaGid) {
         try {
-          const attRes = await fetch(`${ASANA_API_BASE}/tasks/${task.source_ref}/attachments?opt_fields=gid,name,download_url`, {
+          const attRes = await fetch(`${ASANA_API_BASE}/tasks/${encodeURIComponent(asanaGid)}/attachments?opt_fields=gid,name,download_url`, {
             headers: { 'Authorization': `Bearer ${asanaPat}`, 'Accept': 'application/json' },
             signal: AbortSignal.timeout(ASANA_FETCH_TIMEOUT_MS),
           });
@@ -185,7 +194,7 @@ export function registerDocumentTools(server: McpServer): void {
 
       // Setup download directory
       const uploadsDir = path.join(getDataDir(), 'uploads', projectId);
-      const attachDir = path.join(uploadsDir, `attachments_${taskId.slice(0, 8)}`);
+      const attachDir = path.join(uploadsDir, taskId ? `attachments_${taskId.slice(0, 8)}` : `asana_${asanaGid!.replace(/[^0-9A-Za-z_-]/g, '_')}`);
       fs.mkdirSync(attachDir, { recursive: true });
 
       const results: string[] = [];

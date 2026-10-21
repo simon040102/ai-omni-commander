@@ -49,6 +49,12 @@ export function registerAsanaBrowseTools(server: McpServer): void {
         const comments = stories
           .filter(s => s['type'] === 'comment')
           .map(s => ({ author: (s['created_by'] as { name?: string } | null)?.name ?? null, at: s['created_at'] ?? null, text: String(s['text'] ?? '') }));
+        // 附件只列名稱（下載交給 fetch_task_attachments(taskGid)，下載後才能用 Read 看圖）；列不到不擋詳情
+        let attachments: string[] | null = null;
+        try {
+          const at = await get(`${ASANA_API_BASE}/tasks/${encodeURIComponent(taskGid)}/attachments?opt_fields=name`);
+          if (at.ok) attachments = (((await at.json()) as { data?: Array<{ name?: string }> }).data ?? []).map(a => a.name ?? '(未命名)');
+        } catch { /* 列不到就不附 */ }
         const memberships = t['memberships'] as Array<{ project?: { gid?: string } }> | undefined;
         const omniTaskId = omniIdOf(taskGid);
         return {
@@ -68,6 +74,10 @@ export function registerAsanaBrowseTools(server: McpServer): void {
                 ...(omniTaskId ? { omniTaskId } : {}),
               },
               comments,
+              ...(attachments ? {
+                attachments,
+                ...(attachments.length > 0 ? { attachmentsHint: `要看附件內容：fetch_task_attachments(projectId=<專案 ID>, taskGid="${taskGid}") 下載後用 Read 打開` } : {}),
+              } : {}),
               ...(stories.length === 0 && !st.ok ? { note: `留言讀取失敗（${st.status}）` } : {}),
             }),
           }],
