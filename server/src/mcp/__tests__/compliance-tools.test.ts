@@ -1395,6 +1395,27 @@ describe('compliance-tools', () => {
       });
     });
 
+    it('前端任務可引用專案根目錄的檔案（docs 等，原本一律被拒）；原本的證據照舊', async () => {
+      const rows = await seedChecklist([UI_ITEM, { itemType: 'logic', content: '部署後跑健康檢查', side: 'frontend' }]);
+      const projRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'omni-projroot-'));
+      try {
+        fs.mkdirSync(path.join(projRoot, 'docs'), { recursive: true });
+        fs.writeFileSync(path.join(projRoot, 'docs', 'deploy.md'), '# 部署\n跑完 deploy.sh 後打 /health\n', 'utf-8');
+        testDb.prepare('UPDATE projects SET working_dir = ? WHERE id = ?').run(projRoot, 'proj-1');
+        const result = await callTool(server, 'save_compliance_review', {
+          taskId: 'task-1',
+          results: [
+            { itemId: rows[0].id, status: 'matched', evidence: [{ file: 'src/Index.tsx', line: 1 }] },
+            { itemId: rows[1].id, status: 'matched', evidence: [{ file: 'docs/deploy.md', line: 2 }], note: '部署文件寫明健康檢查' },
+          ],
+        });
+        expect(result.isError).toBeUndefined();
+        expect(result.content[0].text).toContain('missing=0');
+      } finally {
+        fs.rmSync(projRoot, { recursive: true, force: true });
+      }
+    });
+
     it('預檢與 AI 回對的 run 都記下當時 workspace 的 git 版本（非 git → null，不猜）', async () => {
       const rows = await seedChecklist([UI_ITEM]);
       await callTool(server, 'run_spec_compliance', { taskId: 'task-1' });

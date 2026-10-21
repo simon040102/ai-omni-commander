@@ -88,6 +88,11 @@ export interface WorkspaceRoots {
    *  checklist 的 content，掃進來等於拿規格證明規格，每一項都會假 matched。
    *  交付物是規格文件的任務（architect：SA/SD 改寫維護）才需要——它的產出不在 workspace 裡。 */
   specRoots?: string[];
+  /** 證據的補充 root（另一側 workspace、專案根目錄）——**只接在原本順序的最後**，
+   *  原本解析得到的路徑結果不變；只給證據驗證用，引擎掃描不看。 */
+  extraRoots?: string[];
+  /** 證據禁區：解析結果落在這些目錄底下一律拒收（omni 的資料目錄＝計畫／裁決／附件，是規格原文的複本） */
+  excludedRoots?: string[];
 }
 
 // ── file scanning ───────────────────────────────────────────

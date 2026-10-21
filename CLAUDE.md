@@ -314,6 +314,7 @@ MCP Prompt：`start_task` — 標準任務工作流（get_execution_plan → in_
   - **驗法完全不變**：產物目錄排除、2MB 上限、`..` 逃逸防護、±10 行內容相關性一條不少；放寬的只是「哪些樹算數」。**沒有跳過驗證的旗標**，未登記規格資料夾的專案行為與修改前完全相同
   - **引擎（`run_spec_compliance`）刻意不掃 specRoots**：規格文件逐字寫著 checklist 的 content，掃進去就是拿規格證明規格（`.html` Axure 原型在掃描白名單內，真的會中）
   - `get_compliance_review_plan` 會把規格 root 列進 Workspace 段並明說「交付物是規格文件就引規格檔，不要湊 workspace 內的假證據、也不要因為引用不到就判假 missing」
+  - **補充 root（2026-10）**：另一側 workspace＋專案根目錄（`working_dir`）也可引用——前端項目引用後端遷移檔、repo 根目錄的 docs/.github/tools/shared 原本一律被拒（實測 7 張做完的任務卡在結案）。補充 root **只接在原本順序最後**（`WorkspaceRoots.extraRoots`），原本解析得到的路徑結果不變；**omni 的資料目錄（`getDataDir()`：派工計畫、裁決全文、下載的附件＝規格原文的複本）列為禁區**（`excludedRoots`），從任何 root 解析進去都拒收
   - 與上一條「不可與 workspace 重疊」不變量無關：那條是為了**不對程式碼 workspace 跑 git pull**（寫入風險），這裡只做唯讀開檔驗證，沒有改動 specFolders 的設定語意或驗證條件
 
 ## Development

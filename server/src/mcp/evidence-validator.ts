@@ -68,10 +68,14 @@ function candidateRoots(side: ChecklistSide, roots: WorkspaceRoots): string[] {
   const preferred: string[] = [];
   if (side !== 'backend' && roots.frontend) preferred.push(roots.frontend);
   if (side !== 'frontend' && roots.backend) preferred.push(roots.backend);
-  if (preferred.length > 0) return [...preferred, ...specRoots];
-  const workspaceRoots = [roots.frontend, roots.backend]
-    .filter((r): r is string => typeof r === 'string' && r.length > 0);
-  return [...workspaceRoots, ...specRoots];
+  const primary = preferred.length > 0
+    ? [...preferred, ...specRoots]
+    : [...[roots.frontend, roots.backend].filter((r): r is string => typeof r === 'string' && r.length > 0), ...specRoots];
+  // 補充 root（另一側 workspace、專案根目錄）只接在最後：原本解析得到的路徑結果不變，
+  // 只讓原本被拒的（前端項目引用後端遷移檔、repo 根目錄的 docs/.github/tools/shared）有機會找到。
+  const seen = new Set(primary.map(rootKey));
+  const extra = (roots.extraRoots ?? []).filter(r => typeof r === 'string' && r.length > 0 && !seen.has(rootKey(r)));
+  return [...primary, ...extra];
 }
 
 function isDir(p: string): boolean {
@@ -191,7 +195,15 @@ function checkResolvedFile(root: string, resolved: string): { ok: true } | { ok:
 
 /** 解析 evidence.file：相對路徑對每個 root 試（正規化防 `..` 逃出）；絕對路徑必須在某個 root 之下。
  *  rootList 由 candidateRoots 組出（workspace roots + 本專案的 specRoots）。 */
-export function resolveEvidenceFile(file: string, rootList: string[]): Resolution {
+export function resolveEvidenceFile(file: string, rootList: string[], excludedRoots: string[] = []): Resolution {
+  const res = resolveEvidenceFileInner(file, rootList);
+  if (res.ok && excludedRoots.some(ex => isInsideRoot(ex, res.resolved))) {
+    return { ok: false, reason: '證據不可引用 omni 的資料目錄（派工計畫、裁決全文、下載的附件都是規格原文的複本）——請引用實際的程式或文件' };
+  }
+  return res;
+}
+
+function resolveEvidenceFileInner(file: string, rootList: string[]): Resolution {
   if (rootList.length === 0) {
     return { ok: false, reason: '沒有可解析的 root（workspace 未設定，專案也沒有登記的規格資料夾）' };
   }
@@ -306,7 +318,7 @@ export function validateReviewEvidence(inputs: EvidenceCheckInput[], roots: Work
   for (const input of inputs) {
     const rootList = candidateRoots(input.side, roots);
     for (const ev of input.evidence) {
-      const res = resolveEvidenceFile(ev.file, rootList);
+      const res = resolveEvidenceFile(ev.file, rootList, roots.excludedRoots ?? []);
       if (!res.ok) {
         failures.push({ itemId: input.itemId, file: ev.file, line: ev.line, reason: res.reason });
         continue;

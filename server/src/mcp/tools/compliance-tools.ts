@@ -1066,8 +1066,8 @@ ${forbiddenSection}`;
       // workspace roots 依 task.label 解析（同 run_spec_compliance 的規則）——
       // 提早解析：carryForward 的證據重驗與 N1 的提交證據驗證共用。
       // root 未設定或路徑不存在 → 無法驗證（carryForward 直接拒；全量提交維持現行為並註記）。
-      const project = db.prepare('SELECT frontend_path, backend_path, config_json FROM projects WHERE id = ?').get(task.project_id) as
-        { frontend_path: string | null; backend_path: string | null; config_json: string | null } | undefined;
+      const project = db.prepare('SELECT frontend_path, backend_path, working_dir, config_json FROM projects WHERE id = ?').get(task.project_id) as
+        { frontend_path: string | null; backend_path: string | null; working_dir: string | null; config_json: string | null } | undefined;
       const roots: WorkspaceRoots = {};
       if (task.label === 'frontend') {
         if (project?.frontend_path) roots.frontend = project.frontend_path;
@@ -1084,6 +1084,11 @@ ${forbiddenSection}`;
       // 解析規則（產物目錄排除、大小上限、`..` 逃逸防護），不是放行旗標。
       const specRoots = specRootsForProject(db, task.project_id, project?.config_json);
       if (specRoots.length > 0) roots.specRoots = specRoots;
+      // 補充 root：另一側 workspace＋專案根目錄（前端項目引用後端遷移檔、repo 根目錄的 docs/.github/tools/shared）。
+      // 只接在原本順序最後，原本能解析的路徑結果不變；omni 資料目錄（計畫／裁決／附件）列為禁區。
+      roots.extraRoots = [project?.frontend_path, project?.backend_path, project?.working_dir]
+        .filter((p): p is string => typeof p === 'string' && p.length > 0 && path.isAbsolute(p) && fs.existsSync(p));
+      roots.excludedRoots = [getDataDir()];
       const hasRoots = Boolean(roots.frontend || roots.backend || specRoots.length > 0);
 
       // ── S1：增量回對（carryForward）——「上輪 matched 且本次未提交」的項目
@@ -1249,8 +1254,9 @@ ${lines.join('\n')}${noEvidence.length > 20 ? `\n（其餘 ${noEvidence.length -
           const text = `Error: ${failures.length} 筆 matched 證據未通過程式驗證，整批拒收（未寫入 run）：
 ${lines.join('\n')}${more}
 
-請引用實際包含該文字/路徑/識別字的行（如文字在 i18n 檔就引 i18n 檔、API path 引呼叫處或 handler 定義行附近）；確實找不到證據就判 missing（寧嚴勿鬆）。修正證據後重新呼叫 save_compliance_review。${specRoots.length > 0
-              ? `\n可引用的 root：${[roots.frontend, roots.backend].filter(Boolean).join('、') || '（無 workspace）'}${[roots.frontend, roots.backend].some(Boolean) ? '、' : ''}規格來源 ${specRoots.join('、')}`
+請引用實際包含該文字/路徑/識別字的行（如文字在 i18n 檔就引 i18n 檔、API path 引呼叫處或 handler 定義行附近）；確實找不到證據就判 missing（寧嚴勿鬆）。修正證據後重新呼叫 save_compliance_review。
+可引用的位置（相對路徑依序解析，也接受位於其下的絕對路徑；omni 資料目錄 ${getDataDir()} 除外）：${[...new Set([roots.frontend, roots.backend, ...specRoots, ...(roots.extraRoots ?? [])].filter(Boolean))].join('、') || '（無）'}${specRoots.length > 0
+              ? ''
               : '\n（此專案未登記規格資料夾——交付物是規格文件的任務請先用 update_project 設定 config_json.specFolders 指向規格位置，證據才引用得到）'}`;
           if (!validateOnly) return { content: [{ type: 'text' as const, text }], isError: true };
           problems.push(text);
