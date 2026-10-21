@@ -225,7 +225,7 @@ export function registerContextTools(server: McpServer): void {
         steps.push(`前置任務未完成：${incompleteDeps.map(d => `${d.title}（${d.status}）`).join('、')} → 先確認是否需等待前置任務`);
       }
       if (openGaps.length > 0) {
-        steps.push(`規格缺口 ${openGaps.length} 筆未解決 → 先與使用者確認補規格（拍板後 resolve_spec_gap(gapId, resolutionNote=具體裁決) 落地），不要對缺口部分自行編造`);
+        steps.push(`規格缺口 ${openGaps.length} 筆未解決 → 先與使用者確認補規格（拍板後 resolve_spec_gap(gapId, resolutionNote=具體裁決, scope="project" 或 "task") 落地），不要對缺口部分自行編造`);
       }
       if (resolvedGaps.length > 0) {
         steps.push(rulings.rulingsFile

@@ -640,7 +640,7 @@ describe('task-tools', () => {
       expect(text).toContain('不影響結案');
       expect(text).toContain('[field_undefined] 狀態欄位下拉選項未定義');
       expect(text).toContain('gapId=gap-1');
-      expect(text).toContain('resolve_spec_gap(gapId, resolutionNote=具體裁決)');
+      expect(text).toContain('resolve_spec_gap(gapId, resolutionNote=具體裁決, scope="project" 或 "task")');
       expect(text).not.toContain('已裁決的缺口甲乙丙');
       // 提醒不擋：任務真的 completed 了
       expect((testDb.prepare('SELECT status FROM tasks WHERE id = ?').get('task-1') as any).status).toBe('completed');

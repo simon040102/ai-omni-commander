@@ -187,7 +187,7 @@ describe('spec-gap-tools', () => {
     it('marks a gap resolved with a concrete resolutionNote and notifies', async () => {
       const gapId = await seedGap();
 
-      const result = await callTool(server, 'resolve_spec_gap', { gapId, resolutionNote: '使用者補了 SD v2：儲存改走 POST /api/wa05/save' });
+      const result = await callTool(server, 'resolve_spec_gap', { gapId, resolutionNote: '使用者補了 SD v2：儲存改走 POST /api/wa05/save', scope: 'task' });
       expect(result.isError).toBeUndefined();
       expect(result.content[0].text).toContain('裁決已落地');
 
@@ -200,6 +200,27 @@ describe('spec-gap-tools', () => {
         event: 'task.specGap',
         data: expect.objectContaining({ gapId, action: 'resolved' }),
       });
+    });
+
+    // 實測回饋：SM07 有 4 則裁決沒標全案適用，後續任務和審查員都看不到——
+    // 預設 task 加一句提醒不夠，新裁決改成必須明確選範圍（不改預設值：預設 project 會把單一任務的裁決誤套全案）
+    it('新裁決沒帶 scope → 拒收並說明怎麼判斷，缺口維持 open', async () => {
+      const gapId = await seedGap();
+      const result = await callTool(server, 'resolve_spec_gap', { gapId, resolutionNote: '選 B：刪除前跳出確認視窗' });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('scope');
+      expect(result.content[0].text).toContain('"project"');
+      expect(result.content[0].text).toContain('"task"');
+      const row = testDb.prepare('SELECT status FROM spec_gaps WHERE id = ?').get(gapId) as any;
+      expect(row.status).toBe('open');
+    });
+
+    it('修訂（revise）沒帶 scope → 沿用原本的範圍', async () => {
+      const gapId = await seedGap();
+      await callTool(server, 'resolve_spec_gap', { gapId, resolutionNote: '選 A：直接刪除不確認', scope: 'project' });
+      const r = await callTool(server, 'resolve_spec_gap', { gapId, resolutionNote: '選 B：刪除前跳出確認視窗', revise: true });
+      expect(r.isError).toBeUndefined();
+      expect((testDb.prepare('SELECT scope FROM spec_gaps WHERE id = ?').get(gapId) as any).scope).toBe('project');
     });
 
     it('rejects a missing resolutionNote（必填）and keeps the gap open', async () => {
@@ -240,7 +261,7 @@ describe('spec-gap-tools', () => {
 
     it('is idempotent for already-resolved gaps（不重驗 note）', async () => {
       const gapId = await seedGap('other', 'x');
-      await callTool(server, 'resolve_spec_gap', { gapId, resolutionNote: '選 A：直接刪除不確認' });
+      await callTool(server, 'resolve_spec_gap', { gapId, resolutionNote: '選 A：直接刪除不確認', scope: 'task' });
 
       const again = await callTool(server, 'resolve_spec_gap', { gapId, resolutionNote: '好' });
       expect(again.isError).toBeUndefined();
@@ -263,7 +284,7 @@ describe('spec-gap-tools', () => {
     describe('revise', () => {
       it('沒帶 revise 時維持原樣拒收，並告訴呼叫者有修訂這條路', async () => {
         const gapId = await seedGap('other', 'x');
-        await callTool(server, 'resolve_spec_gap', { gapId, resolutionNote: '選 A：直接刪除不確認' });
+        await callTool(server, 'resolve_spec_gap', { gapId, resolutionNote: '選 A：直接刪除不確認', scope: 'task' });
 
         const again = await callTool(server, 'resolve_spec_gap', { gapId, resolutionNote: '選 B：刪除前 confirm 彈窗' });
         expect(again.isError).toBeUndefined();
@@ -275,7 +296,7 @@ describe('spec-gap-tools', () => {
 
       it('帶 revise 時換成新裁決，且把前一版以「已被取代」保留在同一則裡', async () => {
         const gapId = await seedGap('other', 'x');
-        await callTool(server, 'resolve_spec_gap', { gapId, resolutionNote: '選 A：直接刪除不確認' });
+        await callTool(server, 'resolve_spec_gap', { gapId, resolutionNote: '選 A：直接刪除不確認', scope: 'task' });
 
         const revised = await callTool(server, 'resolve_spec_gap', {
           gapId, resolutionNote: '改判選 B：刪除前 confirm 彈窗（選 A 與共用基礎的軟刪除規則衝突）', revise: true,
@@ -292,7 +313,7 @@ describe('spec-gap-tools', () => {
 
       it('revise 的內容與現行版本相同時拒收（沒有東西可修訂）', async () => {
         const gapId = await seedGap('other', 'x');
-        await callTool(server, 'resolve_spec_gap', { gapId, resolutionNote: '選 A：直接刪除不確認' });
+        await callTool(server, 'resolve_spec_gap', { gapId, resolutionNote: '選 A：直接刪除不確認', scope: 'task' });
 
         const same = await callTool(server, 'resolve_spec_gap', { gapId, resolutionNote: '選 A：直接刪除不確認', revise: true });
         expect(same.isError).toBe(true);
@@ -300,7 +321,7 @@ describe('spec-gap-tools', () => {
 
       it('revise 仍然要過裁決品質驗證，空泛詞擋下且不動既有裁決', async () => {
         const gapId = await seedGap('other', 'x');
-        await callTool(server, 'resolve_spec_gap', { gapId, resolutionNote: '選 A：直接刪除不確認' });
+        await callTool(server, 'resolve_spec_gap', { gapId, resolutionNote: '選 A：直接刪除不確認', scope: 'task' });
 
         const vague = await callTool(server, 'resolve_spec_gap', { gapId, resolutionNote: '照舊', revise: true });
         expect(vague.isError).toBe(true);
@@ -311,7 +332,7 @@ describe('spec-gap-tools', () => {
       it('對還沒解決的缺口帶 revise 等同一般落地，不會多出「已被取代」那一段', async () => {
         const gapId = await seedGap('other', 'x');
         const result = await callTool(server, 'resolve_spec_gap', {
-          gapId, resolutionNote: '選 B：刪除前 confirm 彈窗', revise: true,
+          gapId, resolutionNote: '選 B：刪除前 confirm 彈窗', revise: true, scope: 'task', // 等同新裁決 → 一樣要選範圍
         });
         expect(result.isError).toBeUndefined();
         const note = (testDb.prepare('SELECT resolution_note FROM spec_gaps WHERE id = ?').get(gapId) as any).resolution_note as string;

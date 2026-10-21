@@ -36,7 +36,7 @@ export function registerSpecGapTools(server: McpServer): void {
   // ── report_spec_gap ───────────────────────────────────────
   server.tool(
     'report_spec_gap',
-    '回報規格缺口（SA/SD 沒定義的東西）。**遇到規格未定義、不清楚或矛盾的欄位/API/邏輯時，不要自行編造或猜測——呼叫此工具記錄，標記 [NEEDS_CLARIFICATION] 後繼續做其他部分。** 記錄會列入專案的「規格缺少/待補清單」，由使用者補規格。任務結束前應確保所有遇到的規格缺口都已回報。使用者拍板後必須用 resolve_spec_gap(gapId, resolutionNote=具體裁決) 落地——裁決只由工具從 DB 自動注入後續派工與 AI 回對，嚴禁只在對話帶過。',
+    '回報規格缺口（SA/SD 沒定義的東西）。**遇到規格未定義、不清楚或矛盾的欄位/API/邏輯時，不要自行編造或猜測——呼叫此工具記錄，標記 [NEEDS_CLARIFICATION] 後繼續做其他部分。** 記錄會列入專案的「規格缺少/待補清單」，由使用者補規格。任務結束前應確保所有遇到的規格缺口都已回報。使用者拍板後必須用 resolve_spec_gap(gapId, resolutionNote=具體裁決, scope="project" 或 "task") 落地——裁決只由工具從 DB 自動注入後續派工與 AI 回對，嚴禁只在對話帶過。',
     {
       taskId: z.string().describe('任務 ID'),
       category: z.enum(SPEC_GAP_CATEGORIES).describe('缺口分類：sa_missing=SA 文件缺失 / sd_missing=SD 文件缺失 / field_undefined=欄位未定義 / api_undefined=API 未定義 / logic_unclear=邏輯不明確或矛盾 / other=其他 / spec_changed=規格檔案已在 SVN 更新（通常由 check_spec_changes 自動建立）/ sa_sd_mismatch=SA 與 SD 規格互相矛盾（通常由 check_spec_consistency 維度一建立）/ spec_internal_conflict=**同一份規格文件自己前後矛盾**（SD 的欄位定義表 vs SQL 參考、INPUT 表 vs 格式範例、章節 vs 章節；SA 的欄位說明表 vs 畫面稿圖片…通常由 check_spec_consistency 維度二建立）。與 sa_sd_mismatch 分開的理由：後者要兩份文件才看得出來，這個純讀一份就成立，處理的人也不同 / ambiguous_spec=規格模糊或有多種合理解讀——implementer 會被迫用猜的決策點（通常由 check_spec_consistency 維度二「規格模糊點預檢」在派工前建立，開給使用者拍板；advisory，不擋工）'),
@@ -156,7 +156,7 @@ export function registerSpecGapTools(server: McpServer): void {
       resolutionNote: z.string().min(RESOLUTION_NOTE_MIN_LENGTH).describe('裁決內容（必填）：使用者拍板的具體決定，效力等同規格（例如「選 B：刪除前 confirm 彈窗」）。不可只寫「可以」「好」「照舊」等空泛詞。'),
       revise: z.boolean().optional().describe('修訂一則**已落地但發現是錯的**裁決。預設 false（已解決的缺口原樣拒收）。裁決會自動注入後續派工與 AI 回對，所以錯的裁決若沒有更正管道就會一直注入下去——這個旗標就是那個管道。前一版不會被刪掉，會以「已被取代」的形式附在新裁決之後。'),
       scope: z.enum(['task', 'project']).optional().describe(
-        '這則裁決管到誰。`task`（預設）＝只注入開這個缺口的那一支任務；'
+        '這則裁決管到誰（**新裁決必填**；修訂沒帶就沿用原本的範圍）。`task`＝只注入開這個缺口的那一支任務；'
         + '`project`＝**同專案每一支任務都注入**。\n'
         + '缺口是「誰遇到誰開」的，而裁決管的往往是別人——**定共用基礎、命名、代碼值域、'
         + '設定鍵、跨功能契約的裁決，幾乎都該是 project**。判準：「照這則做的人，會不會有'
@@ -214,7 +214,20 @@ export function registerSpecGapTools(server: McpServer): void {
         }
       }
 
-      // scope 沒帶就維持現值（修訂時不該把既有範圍悄悄改回預設）；新裁決沒帶則是 'task'
+      // 新裁決必須明確選範圍：實測預設 task＋一句提醒不夠（SM07 有 4 則漏標全案適用，後續任務與審查員都看不到）。
+      // 不改成預設 project——那會把只屬於單一任務的裁決誤套全案。修訂沒帶就沿用原本的範圍。
+      if (gap.status !== 'resolved' && scope === undefined) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: `Error: 新裁決必須明確指定 scope（這則裁決管到誰），裁決尚未落地：\n`
+              + `- scope: "project" ＝同專案每一支任務都注入。共用基礎、命名、代碼值域、設定鍵、跨功能契約的裁決幾乎都是這個\n`
+              + `- scope: "task" ＝只注入開這個缺口的那一支任務\n`
+              + `判準：「照這則做的人，會不會有別支任務的人？」會，就是 project。標錯的代價不對稱：多標只是多注入幾行；少標的話，真正要照做的那支任務看不到它，審查員會照原始規格判 missing。`,
+          }],
+          isError: true,
+        };
+      }
       const finalScope = scope ?? (gap.scope === 'project' ? 'project' : 'task');
 
       db.prepare(`

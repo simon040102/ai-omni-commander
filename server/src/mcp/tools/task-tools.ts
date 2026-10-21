@@ -867,7 +867,7 @@ ${skipHint('verify')}` });
 
 ⚠ 此任務尚有 ${openGaps.length} 筆規格缺口未裁決（提醒，不影響結案）：
 ${shown.join('\n')}${more}
-請將清單轉知使用者；使用者拍板後用 resolve_spec_gap(gapId, resolutionNote=具體裁決) 落地，裁決會自動注入後續派工與 AI 回對。`;
+請將清單轉知使用者；使用者拍板後用 resolve_spec_gap(gapId, resolutionNote=具體裁決, scope="project" 或 "task") 落地，裁決會自動注入後續派工與 AI 回對。`;
         }
       }
 
