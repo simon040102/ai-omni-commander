@@ -20,7 +20,7 @@ import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { getMcpDb } from '../db.js';
 import { notifyWebServer } from '../notify.js';
-import { ensureMcpAgent, parseJson, truncateResponse, CHARACTER_LIMIT, getDataDir } from '../helpers.js';
+import { ensureMcpAgent, parseJson, truncateResponse, CHARACTER_LIMIT, getDataDir, resolveIdPrefix, ambiguousIdMessage, MIN_ID_PREFIX } from '../helpers.js';
 import { getFlowState, getFlowsDir } from '../flow-gate.js';
 import {
   runComplianceEngine,
@@ -378,7 +378,7 @@ ${JSON.stringify(created, null, 2)}`, '（created 清單被截斷——用 get_s
     'waive_checklist_item',
     '豁免一項規格檢查表項目（不再計入 run_spec_compliance 的 missing）。**必須附理由**（例如「規格此欄位屬 Phase 2，本次不實作——使用者已確認」）。豁免會記入任務輸出紀錄供人工稽核。',
     {
-      itemId: z.string().describe('檢查表項目 ID（save_spec_checklist / get_spec_checklist 回傳的 id）'),
+      itemId: z.string().describe('檢查表項目 ID（save_spec_checklist / get_spec_checklist 回傳的 id；也接受唯一的前 8 碼以上前綴）'),
       reason: z.string().min(1).describe('豁免理由（必填，會記入任務輸出紀錄）。解除豁免（unwaive: true）時，這裡填「為什麼現在做得到了」。'),
       unwaive: z.boolean().optional().describe('解除一項**已豁免但後來做掉了**的項目。預設 false。豁免理由通常寫著「本輪不實作」，項目做完之後那句話就成了過期的事實，而過期的豁免會讓下一輪的 AI 回對把已完成的項目繼續當成不用驗。'),
       kind: z.enum(['temporary', 'permanent']).optional().describe(
@@ -391,11 +391,17 @@ ${JSON.stringify(created, null, 2)}`, '（created 清單被截斷——用 get_s
       ),
     },
     { title: 'Waive Checklist Item', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    async ({ itemId, reason, unwaive, kind }) => {
+    async ({ itemId: givenItemId, reason, unwaive, kind }) => {
       const db = getMcpDb();
       if (!reason.trim()) {
         return { content: [{ type: 'text' as const, text: 'Error: 豁免理由（reason）不可為空白。' }], isError: true };
       }
+      // 接受唯一的 8 碼前綴；之後一律用完整 ID
+      const resolvedId = resolveIdPrefix(db, 'spec_checklist_items', givenItemId);
+      if (resolvedId && 'ambiguous' in resolvedId) {
+        return { content: [{ type: 'text' as const, text: ambiguousIdMessage('itemId', givenItemId, resolvedId.ambiguous) }], isError: true };
+      }
+      const itemId = resolvedId?.id ?? givenItemId;
       const item = db.prepare('SELECT * FROM spec_checklist_items WHERE id = ?').get(itemId) as ChecklistRow | undefined;
       if (!item) {
         return { content: [{ type: 'text' as const, text: `Error: Checklist item "${itemId}" not found. 用 get_spec_checklist(taskId) 確認 itemId。` }], isError: true };
@@ -1022,7 +1028,7 @@ ${forbiddenSection}`;
       taskId: z.string().describe('任務 ID'),
       carryForward: z.boolean().optional().describe('true=增量重審模式：只提交本次 AI 重判的項目（上輪 missing、上輪回對後新增、**所有 logic 項——logic 不沿用每輪必重判**、以及重看後有疑慮的項），其餘上輪 matched 的字面項（ui_text/api/param/response_field/db_field）由工具程式重驗原證據後自動沿用。需要已存在前一輪 ai_review run；上輪 run 之後檢查表被整份取代（[CHECKLIST_REPLACE]）則拒絕。預設 false=全量提交'),
       results: z.array(z.object({
-        itemId: z.string().describe('檢查表項目 ID（get_spec_checklist 回傳的 id）'),
+        itemId: z.string().describe('檢查表項目 ID（get_spec_checklist 回傳的 id；也接受本任務內唯一的前 8 碼以上前綴）'),
         status: z.enum(['matched', 'missing']).describe('判定結果：matched=已確實實作（必附 evidence）/ missing=找不到或不確定（寧嚴勿鬆）'),
         evidence: z.array(z.object({
           file: z.string().describe('workspace 相對路徑'),
@@ -1053,6 +1059,14 @@ ${forbiddenSection}`;
         return { content: [{ type: 'text' as const, text: `Error: 此任務沒有規格檢查表——先用 save_spec_checklist(taskId="${taskId}", items=[...]) 抽取，再做 AI 回對。` }], isError: true };
       }
       const rowById = new Map(rows.map(r => [r.id, r]));
+
+      // 短 ID：只在本任務的檢查項裡比對「至少 8 碼且唯一」的前綴，換成完整 ID；
+      // 對不到或對到多筆的保持原樣，交給下面的「不屬於本任務」檢查回報
+      results = results.map(r => {
+        if (rowById.has(r.itemId) || r.itemId.length < MIN_ID_PREFIX) return r;
+        const hits = rows.filter(x => x.id.startsWith(r.itemId));
+        return hits.length === 1 ? { ...r, itemId: hits[0]!.id } : r;
+      });
 
       // 所有 itemId 必須屬於該 task
       const unknownIds = results.filter(r => !rowById.has(r.itemId)).map(r => r.itemId);

@@ -11,7 +11,7 @@ import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
 import { getMcpDb } from '../db.js';
 import { notifyWebServer } from '../notify.js';
-import { ensureMcpAgent, compactJson, fitListToLimit } from '../helpers.js';
+import { ensureMcpAgent, compactJson, fitListToLimit, resolveIdPrefix, ambiguousIdMessage } from '../helpers.js';
 import { validateResolutionNote, RESOLUTION_NOTE_MIN_LENGTH } from '../../utils/specGapResolution.js';
 
 export const SPEC_GAP_CATEGORIES = ['sa_missing', 'sd_missing', 'field_undefined', 'api_undefined', 'logic_unclear', 'other', 'spec_changed', 'sa_sd_mismatch', 'spec_internal_conflict', 'ambiguous_spec'] as const;
@@ -152,7 +152,7 @@ export function registerSpecGapTools(server: McpServer): void {
     'resolve_spec_gap',
     '標記規格缺口為已解決並**落地使用者的裁決**（使用者拍板後必須立刻呼叫——這是裁決唯一生效管道）。裁決效力等同規格：resolutionNote 會自動注入後續派工 prompt、resume_task 與 AI 回對計畫，寫得含糊等於規格含糊。**嚴禁只把答案手動寫進派工 prompt 或在對話帶過**——不落地 = implementer 與 reviewer 看不到。',
     {
-      gapId: z.string().describe('缺口 ID（report_spec_gap 回傳的 id）'),
+      gapId: z.string().describe('缺口 ID（report_spec_gap 回傳的 id；也接受唯一的前 8 碼以上前綴）'),
       resolutionNote: z.string().min(RESOLUTION_NOTE_MIN_LENGTH).describe('裁決內容（必填）：使用者拍板的具體決定，效力等同規格（例如「選 B：刪除前 confirm 彈窗」）。不可只寫「可以」「好」「照舊」等空泛詞。'),
       revise: z.boolean().optional().describe('修訂一則**已落地但發現是錯的**裁決。預設 false（已解決的缺口原樣拒收）。裁決會自動注入後續派工與 AI 回對，所以錯的裁決若沒有更正管道就會一直注入下去——這個旗標就是那個管道。前一版不會被刪掉，會以「已被取代」的形式附在新裁決之後。'),
       scope: z.enum(['task', 'project']).optional().describe(
@@ -166,9 +166,15 @@ export function registerSpecGapTools(server: McpServer): void {
       ),
     },
     { title: 'Resolve Spec Gap', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    async ({ gapId, resolutionNote, revise, scope }) => {
+    async ({ gapId: givenGapId, resolutionNote, revise, scope }) => {
       const db = getMcpDb();
 
+      // 接受唯一的 8 碼前綴；之後一律用完整 ID（更新、稽核、通知都靠它）
+      const resolvedId = resolveIdPrefix(db, 'spec_gaps', givenGapId);
+      if (resolvedId && 'ambiguous' in resolvedId) {
+        return { content: [{ type: 'text' as const, text: ambiguousIdMessage('gapId', givenGapId, resolvedId.ambiguous) }], isError: true };
+      }
+      const gapId = resolvedId?.id ?? givenGapId;
       const gap = db.prepare('SELECT * FROM spec_gaps WHERE id = ?').get(gapId) as SpecGapRow | undefined;
       if (!gap) {
         return { content: [{ type: 'text' as const, text: `Error: Spec gap "${gapId}" not found. 用 list_spec_gaps 確認 gapId。` }], isError: true };

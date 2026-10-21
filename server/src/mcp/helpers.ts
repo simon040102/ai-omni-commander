@@ -126,6 +126,36 @@ export function maskProjectConfig<T>(config: T): T {
 
 export const CHARACTER_LIMIT = 25000;
 
+/** 短 ID 最少幾碼（UUID 前 8 碼即第一段） */
+export const MIN_ID_PREFIX = 8;
+const ID_PREFIX_TABLES = new Set(['tasks', 'spec_gaps', 'spec_checklist_items']);
+
+/**
+ * 完整 ID 或「至少 8 碼且唯一」的前綴 → 完整 ID。agent 回報常只寫前 8 碼，實測得自己讀 DB 查。
+ * 多筆符合回 ambiguous（列候選，不猜）；找不到或少於 8 碼回 null。
+ * 用 substr 比對而不是 LIKE——前綴裡的 % 或 _ 不會被當成萬用字元。
+ */
+export function resolveIdPrefix(
+  db: Database.Database,
+  table: 'tasks' | 'spec_gaps' | 'spec_checklist_items',
+  id: string,
+): { id: string } | { ambiguous: string[] } | null {
+  if (!ID_PREFIX_TABLES.has(table)) throw new Error(`resolveIdPrefix: table not allowed: ${table}`);
+  const exact = db.prepare(`SELECT id FROM ${table} WHERE id = ?`).get(id) as { id: string } | undefined;
+  if (exact) return { id: exact.id };
+  const prefix = id.trim();
+  if (prefix.length < MIN_ID_PREFIX) return null;
+  const rows = db.prepare(`SELECT id FROM ${table} WHERE substr(id, 1, ?) = ? ORDER BY id LIMIT 6`).all(prefix.length, prefix) as Array<{ id: string }>;
+  if (rows.length === 0) return null;
+  if (rows.length === 1) return { id: rows[0]!.id };
+  return { ambiguous: rows.map(r => r.id) };
+}
+
+/** resolveIdPrefix 的歧義訊息 */
+export function ambiguousIdMessage(kind: string, given: string, candidates: string[]): string {
+  return `Error: ${kind}「${given}」對到多筆，請給完整 ID 或更長的前綴：\n${candidates.map(c => `- ${c}`).join('\n')}${candidates.length >= 6 ? '\n…（可能還有更多）' : ''}`;
+}
+
 /** Truncate an oversized tool response, appending a truncation notice. */
 export function truncateResponse(text: string, note?: string): string {
   if (text.length <= CHARACTER_LIMIT) return text;
