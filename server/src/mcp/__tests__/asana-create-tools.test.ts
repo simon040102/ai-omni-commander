@@ -22,7 +22,7 @@ const REL_URL = 'https://app.asana.com/0/pg-1/rel-1';
 
 interface Call { method: string; url: string; body: unknown }
 
-function stubAsana(opts: { failAttachment?: boolean; failStory?: boolean; failCreate?: boolean } = {}) {
+function stubAsana(opts: { failAttachment?: boolean; failStory?: boolean; failCreate?: boolean; failAddToSection?: boolean } = {}) {
   const calls: Call[] = [];
   vi.stubGlobal('fetch', vi.fn(async (url: unknown, init?: { method?: string; body?: unknown }) => {
     const u = String(url);
@@ -42,11 +42,19 @@ function stubAsana(opts: { failAttachment?: boolean; failStory?: boolean; failCr
     ] });
     if (method === 'GET' && /\/tasks\/rel-1\?/.test(u)) return ok({ data: { gid: 'rel-1', name: '原單', permalink_url: REL_URL } });
     if (method === 'POST' && u.endsWith('/tasks')) {
+      // 照真 Asana 的規則：沒有 workspace／parent／projects 其中之一就 400（memberships 不算）
+      const d = (body as { data: Record<string, unknown> }).data;
+      if (!d['workspace'] && !d['parent'] && !(Array.isArray(d['projects']) && d['projects'].length > 0)) {
+        return bad(400, '{"errors":[{"message":"You should specify one of workspace, parent, projects"}]}');
+      }
       if (opts.failCreate) return bad(400, '{"errors":[{"message":"custom_fields: Invalid field"}]}');
       return ok({ data: { gid: 'new-1', permalink_url: NEW_URL, name: 'x' } });
     }
     if (method === 'POST' && /\/tasks\/new-1\/attachments$/.test(u)) {
       return opts.failAttachment ? bad(500, 'upload broke') : ok({ data: { gid: 'att-1', name: 'shot.png', permanent_url: 'https://asana/att-1' } });
+    }
+    if (method === 'POST' && /\/sections\/[^/]+\/addTask$/.test(u)) {
+      return opts.failAddToSection ? bad(404, 'section not found') : ok({ data: {} });
     }
     if (method === 'POST' && /\/tasks\/rel-1\/stories$/.test(u)) {
       return opts.failStory ? bad(403, 'forbidden') : ok({ data: { gid: 'story-1' } });
@@ -162,16 +170,55 @@ describe('create_asana_task', () => {
     expect(data['memberships']).toBeUndefined();
   });
 
-  it('一般任務：帶分區 → 用 memberships 放進該分區；欄位以 GID 送出；不帶指派就不指派', async () => {
+  it('有分區、無 parent（實際踩到的 400）：建立帶 projects，建好後 addTask 進該分區；欄位以 GID 送出；不帶指派就不指派', async () => {
     const calls = stubAsana();
-    const r = await send({ section: '公文', customFields: { 問題單號: 'ODAS-120', 處理狀態: '處理中' } });
+    const r = await send({ section: '公文', relatedTaskGid: 'rel-1', customFields: { 問題單號: 'ODAS-120', 處理狀態: '處理中' } });
     expect(r.isError).toBeUndefined();
-    const data = (writes(calls).find(c => c.url.endsWith('/tasks'))!.body as { data: Record<string, unknown> }).data;
-    expect(data['memberships']).toEqual([{ project: 'pg-1', section: 's-doc' }]);
+    const ws = writes(calls);
+    const data = (ws.find(c => c.url.endsWith('/tasks'))!.body as { data: Record<string, unknown> }).data;
+    expect(data['projects']).toEqual(['pg-1']);
+    expect(data['memberships']).toBeUndefined();
     expect(data['custom_fields']).toEqual({ 'cf-no': 'ODAS-120', 'cf-st': 'opt-doing' });
     expect(data['assignee']).toBeUndefined();
+    const add = ws.find(c => c.url.endsWith('/sections/s-doc/addTask'))!;
+    expect((add.body as { data: { task: string } }).data.task).toBe('new-1');
+    // 順序：建立 → 放分區 → 原單留言
+    expect(ws.map(c => c.url.replace(/.*api\/1\.0/, ''))).toEqual(['/tasks', '/sections/s-doc/addTask', '/tasks/rel-1/stories']);
     const out = JSON.parse(r.content[0].text);
     expect(out).toMatchObject({ ok: true, gid: 'new-1', permalinkUrl: NEW_URL, section: '公文' });
+    expect(out.steps.addToSection).toMatchObject({ ok: true, sectionGid: 's-doc' });
+  });
+
+  it('沒有分區、沒有 parent → 建立帶 projects，不呼叫 addTask', async () => {
+    const calls = stubAsana();
+    const r = await send({});
+    expect(r.isError).toBeUndefined();
+    const data = (writes(calls).find(c => c.url.endsWith('/tasks'))!.body as { data: Record<string, unknown> }).data;
+    expect(data['projects']).toEqual(['pg-1']);
+    expect(writes(calls).some(c => c.url.includes('/addTask'))).toBe(false);
+  });
+
+  it('subtask＋分區 → 建立帶 parent 與 projects，再 addTask 進分區', async () => {
+    const calls = stubAsana();
+    const r = await send({ parentTaskGid: 'parent-1', section: '公文' });
+    expect(r.isError).toBeUndefined();
+    const data = (writes(calls).find(c => c.url.endsWith('/tasks'))!.body as { data: Record<string, unknown> }).data;
+    expect(data['parent']).toBe('parent-1');
+    expect(data['projects']).toEqual(['pg-1']);
+    expect(writes(calls).some(c => c.url.endsWith('/sections/s-doc/addTask'))).toBe(true);
+  });
+
+  it('放進分區失敗 → 部分成功：單已建立（帶 projects 所以在專案裡），列出分區這一步失敗', async () => {
+    stubAsana({ failAddToSection: true });
+    const r = await send({ section: '公文' });
+    expect(r.isError).toBe(true);
+    const text = r.content[0].text;
+    expect(text).toContain('部分成功');
+    expect(text).toContain('放進分區');
+    const out = JSON.parse(text.slice(text.indexOf('{')));
+    expect(out.steps.createTask.ok).toBe(true);
+    expect(out.steps.addToSection).toMatchObject({ ok: false, sectionGid: 's-doc' });
+    expect(out.steps.addToSection.error).toContain('404');
   });
 
   it('relatedTaskGid：新單描述附「原單：URL」、原單留言「已另開單：新單 URL」，回應標明已留言', async () => {

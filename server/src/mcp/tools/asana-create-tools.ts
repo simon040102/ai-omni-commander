@@ -208,9 +208,10 @@ export function registerAsanaCreateTools(server: McpServer): void {
       const noteFields = buildNotes(notes, htmlNotes, relatedUrl);
       const body: Record<string, unknown> = { name, ...noteFields };
       if (parentTaskGid) body['parent'] = parentTaskGid;
-      // 一般任務一定放進專案；subtask 只有指定分區時才加進專案（Asana 預設 subtask 不屬於專案）
-      if (resolvedSection) body['memberships'] = [{ project: projectGid, section: resolvedSection.gid }];
-      else if (!parentTaskGid) body['projects'] = [projectGid];
+      // Asana 建立時必須帶 workspace／parent／projects 其一——只帶 memberships 會 400（實際踩過）。
+      // 一般任務一律帶 projects；subtask 只有指定分區時才加進專案（Asana 預設 subtask 不屬於專案）。
+      // 分區不在建立時指定，建好後走文件明載的 POST /sections/{gid}/addTask。
+      if (!parentTaskGid || resolvedSection) body['projects'] = [projectGid];
       if (assigneeGid) body['assignee'] = assigneeGid;
       if (fields.length > 0) body['custom_fields'] = Object.fromEntries(fields.map(f => [f.gid, f.value]));
 
@@ -251,6 +252,16 @@ export function registerAsanaCreateTools(server: McpServer): void {
       const gid = String(created['gid'] ?? '');
       const permalinkUrl = (created['permalink_url'] as string | undefined) ?? null;
 
+      let sectionStep: { ok: boolean; sectionGid: string; section: string; error?: string } | null = null;
+      if (resolvedSection) {
+        try {
+          await post(`${ASANA_API_BASE}/sections/${encodeURIComponent(resolvedSection.gid)}/addTask`, { task: gid });
+          sectionStep = { ok: true, sectionGid: resolvedSection.gid, section: resolvedSection.name };
+        } catch (e: unknown) {
+          sectionStep = { ok: false, sectionGid: resolvedSection.gid, section: resolvedSection.name, error: e instanceof Error ? e.message : String(e) };
+        }
+      }
+
       const attachmentSteps: Array<{ path: string; ok: boolean; gid?: string | null; error?: string }> = [];
       for (const p of files) {
         try {
@@ -280,7 +291,7 @@ export function registerAsanaCreateTools(server: McpServer): void {
         } catch { /* best-effort */ }
       }
 
-      const failed = [...attachmentSteps.filter(s => !s.ok).map(s => `附件 ${path.basename(s.path)}`), ...(relatedStep && !relatedStep.ok ? ['原單留言'] : [])];
+      const failed = [...(sectionStep && !sectionStep.ok ? [`放進分區「${sectionStep.section}」`] : []), ...attachmentSteps.filter(s => !s.ok).map(s => `附件 ${path.basename(s.path)}`), ...(relatedStep && !relatedStep.ok ? ['原單留言'] : [])];
       const omniTask = (relatedTaskGid || parentTaskGid)
         ? db.prepare("SELECT id, project_id FROM tasks WHERE source = 'asana' AND source_ref IN (?, ?) ORDER BY source_ref = ? DESC LIMIT 1")
             .get(relatedTaskGid ?? '', parentTaskGid ?? '', relatedTaskGid ?? '') as { id: string; project_id: string } | undefined
@@ -293,7 +304,7 @@ export function registerAsanaCreateTools(server: McpServer): void {
         attachments: attachmentSteps, relatedComment: relatedStep, approvalNote: approvalNote?.trim() || null, notes: preview500,
       }, omniTask,
         `[ASANA_CREATE_TASK] 已在 Asana 建立任務 ${gid}：${name}\n網址：${permalinkUrl ?? '(無)'}\n使用者同意：${approvalNote?.trim() || '(未填 approvalNote)'}`
-        + (resolvedSection ? `\n分區：${resolvedSection.name}` : '')
+        + (sectionStep ? `\n分區：${sectionStep.section}（${sectionStep.ok ? '已放入' : '放入失敗'}）` : '')
         + (fields.length > 0 ? `\n欄位：${fields.map(f => `${f.name}=${f.display}`).join('、')}` : '')
         + (files.length > 0 ? `\n附件：${attachmentSteps.map(s => `${path.basename(s.path)}(${s.ok ? 'ok' : '失敗'})`).join('、')}` : '')
         + (relatedStep ? `\n原單留言：${relatedStep.ok ? '已留言' : '失敗'}` : '')
@@ -305,13 +316,13 @@ export function registerAsanaCreateTools(server: McpServer): void {
         gid, permalinkUrl,
         section: resolvedSection?.name ?? null,
         relatedCommented: relatedStep ? relatedStep.ok : null,
-        steps: { createTask: { ok: true, gid, permalinkUrl }, attachments: attachmentSteps, relatedComment: relatedStep },
+        steps: { createTask: { ok: true, gid, permalinkUrl }, addToSection: sectionStep, attachments: attachmentSteps, relatedComment: relatedStep },
         ...(syncHint ? { syncHint } : {}),
         audited: omniTask ? `稽核檔＋omni 任務 ${omniTask.id} 的紀錄` : '稽核檔',
       };
       if (failed.length > 0) {
         return { content: [{ type: 'text' as const, text:
-          `⚠ 部分成功：任務已建立（${permalinkUrl ?? gid}），但以下步驟失敗：${failed.join('、')}。**不要重送整支工具**（會重複開單）——失敗的附件改用 upload_asana_attachment(taskGid="${gid}") 補傳、原單留言改用 add_asana_comment 補留（都要再經使用者同意）。\n`
+          `⚠ 部分成功：任務已建立（${permalinkUrl ?? gid}），但以下步驟失敗：${failed.join('、')}。**不要重送整支工具**（會重複開單）——分區沒放進去請在 Asana 手動拖進該分區（單已在專案裡）、失敗的附件改用 upload_asana_attachment(taskGid="${gid}") 補傳、原單留言改用 add_asana_comment 補留（都要再經使用者同意）。\n`
           + JSON.stringify(result, null, 2) }], isError: true };
       }
       return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
