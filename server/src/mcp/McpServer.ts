@@ -19,6 +19,7 @@ import { registerComplianceTools } from './tools/compliance-tools.js';
 import { registerConsistencyTools } from './tools/consistency-tools.js';
 import { registerClassificationTools } from './tools/classification-tools.js';
 import { registerAsanaBrowseTools } from './tools/asana-browse-tools.js';
+import { registerAsanaCreateTools } from './tools/asana-create-tools.js';
 import { registerPrompts } from './prompts.js';
 
 export function createOmniMcpServer(): McpServer {
@@ -44,7 +45,8 @@ export function createOmniMcpServer(): McpServer {
 4. **脈絡恢復與經驗累積**：接手先前開過的舊任務，第一步先 resume_task(taskId) 恢復脈絡；開發中發現此專案特有的坑／慣例（規格沒寫但必須遵守的），用 save_project_note 記錄讓後續任務受益。
 5. **執行中持續回報**：每完成主要步驟用 report_output，關鍵節點用 report_milestone。讀完規格先用 save_spec_checklist 抽取檢查表；完成前用 get_verification_plan 取得驗收清單，逐項執行並用 report_verification_result 回報。規格回對分兩步：先跑 run_spec_compliance 做程式預檢（抓文字/路徑錯字，不解鎖閘門），再由 orchestrator 派**獨立 agent** 做 AI 規格回對（get_compliance_review_plan → save_compliance_review），最新 AI 回對 missing=0 才可標 completed。專案有設單元測試指令（frontendTestCommand/backendTestCommand）時，「單元測試全數通過」驗收項回報 passed=true 也是完成閘門之一——既有測試不是全綠，先用 get_test_baseline_plan 修測試基線。
 6. **結束必須回報狀態**：成功 update_task_status(taskId, "completed", summary)；失敗必標 update_task_status(taskId, "failed", summary)。不回報任務會永遠卡在 in_progress。
-7. **典型流程**：get_execution_plan → update_task_status(in_progress) → 執行（規格用工具取）→ report_output/report_milestone → get_verification_plan + report_verification_result → update_task_status(completed)。
+7. **寫入 Asana（客戶看得到）**：add_asana_comment／upload_asana_attachment／create_asana_task 送出前，必須先把全文（留言、附件、建單的標題／描述／分區／指派／欄位／原單留言）給使用者看過並取得明確同意，才帶 userApproved=true；附圖要先自己用 Read 看過。建單先用 create_asana_task(dryRun=true) 取預覽給使用者看。
+8. **典型流程**：get_execution_plan → update_task_status(in_progress) → 執行（規格用工具取）→ report_output/report_milestone → get_verification_plan + report_verification_result → update_task_status(completed)。
 
 （也可直接使用 start_task prompt 取得完整工作流指示。）`,
     },
@@ -67,6 +69,7 @@ export function createOmniMcpServer(): McpServer {
   registerConsistencyTools(server);
   registerClassificationTools(server);
   registerAsanaBrowseTools(server);
+  registerAsanaCreateTools(server);
 
   // Register prompts (start_task workflow)
   registerPrompts(server);

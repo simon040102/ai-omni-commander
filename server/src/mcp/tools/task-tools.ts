@@ -18,7 +18,8 @@ import {
 import { parseJson, getAsanaPat, ASANA_API_BASE, ASANA_FETCH_TIMEOUT_MS, fitListToLimit, getDataDir } from '../helpers.js';
 import { detectLabel, detectTaskType } from '../../utils/taskClassification.js';
 import { normalizeDueDate, localTodayYmd, isOverdue } from '../../utils/dueDate.js';
-import { readImageSize, mimeTypeForImage, type ImageSize } from '../../utils/imageSize.js';
+import type { ImageSize } from '../../utils/imageSize.js';
+import { uploadAsanaFile, checkUploadableFile } from '../asana-upload.js';
 import { fetchAsanaProjectTasks } from '../asana-project-fetch.js';
 import { runSpecChangeCheck, type SpecChangeTarget } from '../spec-change.js';
 import { parseTestCommands, getRequiredUnitTestItems, findLatestUnitTestVerification, listVerificationEntries, getVerificationItems, listReportedVerificationItems, unitTestItemText, UNRELATED_TEST_FAILURE_RULE, TEST_SCOPE_NOTE_RULE } from './verification-tools.js';
@@ -66,10 +67,6 @@ function recordGateBlock(db: Database.Database, taskId: string, projectId: strin
   if (!recent) logTaskOutput(db, taskId, projectId, line);
 }
 
-/** Asana 附件上限（官方 100MB） */
-const ASANA_ATTACHMENT_MAX_BYTES = 100 * 1024 * 1024;
-/** 上傳比一般 API 慢，另給較長的 timeout */
-const ASANA_UPLOAD_TIMEOUT_MS = 120_000;
 /** 上傳後等 Asana 非同步算完圖片 metadata（官方建議 1~5 秒，取中間值） */
 const ASANA_METADATA_DELAY_MS = 2_000;
 
@@ -1040,44 +1037,7 @@ ${missing.map(i => `- ${i.id}：${i.item}`).join('\n')}
     },
   );
 
-  // ── Asana 寫入方向的共用 helper ───────────────────────────
-
-  /**
-   * 上傳單一檔案為 Asana 任務附件。parent 只能是 task/project/project_brief
-   * （API 限制，不能掛在 story 上——連網頁版 Ctrl+V 貼進留言的圖也是任務附件）。
-   * 走 POST /tasks/{gid}/attachments，file part 帶正確 MIME type（缺 type 會讓
-   * Asana 算不出圖片 metadata）。回傳的 size 用於 inline 圖的 data-src-* 屬性。
-   */
-  async function uploadAsanaFile(asanaPat: string, taskGid: string, filePath: string): Promise<{
-    gid: string | null; name: string; permanentUrl: string | null; bytes: number; size: ImageSize | null;
-  }> {
-    const stat = fs.statSync(filePath);
-    const filename = path.basename(filePath);
-    const bytes = fs.readFileSync(filePath);
-
-    const form = new FormData();
-    form.append('file', new Blob([bytes], { type: mimeTypeForImage(filename) }), filename);
-
-    // 不手動設 Content-Type — 讓 fetch 自己帶 multipart boundary
-    const res = await fetch(`${ASANA_API_BASE}/tasks/${taskGid}/attachments`, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${asanaPat}`, 'Accept': 'application/json' },
-      body: form,
-      signal: AbortSignal.timeout(ASANA_UPLOAD_TIMEOUT_MS),
-    });
-    if (!res.ok) {
-      const hint = res.status === 403 ? '（403 通常代表 PAT 沒有該任務的寫入權限）' : '';
-      throw new Error(`upload failed for ${filename}: ${res.status} ${await res.text()}${hint}`);
-    }
-    const data = await res.json() as { data?: { gid?: string; name?: string; permanent_url?: string } };
-    return {
-      gid: data.data?.gid ?? null,
-      name: data.data?.name ?? filename,
-      permanentUrl: data.data?.permanent_url ?? null,
-      bytes: stat.size,
-      size: readImageSize(bytes),
-    };
-  }
+  // ── Asana 寫入方向的共用 helper（上傳本體在 ../asana-upload.ts）───
 
   /**
    * 組 inline 圖片的 <img>。屬性照網頁版原生 Ctrl+V 產生的 markup 對齊：
@@ -1091,15 +1051,6 @@ ${missing.map(i => `- ${i.id}：${i.item}`).join('\n')}
     return `<img data-asana-gid="${gid}" data-asana-type="attachment"${dims}`
       + ` alt="${escapeHtml(name)}"`
       + ` style="display:block;max-width:100%;margin-left:auto;margin-right:auto" />`;
-  }
-
-  /** 檔案前置檢查（存在、是檔案、未超過上限）。回傳錯誤訊息，通過則回 null。 */
-  function checkUploadableFile(filePath: string): string | null {
-    if (!fs.existsSync(filePath)) return `File not found: ${filePath}`;
-    const stat = fs.statSync(filePath);
-    if (!stat.isFile()) return `Not a file: ${filePath}`;
-    if (stat.size > ASANA_ATTACHMENT_MAX_BYTES) return `File too large (${stat.size} bytes): ${filePath}。Asana 附件上限 100MB。`;
-    return null;
   }
 
   const escapeHtml = (s: string): string =>
