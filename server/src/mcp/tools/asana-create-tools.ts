@@ -104,11 +104,14 @@ export function buildNotes(notes: string, htmlNotes: string | undefined, related
   return { notes: relatedUrl ? `${notes}\n\n原單：${relatedUrl}` : notes };
 }
 
-/** 稽核：任何建立都寫專案層稽核檔（新單不在 omni 裡，沒有任務可掛）；原單／母單在 omni 裡時另寫任務紀錄。 */
-function writeAudit(db: Database.Database, entry: Record<string, unknown>, omniTask: { id: string; project_id: string } | undefined, line: string): void {
+/**
+ * Asana 寫入稽核：一律寫 data/audit/<file>（新單不在 omni 裡、沒有任務可掛，也要查得到）；
+ * 對應的 omni 任務存在時另寫任務紀錄（人在任務頁面上看得到）。
+ */
+export function writeAsanaAudit(db: Database.Database, file: string, entry: Record<string, unknown>, omniTask: { id: string; project_id: string } | undefined, line: string): void {
   const dir = path.join(getDataDir(), 'audit');
   fs.mkdirSync(dir, { recursive: true });
-  fs.appendFileSync(path.join(dir, 'asana-create-task.jsonl'), JSON.stringify({ at: new Date().toISOString(), ...entry }) + '\n', 'utf8');
+  fs.appendFileSync(path.join(dir, file), JSON.stringify({ at: new Date().toISOString(), ...entry }) + '\n', 'utf8');
   if (omniTask) logTaskOutput(db, omniTask.id, omniTask.project_id, line);
 }
 
@@ -297,7 +300,7 @@ export function registerAsanaCreateTools(server: McpServer): void {
             .get(relatedTaskGid ?? '', parentTaskGid ?? '', relatedTaskGid ?? '') as { id: string; project_id: string } | undefined
         : undefined;
       const preview500 = notes.length > 500 ? `${notes.slice(0, 500)}…（共 ${notes.length} 字）` : notes;
-      writeAudit(db, {
+      writeAsanaAudit(db, 'asana-create-task.jsonl', {
         projectId, gid, permalinkUrl, name, section: resolvedSection?.name ?? null, parentTaskGid: parentTaskGid ?? null,
         relatedTaskGid: relatedTaskGid ?? null, assigneeGid: assigneeGid ?? null,
         customFields: fields.map(f => ({ name: f.name, display: f.display })),
