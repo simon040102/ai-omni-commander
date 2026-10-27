@@ -22,6 +22,7 @@ import { registerAsanaBrowseTools } from './tools/asana-browse-tools.js';
 import { registerAsanaCreateTools } from './tools/asana-create-tools.js';
 import { registerAsanaStatusTools } from './tools/asana-status-tools.js';
 import { registerPrompts } from './prompts.js';
+import { installTaskIdPrefixResolution } from './task-id-prefix.js';
 
 export function createOmniMcpServer(): McpServer {
   const server = new McpServer(
@@ -49,9 +50,14 @@ export function createOmniMcpServer(): McpServer {
 7. **寫入 Asana（客戶看得到）**：add_asana_comment／upload_asana_attachment／create_asana_task／update_asana_task_status 送出前，必須先把全文（留言、附件、建單的標題／描述／分區／指派／欄位／原單留言、改狀態的「哪張單從什麼改成什麼」）給使用者看過並取得明確同意，才帶 userApproved=true；附圖要先自己用 Read 看過。建單與改狀態先用 dryRun=true 取預覽給使用者看。
 8. **典型流程**：get_execution_plan → update_task_status(in_progress) → 執行（規格用工具取）→ report_output/report_milestone → get_verification_plan + report_verification_result → update_task_status(completed)。
 
-（也可直接使用 start_task prompt 取得完整工作流指示。）`,
+（也可直接使用 start_task prompt 取得完整工作流指示。）
+
+任務 ID（taskId／dependsOnTaskId／coveredBy）、缺口 ID、檢查表項目 ID 都可以只給唯一的前 8 碼以上；對到多筆會回錯並列出候選。`,
     },
   );
+
+  // 任務 ID 短碼：必須在任何工具註冊之前裝上（只包之後註冊的工具）
+  installTaskIdPrefixResolution(server);
 
   // Register all tool groups
   registerTaskTools(server);
