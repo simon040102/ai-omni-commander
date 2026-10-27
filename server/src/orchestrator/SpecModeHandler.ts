@@ -3,8 +3,8 @@ import { DocumentParser, type ParsedDocument } from '../documents/DocumentParser
 import { getProject } from '../db/queries/projects.js';
 import { getTask } from '../db/queries/tasks.js';
 import { getDb } from '../db/connection.js';
-import { getConfig } from '../config.js';
 import { createChildLogger } from '../utils/logger.js';
+import { defaultUploadDir } from './executionPlanService.js';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 
@@ -24,10 +24,7 @@ export class SpecModeHandler {
   private documentParser: DocumentParser;
 
   constructor() {
-    const config = getConfig();
-    this.documentParser = new DocumentParser(
-      path.join(config.projectRoot, 'data', 'uploads'),
-    );
+    this.documentParser = new DocumentParser(defaultUploadDir());
   }
 
   /** Upload a document for a project, optionally scoped to a task subfolder */

@@ -15,6 +15,11 @@ vi.mock('../notify.js', () => ({
   notifyWebServer: vi.fn().mockResolvedValue(true),
 }));
 
+// 執行計畫改在 MCP process 內組（原本 HTTP 呼叫 Web Server）——測試直接替換組計畫的函式
+vi.mock('../execution-plan-inprocess.js', () => ({
+  buildExecutionPlanInProcess: vi.fn(),
+}));
+
 vi.mock('../svn-status.js', () => ({
   getSvnCredentials: vi.fn().mockReturnValue({ username: 'user', password: 'pass' }),
   isSvnCliAvailable: vi.fn().mockReturnValue(true),
@@ -25,6 +30,14 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { registerTaskTools } from '../tools/task-tools.js';
 import { registerVerificationTools, UNRELATED_TEST_FAILURE_RULE, TEST_SCOPE_NOTE_RULE } from '../tools/verification-tools.js';
 import { isSvnCliAvailable, fetchRemoteLastModified } from '../svn-status.js';
+import { buildExecutionPlanInProcess } from '../execution-plan-inprocess.js';
+
+/** 讓 get_execution_plan 拿到這份計畫（取代原本假的 Web Server 回應） */
+function stubPlanResult(prompt: string, extra: Partial<{ workingDir: string; frontendPath: string | null; backendPath: string | null }> = {}) {
+  vi.mocked(buildExecutionPlanInProcess).mockResolvedValue({
+    prompt, workingDir: '/tmp/project', model: 'sonnet', frontendPath: '/tmp/project/web', backendPath: '/tmp/project/server', ...extra,
+  });
+}
 import { callTool } from './test-helpers.js';
 
 function freshDb(): Database.Database {
@@ -249,14 +262,30 @@ describe('task-tools', () => {
       expect(result.isError).toBe(true);
     });
 
-    it('returns error when task not in web server DB', async () => {
+    it('組計畫失敗 → 回錯誤帶原因，且不啟用流程圖閘門、不判軌留痕（失敗不能留下半套狀態）', async () => {
       seedProject(testDb);
       seedTask(testDb);
+      vi.mocked(buildExecutionPlanInProcess).mockRejectedValueOnce(new Error('SVN 連不上'));
 
-      // task-1 exists in test in-memory DB but not in the web server's DB
-      // So either we get a 404 (server running) or connection error (server not running)
       const result = await callTool(server, 'get_execution_plan', { taskId: 'task-1' });
       expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('組執行計畫失敗');
+      expect(result.content[0].text).toContain('SVN 連不上');
+      const row = testDb.prepare('SELECT flow_required, flow_state FROM tasks WHERE id = ?').get('task-1') as { flow_required: number | null; flow_state: string | null };
+      expect(row.flow_required ?? 0).toBe(0);
+      expect(row.flow_state).toBeNull();
+    });
+
+    it('不再依賴 Web Server：組計畫不打任何 HTTP（同 process 組）', async () => {
+      seedProject(testDb);
+      seedTask(testDb);
+      stubPlanResult('PLAN BODY');
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+      const result = await callTool(server, 'get_execution_plan', { taskId: 'task-1', role: 'backend' });
+      expect(result.isError).toBeUndefined();
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(vi.mocked(buildExecutionPlanInProcess)).toHaveBeenCalledWith('task-1', 'backend', 'full');
+      fetchSpy.mockRestore();
     });
   });
 
@@ -267,12 +296,7 @@ describe('task-tools', () => {
     let prevDbPath: string | undefined;
     const BIG = Array.from({ length: 1500 }, (_, i) => `第 ${i + 1} 行：規格與規範內容，必須逐字保留。`).join('\n');
 
-    function stubPlan(prompt: string) {
-      vi.stubGlobal('fetch', vi.fn(async () => ({
-        ok: true,
-        json: async () => ({ prompt, workingDir: '/tmp/project', model: 'sonnet', frontendPath: '/tmp/project/web', backendPath: '/tmp/project/server' }),
-      })));
-    }
+    const stubPlan = (prompt: string) => stubPlanResult(prompt);
 
     beforeEach(() => {
       seedProject(testDb);
@@ -333,23 +357,12 @@ describe('task-tools', () => {
   });
 
   describe('get_execution_plan — 任務判軌（light / full）', () => {
-    let fetchedUrls: string[];
+    /** 組計畫時帶的軌道（原本是看 Web Server URL 的 track= 參數） */
+    const requestedTrack = () => vi.mocked(buildExecutionPlanInProcess).mock.calls[0]?.[2];
 
     function stubPlanFetch() {
-      fetchedUrls = [];
-      vi.stubGlobal('fetch', vi.fn(async (url: unknown) => {
-        fetchedUrls.push(String(url));
-        return {
-          ok: true,
-          json: async () => ({
-            prompt: 'PLAN BODY',
-            workingDir: '/tmp/project',
-            model: 'sonnet',
-            frontendPath: '/tmp/project/web',
-            backendPath: '/tmp/project/server',
-          }),
-        };
-      }));
+      vi.mocked(buildExecutionPlanInProcess).mockClear();
+      stubPlanResult('PLAN BODY');
     }
 
     function seedTypedTask(id: string, taskType: string, label = 'frontend') {
@@ -393,7 +406,7 @@ describe('task-tools', () => {
       // 不注入 flow-gate 工作流
       expect(text).not.toContain('Flow-Gated Development（強制工作流');
       // track 透傳給 Web API
-      expect(fetchedUrls[0]).toContain('track=light');
+      expect(requestedTrack()).toBe('light');
 
       // flow_required 不設、無 role gate 初始化，但 track/trackReason 持久化
       const { flowRequired, state } = flowStateOf('task-1');
@@ -418,7 +431,7 @@ describe('task-tools', () => {
       const text = (await callTool(server, 'get_execution_plan', { taskId: 'task-1' })).content[0].text;
       expect(text.startsWith('## 任務軌道：FULL（規格驅動流程）')).toBe(true);
       expect(text).toContain('Flow-Gated Development（強制工作流');
-      expect(fetchedUrls[0]).toContain('track=full');
+      expect(requestedTrack()).toBe('full');
 
       const { flowRequired, state } = flowStateOf('task-1');
       expect(flowRequired).toBe(1);
@@ -455,7 +468,7 @@ describe('task-tools', () => {
       expect(text.startsWith('## 任務軌道：FULL（規格驅動流程）')).toBe(true);
       expect(text).toContain('呼叫端指定 track="full"');
       expect(text).toContain('Flow-Gated Development（強制工作流');
-      expect(fetchedUrls[0]).toContain('track=full');
+      expect(requestedTrack()).toBe('full');
 
       const { flowRequired, state } = flowStateOf('task-1');
       expect(flowRequired).toBe(1);
@@ -470,7 +483,7 @@ describe('task-tools', () => {
       expect(text.startsWith('## 任務軌道：LIGHT（輕量修復流程）')).toBe(true);
       expect(text).toContain('呼叫端指定 track="light"');
       expect(text).not.toContain('Flow-Gated Development（強制工作流');
-      expect(fetchedUrls[0]).toContain('track=light');
+      expect(requestedTrack()).toBe('light');
 
       const { flowRequired, state } = flowStateOf('task-1');
       expect(flowRequired).toBe(0);

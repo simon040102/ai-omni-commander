@@ -15,7 +15,13 @@ vi.mock('../notify.js', () => ({
   notifyWebServer: vi.fn().mockResolvedValue(true),
 }));
 
+// 執行計畫改在 MCP process 內組（原本 HTTP 呼叫 Web Server）——測試直接替換組計畫的函式
+vi.mock('../execution-plan-inprocess.js', () => ({
+  buildExecutionPlanInProcess: vi.fn(),
+}));
+
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { buildExecutionPlanInProcess } from '../execution-plan-inprocess.js';
 import { registerFlowTools } from '../tools/flow-tools.js';
 import { registerTaskTools } from '../tools/task-tools.js';
 import { getFlowState } from '../flow-gate.js';
@@ -482,18 +488,11 @@ describe('flow-gated development', () => {
 
   // ── get_execution_plan flow initialization ────────────────
   describe('get_execution_plan flow init', () => {
-    const fetchMock = vi.fn();
+    const planMock = vi.mocked(buildExecutionPlanInProcess);
 
     beforeEach(() => {
-      vi.stubGlobal('fetch', fetchMock);
-      fetchMock.mockResolvedValue({
-        ok: true,
-        json: async () => ({ prompt: 'do the thing', workingDir: '/tmp/project', model: 'sonnet', frontendPath: null, backendPath: null }),
-      });
-    });
-
-    afterEach(() => {
-      vi.unstubAllGlobals();
+      planMock.mockReset();
+      planMock.mockResolvedValue({ prompt: 'do the thing', workingDir: '/tmp/project', model: 'sonnet', frontendPath: null, backendPath: null });
     });
 
     it('sets flow_required, specExpected and required role on success', async () => {
@@ -534,8 +533,8 @@ describe('flow-gated development', () => {
       expect(getFlowState(testDb, 'task-1')!.specExpected).toBe(true);
     });
 
-    it('does not set flow_required when the web server fetch fails (M6)', async () => {
-      fetchMock.mockRejectedValue(new Error('ECONNREFUSED'));
+    it('does not set flow_required when building the plan fails (M6)', async () => {
+      planMock.mockRejectedValue(new Error('SVN 連不上'));
       const result = await callTool(server, 'get_execution_plan', { taskId: 'task-1' });
       expect(result.isError).toBe(true);
       const row = testDb.prepare('SELECT flow_required FROM tasks WHERE id = ?').get('task-1') as { flow_required: number };

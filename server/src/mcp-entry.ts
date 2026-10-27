@@ -4,6 +4,7 @@
  * Launched by Claude Code via .mcp.json configuration.
  * Communicates via stdio (stdin/stdout) using JSON-RPC.
  */
+import './mcp/stdio-guard.js'; // 必須是第一個 import：log 改走 stderr，stdout 只留給 JSON-RPC
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { createOmniMcpServer } from './mcp/McpServer.js';
 import { getMcpDb, closeMcpDb } from './mcp/db.js';

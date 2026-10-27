@@ -11,14 +11,13 @@ import { getProject } from './db/queries/projects.js';
 import { EventBus } from './eventbus/EventBus.js';
 import { AgentManager } from './agent/AgentManager.js';
 import { SpecModeHandler } from './orchestrator/SpecModeHandler.js';
-import { ExecutionPipeline } from './orchestrator/ExecutionPipeline.js';
+import { createExecutionPlanServices, buildExecutionPlanResponse } from './orchestrator/executionPlanService.js';
 import { WorkspaceScanner } from './workspace/WorkspaceScanner.js';
 import { OmniWebSocketServer } from './websocket/WebSocketServer.js';
 import { registerHandlers } from './websocket/MessageRouter.js';
 import { AsanaMcpClient } from './asana/AsanaMcpClient.js';
 import { AsanaSyncService } from './asana/AsanaSyncService.js';
 import { TaskClassifier } from './orchestrator/TaskClassifier.js';
-import { SvnSpecService } from './svn/SvnSpecService.js';
 import { taskFunctionCode } from './utils/taskFunctionCode.js';
 import { validateResolutionNote } from './utils/specGapResolution.js';
 import { SaFlowAnalyzer } from './documents/SaFlowAnalyzer.js';
@@ -117,13 +116,8 @@ async function main() {
   const agentManager = new AgentManager(eventBus);
 
   const specHandler = new SpecModeHandler();
-  const specCacheDir = path.join(path.dirname(config.dbPath), 'spec-cache');
-  const pipeline = new ExecutionPipeline(specHandler.getDocumentParser(), specCacheDir);
-
-  // SVN Spec Service: auto-fetch spec documents from SVN
-  const svnCacheDir = path.join(path.dirname(config.dbPath), 'svn-cache');
-  const svnSpecService = new SvnSpecService(specHandler.getDocumentParser(), svnCacheDir);
-  pipeline.setSvnSpecService(svnSpecService);
+  // 組執行計畫的服務（ExecutionPipeline + SVN 規格服務）——與 MCP 同一套建法（executionPlanService）
+  const { pipeline, svnSpecService } = createExecutionPlanServices(specHandler.getDocumentParser());
 
 
   // v2: Workspace services
@@ -698,25 +692,8 @@ async function main() {
       // 任務軌道：light = 輕量修復流程（checklist 改抽 BUG 原文）；預設 full（向後相容）
       const track: 'light' | 'full' = req.query['track'] === 'light' ? 'light' : 'full';
       logger.info({ taskId, role, track }, 'Building execution plan');
-
-      let result: { prompt: string; workingDir: string; model: string };
-      if (role && (role === 'frontend' || role === 'backend')) {
-        result = await pipeline.preparePromptForRole(taskId, role, { track });
-      } else {
-        result = await pipeline.buildExecutionPlan(taskId, { track });
-      }
-
-      // Always include both paths for orchestrator
-      const task = getTask(taskId);
-      const project = task ? getProject(task.projectId) : null;
-
-      res.json({
-        prompt: result.prompt,
-        workingDir: result.workingDir,
-        model: result.model,
-        frontendPath: project?.frontendPath || null,
-        backendPath: project?.backendPath || null,
-      });
+      // MCP 的 get_execution_plan 已改為在自己的 process 組計畫；此端點保留給除錯，兩邊呼叫同一個函式
+      res.json(await buildExecutionPlanResponse(pipeline, taskId, role, track));
     } catch (err: any) {
       logger.error({ err, taskId: req.params['taskId'] }, 'Failed to build execution plan');
       res.status(500).json({ error: err.message || 'Failed to build execution plan' });

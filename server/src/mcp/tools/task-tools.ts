@@ -20,6 +20,8 @@ import { detectLabel, detectTaskType } from '../../utils/taskClassification.js';
 import { normalizeDueDate, localTodayYmd, isOverdue } from '../../utils/dueDate.js';
 import type { ImageSize } from '../../utils/imageSize.js';
 import { uploadAsanaFile, checkUploadableFile } from '../asana-upload.js';
+import { buildExecutionPlanInProcess } from '../execution-plan-inprocess.js';
+import type { ExecutionPlanResponse } from '../../orchestrator/executionPlanService.js';
 import { fetchAsanaProjectTasks } from '../asana-project-fetch.js';
 import { runSpecChangeCheck, type SpecChangeTarget } from '../spec-change.js';
 import { parseTestCommands, getRequiredUnitTestItems, findLatestUnitTestVerification, listVerificationEntries, getVerificationItems, listReportedVerificationItems, unitTestItemText, UNRELATED_TEST_FAILURE_RULE, TEST_SCOPE_NOTE_RULE } from './verification-tools.js';
@@ -344,47 +346,39 @@ export function registerTaskTools(server: McpServer): void {
           ? '自動判定：taskType=bug 且任務未綁定 SA/SD 規格文件'
           : `自動判定：taskType=${task.task_type}${taskBoundSpecDocs ? '（任務已綁定 SA/SD 規格文件）' : ''}`;
 
-      const notifyUrl = process.env['NOTIFY_URL'] || 'http://127.0.0.1:3457/api/mcp-notify';
-      const baseUrl = notifyUrl.replace('/api/mcp-notify', '');
-      const query = new URLSearchParams();
-      if (role) query.set('role', role);
-      query.set('track', effectiveTrack);
-
+      // 在 MCP 自己的 process 組計畫（與 Web 端點同一個函式 buildExecutionPlanResponse）——不再依賴 Web Server
+      let data: ExecutionPlanResponse;
       try {
-        const response = await fetch(`${baseUrl}/api/execution-plan/${taskId}?${query.toString()}`, {
-          signal: AbortSignal.timeout(30000),
+        data = await buildExecutionPlanInProcess(task.id, role, effectiveTrack);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: 'text' as const, text: `Error: 組執行計畫失敗：${msg}` }], isError: true };
+      }
+
+      const effectiveRole = role || task.label;
+
+      // ── 判軌結果持久化（merge 式 flow_state，供 compliance/resume 讀取）──
+      // Persisted only AFTER the plan is successfully fetched (same rule as flow_required).
+      const prevTrack = getFlowState(db, task.id)?.track;
+
+      let flowGateSection = '';
+      if (effectiveTrack === 'full') {
+        // ── Flow-Gated Development: initialize state machine（full 軌限定）──
+        // flow_required is set only AFTER the plan is successfully fetched (review M6).
+        // flow_state is merged, never overwritten (review C2): existing flows/gates/
+        // failure counters survive repeated get_execution_plan calls.
+        const flowRole = resolveRole(role || (task.label === 'frontend' || task.label === 'backend' ? task.label : undefined));
+        db.prepare("UPDATE tasks SET flow_required = 1, updated_at = datetime('now') WHERE id = ?").run(task.id);
+        const flowState = mutateFlowState(db, task.id, (s) => {
+          s.track = 'full';
+          s.trackReason = trackReason;
+          // upgrade-only: adding docs later upgrades to three-flow mode; never downgrade (review I-1)
+          s.specExpected = s.specExpected || hasSpecDocs;
+          getRoleState(s, flowRole).required = true;
         });
 
-        if (response.ok) {
-          const data = await response.json() as {
-            prompt: string; workingDir: string; model: string;
-            frontendPath: string | null; backendPath: string | null;
-          };
-
-          const effectiveRole = role || task.label;
-
-          // ── 判軌結果持久化（merge 式 flow_state，供 compliance/resume 讀取）──
-          // Persisted only AFTER the plan is successfully fetched (same rule as flow_required).
-          const prevTrack = getFlowState(db, task.id)?.track;
-
-          let flowGateSection = '';
-          if (effectiveTrack === 'full') {
-            // ── Flow-Gated Development: initialize state machine（full 軌限定）──
-            // flow_required is set only AFTER the plan is successfully fetched (review M6).
-            // flow_state is merged, never overwritten (review C2): existing flows/gates/
-            // failure counters survive repeated get_execution_plan calls.
-            const flowRole = resolveRole(role || (task.label === 'frontend' || task.label === 'backend' ? task.label : undefined));
-            db.prepare("UPDATE tasks SET flow_required = 1, updated_at = datetime('now') WHERE id = ?").run(task.id);
-            const flowState = mutateFlowState(db, task.id, (s) => {
-              s.track = 'full';
-              s.trackReason = trackReason;
-              // upgrade-only: adding docs later upgrades to three-flow mode; never downgrade (review I-1)
-              s.specExpected = s.specExpected || hasSpecDocs;
-              getRoleState(s, flowRole).required = true;
-            });
-
-            const rolePart = role ? `, role="${role}"` : '';
-            flowGateSection = `
+        const rolePart = role ? `, role="${role}"` : '';
+        flowGateSection = `
 ## Flow-Gated Development（強制工作流 — 依序執行，不可跳步）
 
 本任務已啟用流程圖閘門。**${GATE_B_LABEL}未通過前，update_task_status(completed) 會被拒絕。**
@@ -401,29 +395,29 @@ ${flowState.specExpected ? `2. **spec-flow**：完整讀取 SA/SD 規格文件�
 7. **${GATE_B_LABEL}**：依工具回應的比對準則做語意比對（建議由主 session 執行，不要由寫 code 的 subagent 自評），report_flow_check(gate="B", ...)。不符 → 修正後重存 code-flow（失敗上限 ${GATE_B_MAX_FAILURES} 次，達上限標 [NEEDS_HUMAN] 回報使用者）
 8. **${GATE_B_LABEL}通過後才跑測試**；測試通過才 update_task_status(taskId="${task.id}", status="completed")
 `;
-          } else {
-            // ── light 軌：不設 flow_required、不初始化 role gate ──
-            // update_task_status 的 flow 閘門只擋 flow_required=1 的任務，
-            // light 軌不啟用即不受擋；規格回對閘門（checklist + AI 回對）照常生效。
-            mutateFlowState(db, task.id, (s) => {
-              s.track = 'light';
-              s.trackReason = trackReason;
-            });
-          }
+      } else {
+        // ── light 軌：不設 flow_required、不初始化 role gate ──
+        // update_task_status 的 flow 閘門只擋 flow_required=1 的任務，
+        // light 軌不啟用即不受擋；規格回對閘門（checklist + AI 回對）照常生效。
+        mutateFlowState(db, task.id, (s) => {
+          s.track = 'light';
+          s.trackReason = trackReason;
+        });
+      }
 
-          // 留痕：判軌結果寫入 agent_outputs（Web UI 終端可見）。只在首次判軌
-          // 或軌道變更時寫，避免重複呼叫 get_execution_plan 灌噪音。
-          if (prevTrack !== effectiveTrack) {
-            logTaskOutput(db, task.id, task.project_id, `[TRACK] ${effectiveTrack} — ${trackReason}`);
-          }
+      // 留痕：判軌結果寫入 agent_outputs（Web UI 終端可見）。只在首次判軌
+      // 或軌道變更時寫，避免重複呼叫 get_execution_plan 灌噪音。
+      if (prevTrack !== effectiveTrack) {
+        logTaskOutput(db, task.id, task.project_id, `[TRACK] ${effectiveTrack} — ${trackReason}`);
+      }
 
-          // full→light 覆寫時 flow_required 不降級（保守），聲明必須如實反映閘門仍生效
-          const flowStillRequired = (db.prepare('SELECT flow_required FROM tasks WHERE id = ?').get(task.id) as { flow_required: number | null }).flow_required === 1;
-          const lightFlowLine = flowStillRequired
-            ? `⚠ 注意：此任務先前已啟用 Flow-Gated 閘門，閘門**不降級**——結案仍需通過${GATE_B_LABEL}（或使用者明確同意 skipFlowGate）。規格回對標準不變：`
-            : `本任務跳過 Flow-Gated 流程圖閘門，但規格回對標準不變：`;
-          const trackSection = effectiveTrack === 'light'
-            ? `## 任務軌道：LIGHT（輕量修復流程）
+      // full→light 覆寫時 flow_required 不降級（保守），聲明必須如實反映閘門仍生效
+      const flowStillRequired = (db.prepare('SELECT flow_required FROM tasks WHERE id = ?').get(task.id) as { flow_required: number | null }).flow_required === 1;
+      const lightFlowLine = flowStillRequired
+        ? `⚠ 注意：此任務先前已啟用 Flow-Gated 閘門，閘門**不降級**——結案仍需通過${GATE_B_LABEL}（或使用者明確同意 skipFlowGate）。規格回對標準不變：`
+        : `本任務跳過 Flow-Gated 流程圖閘門，但規格回對標準不變：`;
+      const trackSection = effectiveTrack === 'light'
+        ? `## 任務軌道：LIGHT（輕量修復流程）
 判定依據：${trackReason}
 ${lightFlowLine}
 - 檢查表來源 = 原始 BUG 內容（任務描述 + Asana 留言 + 附件截圖）
@@ -431,20 +425,20 @@ ${lightFlowLine}
 如需完整流程，重新呼叫 get_execution_plan(taskId="${task.id}", track="full")。
 
 `
-            : `## 任務軌道：FULL（規格驅動流程）
+        : `## 任務軌道：FULL（規格驅動流程）
 判定依據：${trackReason}
 
 `;
 
-          // 模型政策（給 orchestrator）：任務 preferredModel 優先；否則 light 軌小修 sonnet
-          // 即可（範圍小、閘門兜底），full 軌實作建議 opus（多檔推理與規格語意）。
-          const dispatchModel = task.preferred_model?.trim()
-            || (effectiveTrack === 'light' ? 'sonnet' : 'opus');
-          const dispatchModelReason = task.preferred_model?.trim()
-            ? '任務 preferredModel 指定'
-            : (effectiveTrack === 'light' ? 'light 軌小修，sonnet 足夠（閘門兜底）' : 'full 軌實作，建議 opus');
+      // 模型政策（給 orchestrator）：任務 preferredModel 優先；否則 light 軌小修 sonnet
+      // 即可（範圍小、閘門兜底），full 軌實作建議 opus（多檔推理與規格語意）。
+      const dispatchModel = task.preferred_model?.trim()
+        || (effectiveTrack === 'light' ? 'sonnet' : 'opus');
+      const dispatchModelReason = task.preferred_model?.trim()
+        ? '任務 preferredModel 指定'
+        : (effectiveTrack === 'light' ? 'light 軌小修，sonnet 足夠（閘門兜底）' : 'full 軌實作，建議 opus');
 
-          const header = trackSection + `**Task ID:** ${task.id}
+      const header = trackSection + `**Task ID:** ${task.id}
 **Role:** ${effectiveRole}
 **Workspace:** ${data.workingDir}
 **Frontend Path:** ${data.frontendPath || 'N/A'}
@@ -469,23 +463,23 @@ ${flowGateSection}
 ---
 
 `;
-          const fullPlan = header + data.prompt;
-          if (fullPlan.length <= EXECUTION_PLAN_INLINE_MAX) {
-            return { content: [{ type: 'text' as const, text: fullPlan }] };
-          }
-          // 大計畫：全文逐字寫檔、回應只給摘要。實測 10 月 260 次有 164 次超過回應上限——
-          // orchestrator 要分段讀，派工時還得把幾萬字整段抄進 subagent prompt（最貴的輸出 token，也可能抄漏）。
-          // 改讀原檔：內容一個字不變，subagent 讀到的就是完整原文。
-          const planDir = path.join(getDataDir(), 'plans');
-          fs.mkdirSync(planDir, { recursive: true });
-          const planFile = path.join(planDir, `${task.id}-${effectiveRole}-${effectiveTrack}.md`);
-          fs.writeFileSync(planFile, fullPlan, 'utf-8');
-          const lineCount = fullPlan.split('\n').length;
-          const readInstruction = `先用 Read 工具完整讀取 ${planFile}（共 ${lineCount} 行；Read 一次最多 2000 行，超過就用 offset 接著讀，一定要讀到第 ${lineCount} 行），裡面是本任務的完整執行計畫與規範，全部照做。`;
-          return {
-            content: [{
-              type: 'text' as const,
-              text: `## 執行計畫已寫入檔案（全文、未刪減）
+      const fullPlan = header + data.prompt;
+      if (fullPlan.length <= EXECUTION_PLAN_INLINE_MAX) {
+        return { content: [{ type: 'text' as const, text: fullPlan }] };
+      }
+      // 大計畫：全文逐字寫檔、回應只給摘要。實測 10 月 260 次有 164 次超過回應上限——
+      // orchestrator 要分段讀，派工時還得把幾萬字整段抄進 subagent prompt（最貴的輸出 token，也可能抄漏）。
+      // 改讀原檔：內容一個字不變，subagent 讀到的就是完整原文。
+      const planDir = path.join(getDataDir(), 'plans');
+      fs.mkdirSync(planDir, { recursive: true });
+      const planFile = path.join(planDir, `${task.id}-${effectiveRole}-${effectiveTrack}.md`);
+      fs.writeFileSync(planFile, fullPlan, 'utf-8');
+      const lineCount = fullPlan.split('\n').length;
+      const readInstruction = `先用 Read 工具完整讀取 ${planFile}（共 ${lineCount} 行；Read 一次最多 2000 行，超過就用 offset 接著讀，一定要讀到第 ${lineCount} 行），裡面是本任務的完整執行計畫與規範，全部照做。`;
+      return {
+        content: [{
+          type: 'text' as const,
+          text: `## 執行計畫已寫入檔案（全文、未刪減）
 計畫全文 ${fullPlan.length} 字、共 ${lineCount} 行，超過單次回應上限，完整內容在：
 ${planFile}
 
@@ -505,17 +499,8 @@ subagent 的 prompt 開頭放這句（**不要摘要或改寫計畫內容**—�
 
 ### 自己執行（沒有派工）
 ${readInstruction.replace('裡面是本任務', '再開工——裡面是本任務')}`,
-            }],
-          };
-        }
-
-        let errorDetail = '';
-        try { errorDetail = await response.text(); } catch { /* ignore */ }
-        return { content: [{ type: 'text' as const, text: `Error: Web Server returned ${response.status}. ${errorDetail}` }], isError: true };
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return { content: [{ type: 'text' as const, text: `Error: Could not connect to Web Server at ${baseUrl}. ${msg}` }], isError: true };
-      }
+        }],
+      };
     },
   );
 
