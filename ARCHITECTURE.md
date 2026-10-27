@@ -27,9 +27,10 @@ Claude Code / Claude Desktop
   └─ update_task_status() → completion gates → task complete
 ```
 
-**`get_execution_plan` 依賴 Web Server**：MCP process 不自己組 prompt，而是 HTTP 呼叫 Web Server 的
-`/api/execution-plan/:taskId`（→ `ExecutionPipeline.buildExecutionPlan`／`preparePromptForRole` → `assembleContext`
-→ `build*Section`／`buildTaskPrompt`）。Web Server 沒開，`get_execution_plan` 就會失敗。
+**`get_execution_plan` 在 MCP 自己的 process 組計畫（不依賴 Web Server）**：`mcp/execution-plan-inprocess.ts`
+動態載入 `orchestrator/executionPlanService.ts`（→ `ExecutionPipeline.buildExecutionPlan`／`preparePromptForRole` → `assembleContext`
+→ `build*Section`／`buildTaskPrompt`）。Web Server 的 `/api/execution-plan/:taskId` 呼叫同一個函式，保留給除錯。
+MCP 內的 log 一律走 stderr（`mcp/stdio-guard.ts`），stdout 只給 JSON-RPC。
 
 ### MCP Server
 | File / Dir | Purpose |
